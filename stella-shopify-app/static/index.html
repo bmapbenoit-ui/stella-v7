@@ -478,6 +478,7 @@ async function checkHealth() {
     // Memory dots
     document.getElementById('dotRedis').className = 'memory-dot ' + (d.redis ? 'on' : 'off');
     document.getElementById('dotPg').className = 'memory-dot ' + (d.database ? 'on' : 'off');
+    document.getElementById('dotQdrant').className = 'memory-dot ' + (d.qdrant ? 'on' : 'off');
   } catch(e) {
     document.getElementById('statusText').textContent = 'Hors ligne';
   }
@@ -815,3 +816,4 @@ function closeSidebar() {
 </script>
 </body>
 </html>
+
