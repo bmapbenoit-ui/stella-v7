@@ -206,16 +206,55 @@ async def fetch_stock_alerts():
     for p in low[:10]: lines.append(f"  BAS({p.get('totalInventory')}): {p['title'][:50]}")
     return "\n".join(lines)
 
+async def fetch_refunds_summary():
+    data = await shopify_graphql("""{ orders(first: 100, sortKey: CREATED_AT, reverse: true, query: "financial_status:refunded OR financial_status:partially_refunded") {
+        edges { node { name createdAt displayFinancialStatus
+            totalPriceSet { shopMoney { amount currencyCode } }
+            refunds { id createdAt totalRefundedSet { shopMoney { amount currencyCode } } refundLineItems(first:10) { edges { node { quantity lineItem { title } } } } note }
+            lineItems(first:5) { edges { node { title quantity } } }
+        } }
+    } }""")
+    orders = [e["node"] for e in data.get("data",{}).get("orders",{}).get("edges",[])]
+    if not orders: return "REMBOURSEMENTS: Aucun remboursement trouve dans les 100 dernieres commandes."
+    lines = [f"REMBOURSEMENTS SHOPIFY ({len(orders)} commandes avec remboursement):"]
+    today = datetime.now().strftime("%Y-%m-%d")
+    today_refunds = []
+    all_refunds = []
+    for o in orders:
+        for ref in o.get("refunds", []):
+            amt = ref.get("totalRefundedSet",{}).get("shopMoney",{}).get("amount","0")
+            cur = ref.get("totalRefundedSet",{}).get("shopMoney",{}).get("currencyCode","EUR")
+            ref_date = ref.get("createdAt","")[:10]
+            items = [f"{i['node']['lineItem']['title'][:30]} x{i['node']['quantity']}" for i in ref.get("refundLineItems",{}).get("edges",[])[:5]]
+            note = ref.get("note","") or ""
+            entry = f"  {o['name']} | {amt} {cur} | {ref_date} | {','.join(items) if items else 'N/A'}" + (f" | Note: {note}" if note else "")
+            all_refunds.append(entry)
+            if ref_date == today:
+                today_refunds.append(entry)
+    if today_refunds:
+        lines.append(f"\nAUJOURD'HUI ({today}) - {len(today_refunds)} remboursement(s):")
+        lines.extend(today_refunds)
+    else:
+        lines.append(f"\nAUJOURD'HUI ({today}): Aucun remboursement")
+    if all_refunds:
+        lines.append(f"\nTOUS LES REMBOURSEMENTS RECENTS ({len(all_refunds)} total):")
+        lines.extend(all_refunds[:15])
+    total = sum(float(ref.get("totalRefundedSet",{}).get("shopMoney",{}).get("amount",0)) for o in orders for ref in o.get("refunds",[]))
+    lines.append(f"\nTOTAL REMBOURSE: {total:.2f} EUR")
+    return "\n".join(lines)
+
 # Shopify intent detection
 PROD_KW = ["produit","product","catalogue","inventaire","marque","brand","vendor","combien de produit","fiche","actif"]
-ORD_KW = ["commande","order","vente","revenue","chiffre","ca ","panier","expedition","rembours"]
+ORD_KW = ["commande","order","vente","revenue","chiffre","ca ","panier","expedition"]
 STK_KW = ["stock","rupture","out of stock","alerte","reapprovision"]
+REF_KW = ["rembours","refund","refunded","annul","retour client","avoir","credit"]
 
 def detect_shopify_intent(msg):
     m = msg.lower(); intents = []
     if any(k in m for k in PROD_KW): intents.append("products")
     if any(k in m for k in ORD_KW): intents.append("orders")
     if any(k in m for k in STK_KW): intents.append("stock")
+    if any(k in m for k in REF_KW): intents.append("refunds")
     if "shopify" in m or ("donn" in m and "acc" in m): intents = list(set(intents+["products","orders"]))
     return intents
 
@@ -226,6 +265,7 @@ async def build_shopify_context(intents):
         if "products" in intents: parts.append(await fetch_products_summary())
         if "orders" in intents: parts.append(await fetch_orders_summary())
         if "stock" in intents: parts.append(await fetch_stock_alerts())
+        if "refunds" in intents: parts.append(await fetch_refunds_summary())
     except Exception as e: parts.append(f"[Erreur Shopify: {e}]")
     return "\n\n".join(parts)
 
@@ -309,7 +349,25 @@ async def chat(req: ChatReq, session: dict = Depends(verify_request)):
 
     task_ctx = recent
     if shopify_ctx:
-        task_ctx += f"\n--- SHOPIFY TEMPS REEL ---\n{shopify_ctx}\n--- FIN SHOPIFY ---\nUtilise ces donnees REELLES. Ne dis jamais que tu n'as pas acces."
+        task_ctx += f"""
+--- SHOPIFY TEMPS REEL ---
+{shopify_ctx}
+--- FIN SHOPIFY ---
+INSTRUCTIONS STRICTES:
+1. Tu as DEJA les donnees Shopify ci-dessus. Reponds DIRECTEMENT avec ces donnees.
+2. Ne dis JAMAIS "je vais verifier", "je vais acceder", "je vais proceder" — tu as DEJA les donnees.
+3. Ne dis JAMAIS que tu n'as pas acces aux donnees Shopify.
+4. Si les donnees montrent 0 resultat, dis-le clairement.
+5. Sois concis et factuel. Donne les chiffres immediatement.
+6. Tu es STELLA, l'assistante IA de Benoit pour PlaneteBeauty. Tu reponds a TOUTES les questions (business, perso, general).
+7. Ne repete JAMAIS la meme reponse. Si Benoit dit que les donnees sont fausses, dis-le honnetement."""
+    else:
+        # No Shopify data needed - general question
+        if not task_ctx:
+            task_ctx = """INSTRUCTIONS: Tu es STELLA, l'assistante IA personnelle de Benoit (PlaneteBeauty).
+Tu reponds a TOUTES les questions: business, perso, culture generale, aide a la redaction, etc.
+Sois concis, factuel et utile. Ne dis jamais "je ne peux pas" sauf si c'est vraiment impossible.
+Ne repete jamais la meme chose. Si tu ne sais pas, dis-le honnetement."""
 
     # Call Context Engine
     async with httpx.AsyncClient(timeout=120) as c:
