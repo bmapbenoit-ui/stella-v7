@@ -208,9 +208,9 @@ async def fetch_stock_alerts():
 
 async def fetch_refunds_summary():
     today = datetime.now().strftime("%Y-%m-%d")
-    # Search last 250 orders to find ANY refund created today (not just refunded-status orders)
-    data = await shopify_graphql("""{ orders(first: 250, sortKey: CREATED_AT, reverse: true) {
-        edges { node { name createdAt displayFinancialStatus
+    # Sort by UPDATED_AT to catch refunds on old orders (refund updates the order)
+    data = await shopify_graphql("""{ orders(first: 100, sortKey: UPDATED_AT, reverse: true) {
+        edges { node { name createdAt updatedAt displayFinancialStatus
             refunds { createdAt totalRefundedSet { shopMoney { amount currencyCode } }
                 refundLineItems(first:10) { edges { node { quantity lineItem { title } } } } note }
         } }
