@@ -352,3 +352,48 @@ async def list_brands():
         return {"brands": [dict(r) for r in rows]}
     except Exception as e:
         return {"error": str(e)}
+
+# === ADMIN ENDPOINTS ===
+
+class ProductBatch(BaseModel):
+    products: list  # [{shopify_id, handle, brand, title, priority, data_json}]
+
+@app.post("/admin/load-queue")
+async def load_product_queue(batch: ProductBatch):
+    """Batch load products into product_queue"""
+    db = get_db()
+    cur = db.cursor()
+    inserted = skipped = 0
+    for p in batch.products:
+        try:
+            cur.execute("""
+                INSERT INTO product_queue (shopify_id, handle, brand, title, priority, status, data_json)
+                VALUES (%s, %s, %s, %s, %s, 'PENDING', %s)
+                ON CONFLICT (shopify_id) DO NOTHING
+            """, (int(p['shopify_id']), p['handle'], p['brand'], p['title'], 
+                  p.get('priority', 50), json.dumps(p.get('data_json', {}), ensure_ascii=False)))
+            inserted += 1
+        except Exception as e:
+            skipped += 1
+    db.commit()
+    cur.close(); db.close()
+    return {"inserted": inserted, "skipped": skipped}
+
+@app.get("/admin/queue-stats")
+async def queue_stats():
+    """Get product queue statistics"""
+    db = get_db()
+    cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute("""
+        SELECT brand, COUNT(*) as total,
+               SUM(CASE WHEN status='PENDING' THEN 1 ELSE 0 END) as pending,
+               SUM(CASE WHEN status='COMPLETED' THEN 1 ELSE 0 END) as completed,
+               SUM(CASE WHEN status='ERROR' THEN 1 ELSE 0 END) as errors,
+               MAX(priority) as priority
+        FROM product_queue GROUP BY brand ORDER BY MAX(priority) DESC, COUNT(*) DESC
+    """)
+    brands = [dict(r) for r in cur.fetchall()]
+    cur.execute("SELECT COUNT(*) as total FROM product_queue")
+    total = cur.fetchone()['total']
+    cur.close(); db.close()
+    return {"total": total, "brands": brands}
