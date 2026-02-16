@@ -207,40 +207,42 @@ async def fetch_stock_alerts():
     return "\n".join(lines)
 
 async def fetch_refunds_summary():
-    data = await shopify_graphql("""{ orders(first: 100, sortKey: CREATED_AT, reverse: true, query: "financial_status:refunded OR financial_status:partially_refunded") {
+    today = datetime.now().strftime("%Y-%m-%d")
+    # Search last 250 orders to find ANY refund created today (not just refunded-status orders)
+    data = await shopify_graphql("""{ orders(first: 250, sortKey: CREATED_AT, reverse: true) {
         edges { node { name createdAt displayFinancialStatus
-            totalPriceSet { shopMoney { amount currencyCode } }
-            refunds { id createdAt totalRefundedSet { shopMoney { amount currencyCode } } refundLineItems(first:10) { edges { node { quantity lineItem { title } } } } note }
-            lineItems(first:5) { edges { node { title quantity } } }
+            refunds { createdAt totalRefundedSet { shopMoney { amount currencyCode } }
+                refundLineItems(first:10) { edges { node { quantity lineItem { title } } } } note }
         } }
     } }""")
     orders = [e["node"] for e in data.get("data",{}).get("orders",{}).get("edges",[])]
-    if not orders: return "REMBOURSEMENTS: Aucun remboursement trouve dans les 100 dernieres commandes."
-    lines = [f"REMBOURSEMENTS SHOPIFY ({len(orders)} commandes avec remboursement):"]
-    today = datetime.now().strftime("%Y-%m-%d")
+    
     today_refunds = []
-    all_refunds = []
+    recent_refunds = []
     for o in orders:
         for ref in o.get("refunds", []):
+            ref_date = ref.get("createdAt","")[:10]
             amt = ref.get("totalRefundedSet",{}).get("shopMoney",{}).get("amount","0")
             cur = ref.get("totalRefundedSet",{}).get("shopMoney",{}).get("currencyCode","EUR")
-            ref_date = ref.get("createdAt","")[:10]
-            items = [f"{i['node']['lineItem']['title'][:30]} x{i['node']['quantity']}" for i in ref.get("refundLineItems",{}).get("edges",[])[:5]]
+            items = [f"{i['node']['lineItem']['title'][:35]} x{i['node']['quantity']}" for i in ref.get("refundLineItems",{}).get("edges",[])[:5]]
             note = ref.get("note","") or ""
-            entry = f"  {o['name']} | {amt} {cur} | {ref_date} | {','.join(items) if items else 'N/A'}" + (f" | Note: {note}" if note else "")
-            all_refunds.append(entry)
+            entry = f"  {o['name']} | {amt} {cur} | {ref_date} | {', '.join(items) if items else 'N/A'}" + (f" | Note: {note}" if note else "")
             if ref_date == today:
                 today_refunds.append(entry)
+            recent_refunds.append(entry)
+    
+    lines = [f"REMBOURSEMENTS SHOPIFY:"]
+    today_total = sum(float(ref.get("totalRefundedSet",{}).get("shopMoney",{}).get("amount",0)) for o in orders for ref in o.get("refunds",[]) if ref.get("createdAt","")[:10] == today)
+    
     if today_refunds:
-        lines.append(f"\nAUJOURD'HUI ({today}) - {len(today_refunds)} remboursement(s):")
+        lines.append(f"\nAUJOURD'HUI ({today}) - {len(today_refunds)} remboursement(s) - TOTAL: {today_total:.2f} EUR:")
         lines.extend(today_refunds)
     else:
         lines.append(f"\nAUJOURD'HUI ({today}): Aucun remboursement")
-    if all_refunds:
-        lines.append(f"\nTOUS LES REMBOURSEMENTS RECENTS ({len(all_refunds)} total):")
-        lines.extend(all_refunds[:15])
-    total = sum(float(ref.get("totalRefundedSet",{}).get("shopMoney",{}).get("amount",0)) for o in orders for ref in o.get("refunds",[]))
-    lines.append(f"\nTOTAL REMBOURSE: {total:.2f} EUR")
+    
+    all_total = sum(float(ref.get("totalRefundedSet",{}).get("shopMoney",{}).get("amount",0)) for o in orders for ref in o.get("refunds",[]))
+    lines.append(f"\nDERNIERS REMBOURSEMENTS (total {len(recent_refunds)}, {all_total:.2f} EUR):")
+    lines.extend(recent_refunds[:10])
     return "\n".join(lines)
 
 # Shopify intent detection
