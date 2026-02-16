@@ -1,6 +1,8 @@
 import os, json, time
 from datetime import datetime
 from fastapi import FastAPI
+from fastapi.responses import HTMLResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
 import redis
@@ -10,6 +12,13 @@ import httpx
 from openai import OpenAI
 
 app = FastAPI(title="STELLA Context Engine")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis.railway.internal:6379")
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -448,3 +457,220 @@ async def update_product(data: dict):
     affected = cur.rowcount
     cur.close(); db.close()
     return {"updated": affected, "status": status, "product_id": product_id}
+
+
+# ═══════════════════════════════════════════════════════════════
+# STELLA CHAT — Interface web embarquée
+# Accessible à /stella — embeddable dans Shopify Admin
+# ═══════════════════════════════════════════════════════════════
+
+STELLA_CHAT_HTML = """<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>STELLA V7 — PlaneteBeauty</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Display',sans-serif;background:#F6F6F7;height:100vh;display:flex;flex-direction:column}
+.header{display:flex;align-items:center;gap:12px;padding:14px 20px;background:#fff;border-bottom:1px solid #E5E7EB}
+.logo{width:36px;height:36px;border-radius:9px;background:linear-gradient(135deg,#C8984E,#8B6914);display:flex;align-items:center;justify-content:center;color:#fff;font-size:18px;font-weight:700}
+.header h1{font-size:17px;font-weight:700;color:#1A1A1A}
+.header small{font-size:11px;color:#6B7280;display:block}
+.status{margin-left:auto;display:flex;align-items:center;gap:5px;font-size:11px;font-weight:600;color:#2E7D32;background:#E8F5E9;padding:3px 10px;border-radius:20px}
+.status .dot{width:6px;height:6px;border-radius:50%;background:#2E7D32;animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+.stats{display:flex;gap:14px;padding:8px 20px;background:#FAFAFA;border-bottom:1px solid #F3F4F6;font-size:11px;color:#6B7280}
+.stats b{color:#1A1A1A}
+.projects{display:flex;gap:6px;padding:10px 20px;border-bottom:1px solid #F3F4F6;overflow-x:auto}
+.projects button{padding:5px 12px;border-radius:20px;border:1px solid #E5E7EB;background:#fff;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap;transition:.2s}
+.projects button.active{background:#C8984E;color:#fff;border-color:#C8984E}
+.projects button:hover:not(.active){border-color:#C8984E;color:#C8984E}
+.chat{flex:1;overflow-y:auto;padding:20px;display:flex;flex-direction:column;gap:14px;background:#fff}
+.msg{display:flex;gap:10px;max-width:85%;animation:fadeIn .3s}
+@keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+.msg.user{align-self:flex-end;flex-direction:row-reverse}
+.msg.stella{align-self:flex-start}
+.avatar{width:30px;height:30px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:13px;flex-shrink:0}
+.msg.stella .avatar{background:linear-gradient(135deg,#C8984E,#8B6914);color:#fff}
+.msg.user .avatar{background:#E3E8EF;color:#374151}
+.bubble{padding:10px 14px;border-radius:12px;font-size:13.5px;line-height:1.6;white-space:pre-wrap;word-break:break-word}
+.msg.stella .bubble{background:#F3F4F6;color:#1A1A1A;border-bottom-left-radius:4px}
+.msg.user .bubble{background:#C8984E;color:#fff;border-bottom-right-radius:4px}
+.meta{font-size:10px;color:#9CA3AF;margin-top:3px}
+.msg.user .meta{text-align:right}
+.typing{display:flex;gap:4px;padding:8px 0}
+.typing span{width:6px;height:6px;border-radius:50%;background:#9CA3AF;animation:t 1.4s infinite}
+.typing span:nth-child(2){animation-delay:.2s}
+.typing span:nth-child(3){animation-delay:.4s}
+@keyframes t{0%,60%,100%{opacity:.3}30%{opacity:1}}
+.quick{display:flex;gap:8px;flex-wrap:wrap;padding:0 20px 12px;background:#fff}
+.quick button{padding:6px 12px;border-radius:8px;border:1px solid #E5E7EB;background:#FAFAFA;font-size:12px;color:#6B7280;cursor:pointer;transition:.2s}
+.quick button:hover{border-color:#C8984E;color:#C8984E;background:#FFF8F0}
+.input-area{padding:12px 20px;border-top:1px solid #E5E7EB;display:flex;gap:10px;align-items:flex-end;background:#fff}
+.input-area textarea{flex:1;border:1px solid #D1D5DB;border-radius:10px;padding:10px 14px;font-size:14px;font-family:inherit;resize:none;min-height:42px;max-height:120px;outline:none;transition:.2s}
+.input-area textarea:focus{border-color:#C8984E}
+.send{width:42px;height:42px;border-radius:10px;border:none;background:#C8984E;color:#fff;font-size:18px;cursor:pointer;flex-shrink:0;transition:.2s}
+.send:hover{background:#B8883E}
+.send:disabled{background:#D1D5DB;cursor:not-allowed}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="logo">★</div>
+  <div><h1>STELLA V7</h1><small>Cerveau permanent — PlaneteBeauty</small></div>
+  <div class="status" id="status"><span class="dot"></span> Connexion...</div>
+</div>
+
+<div class="stats" id="stats"></div>
+
+<div class="projects" id="projects">
+  <button class="active" data-p="GENERAL">💬 Général</button>
+  <button data-p="FICHES_V6">📋 Fiches V6</button>
+  <button data-p="GOOGLE_ADS">📊 Google Ads</button>
+  <button data-p="FINANCES">💰 Finances</button>
+  <button data-p="FOURNISSEURS">📦 Fournisseurs</button>
+</div>
+
+<div class="chat" id="chat"></div>
+
+<div class="quick" id="quick">
+  <button>Combien de produits enrichis ?</button>
+  <button>Prochain produit à traiter ?</button>
+  <button>Résumé de la journée</button>
+  <button>Stats par marque</button>
+  <button>Que sais-tu sur BADAR ?</button>
+</div>
+
+<div class="input-area">
+  <textarea id="input" rows="1" placeholder="Parle à STELLA..."></textarea>
+  <button class="send" id="send" onclick="sendMsg()">→</button>
+</div>
+
+<script>
+const API = window.location.origin;
+let project = "GENERAL";
+let loading = false;
+let msgCount = 0;
+
+// Init
+addMsg("stella", "Bonjour Benoit ! Je suis STELLA V7, le cerveau permanent de PlaneteBeauty.\\n\\nJe me souviens de tout : les produits, les marques, le template V6, tes décisions stratégiques...\\n\\nComment puis-je t'aider ?");
+
+// Load health + stats
+fetch(API + "/health").then(r=>r.json()).then(d=>{
+  document.getElementById("status").innerHTML = d.status === "ok" 
+    ? '<span class="dot"></span> En ligne — ' + d.llm
+    : '<span class="dot" style="background:#C62828"></span> Dégradé';
+}).catch(()=>{
+  document.getElementById("status").innerHTML = '<span class="dot" style="background:#C62828"></span> Hors ligne';
+});
+
+fetch(API + "/admin/queue-stats").then(r=>r.json()).then(d=>{
+  let p=0,c=0,e=0;
+  (d.brands||[]).forEach(b=>{p+=b.pending||0;c+=b.completed||0;e+=b.errors||0});
+  document.getElementById("stats").innerHTML = 
+    `Produits: <b>${d.total}</b> &nbsp;·&nbsp; Enrichis: <b style="color:#2E7D32">${c}</b> &nbsp;·&nbsp; En attente: <b style="color:#E8871E">${p}</b> &nbsp;·&nbsp; Erreurs: <b style="color:#C62828">${e}</b> &nbsp;·&nbsp; Marques: <b>${(d.brands||[]).length}</b>`;
+}).catch(()=>{});
+
+// Projects
+document.getElementById("projects").addEventListener("click", e => {
+  if (e.target.dataset.p) {
+    document.querySelectorAll(".projects button").forEach(b=>b.classList.remove("active"));
+    e.target.classList.add("active");
+    project = e.target.dataset.p;
+    document.getElementById("input").placeholder = "Parle à STELLA (" + project + ")...";
+  }
+});
+
+// Quick actions
+document.getElementById("quick").addEventListener("click", e => {
+  if (e.target.tagName === "BUTTON") sendMsg(e.target.textContent);
+});
+
+// Input
+const inp = document.getElementById("input");
+inp.addEventListener("keydown", e => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMsg(); }
+});
+inp.addEventListener("input", () => {
+  inp.style.height = "42px";
+  inp.style.height = Math.min(inp.scrollHeight, 120) + "px";
+});
+
+function addMsg(role, text, extra) {
+  msgCount++;
+  const chat = document.getElementById("chat");
+  const time = new Date().toLocaleTimeString("fr-FR", {hour:"2-digit",minute:"2-digit"});
+  const initials = role === "stella" ? "★" : "B";
+  
+  const div = document.createElement("div");
+  div.className = "msg " + role;
+  div.innerHTML = `<div class="avatar">${initials}</div><div><div class="bubble">${escHtml(text)}</div><div class="meta">${time}${extra||""}</div></div>`;
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
+  
+  // Hide quick actions after first message
+  if (msgCount > 1) document.getElementById("quick").style.display = "none";
+  
+  return div;
+}
+
+function escHtml(s) {
+  return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+}
+
+function showTyping() {
+  const chat = document.getElementById("chat");
+  const div = document.createElement("div");
+  div.className = "msg stella";
+  div.id = "typing";
+  div.innerHTML = '<div class="avatar">★</div><div class="bubble"><div class="typing"><span></span><span></span><span></span></div></div>';
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
+}
+
+function hideTyping() {
+  const el = document.getElementById("typing");
+  if (el) el.remove();
+}
+
+async function sendMsg(text) {
+  text = text || inp.value.trim();
+  if (!text || loading) return;
+  
+  loading = true;
+  inp.value = "";
+  inp.style.height = "42px";
+  document.getElementById("send").disabled = true;
+  
+  addMsg("user", text);
+  showTyping();
+  
+  try {
+    const resp = await fetch(API + "/chat", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({message: text, project: project})
+    });
+    const data = await resp.json();
+    hideTyping();
+    addMsg("stella", data.answer || data.error || "Pas de réponse", data.llm_used ? " · " + data.llm_used : "");
+  } catch(err) {
+    hideTyping();
+    addMsg("stella", "❌ Erreur de connexion: " + err.message);
+  }
+  
+  loading = false;
+  document.getElementById("send").disabled = false;
+  inp.focus();
+}
+</script>
+</body>
+</html>"""
+
+
+@app.get("/stella", response_class=HTMLResponse)
+async def stella_chat():
+    """STELLA V7 Chat Interface — embeddable in Shopify Admin"""
+    return STELLA_CHAT_HTML
