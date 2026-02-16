@@ -87,6 +87,27 @@ CREATE TABLE IF NOT EXISTS chat_documents (
     text_content TEXT,
     created_at TIMESTAMP DEFAULT NOW()
 );
+CREATE TABLE IF NOT EXISTS claude_memories (
+    id SERIAL PRIMARY KEY,
+    memory_type VARCHAR(50) DEFAULT 'milestone',
+    category VARCHAR(100) DEFAULT 'general',
+    importance INTEGER DEFAULT 5,
+    title TEXT NOT NULL,
+    content TEXT NOT NULL,
+    tags JSONB DEFAULT '[]',
+    created_at TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_claude_mem ON claude_memories(category, importance DESC);
+CREATE TABLE IF NOT EXISTS claude_snapshots (
+    id SERIAL PRIMARY KEY,
+    session_id VARCHAR(100),
+    snapshot_type VARCHAR(50) DEFAULT 'milestone',
+    state_data JSONB DEFAULT '{}',
+    ai_summary TEXT,
+    key_decisions JSONB DEFAULT '[]',
+    next_actions JSONB DEFAULT '[]',
+    created_at TIMESTAMP DEFAULT NOW()
+);
 """
 
 @app.on_event("startup")
@@ -185,17 +206,20 @@ async def fetch_products_summary():
 async def fetch_orders_summary():
     today = datetime.now().strftime("%Y-%m-%d")
     today_start = f"{today}T00:00:00Z"
-    # Query: today's orders
+    # Query: today's orders ONLY
     q_today = f"""{{ orders(first:50, sortKey:CREATED_AT, reverse:true, query:"created_at:>={today_start}") {{
         edges {{ node {{ name createdAt displayFinancialStatus
             totalPriceSet {{ shopMoney {{ amount currencyCode }} }}
+            currentTotalPriceSet {{ shopMoney {{ amount currencyCode }} }}
+            refunds {{ createdAt totalRefundedSet {{ shopMoney {{ amount currencyCode }} }} }}
             lineItems(first:3) {{ edges {{ node {{ title quantity }} }} }}
         }} }}
     }} }}"""
-    # Query: last 50 orders (for recent context)
-    q_recent = """{ orders(first:10, sortKey:CREATED_AT, reverse:true) {
+    # Query: last 5 orders only (just for "dernières commandes" context)
+    q_recent = """{ orders(first:5, sortKey:CREATED_AT, reverse:true) {
         edges { node { name createdAt displayFinancialStatus
             totalPriceSet { shopMoney { amount currencyCode } }
+            currentTotalPriceSet { shopMoney { amount currencyCode } }
             lineItems(first:3) { edges { node { title quantity } } }
         } }
     } }"""
@@ -207,28 +231,43 @@ async def fetch_orders_summary():
     orders_recent = [e["node"] for e in data_recent.get("data",{}).get("orders",{}).get("edges",[])]
 
     def fmt_order(o):
-        a = o.get("totalPriceSet",{}).get("shopMoney",{}).get("amount","?")
-        cur = o.get("totalPriceSet",{}).get("shopMoney",{}).get("currencyCode","EUR")
+        # Use currentTotalPriceSet (net after refunds) when available
+        price_set = o.get("currentTotalPriceSet") or o.get("totalPriceSet", {})
+        a = price_set.get("shopMoney",{}).get("amount","?")
+        cur = price_set.get("shopMoney",{}).get("currencyCode","EUR")
         items = [f"{i['node']['title'][:30]} x{i['node']['quantity']}" for i in o.get("lineItems",{}).get("edges",[])[:3]]
         return f"  {o['name']} | {a} {cur} | {o.get('displayFinancialStatus','?')} | {', '.join(items)}"
 
     lines = []
 
-    # Today's stats
+    # TODAY'S DATA (this is what matters most)
     if orders_today:
-        rev_today = sum(float(o.get("totalPriceSet",{}).get("shopMoney",{}).get("amount",0)) for o in orders_today)
-        paid_today = sum(1 for o in orders_today if o.get("displayFinancialStatus")=="PAID")
+        gross = sum(float(o.get("totalPriceSet",{}).get("shopMoney",{}).get("amount",0)) for o in orders_today)
+        # Net = use currentTotalPriceSet which accounts for refunds
+        net = sum(float((o.get("currentTotalPriceSet") or o.get("totalPriceSet",{})).get("shopMoney",{}).get("amount",0)) for o in orders_today)
+        refunds = sum(float(ref.get("totalRefundedSet",{}).get("shopMoney",{}).get("amount",0)) for o in orders_today for ref in o.get("refunds",[]))
+        paid = sum(1 for o in orders_today if o.get("displayFinancialStatus") in ("PAID","PARTIALLY_REFUNDED"))
+        refunded = sum(1 for o in orders_today if o.get("displayFinancialStatus") == "REFUNDED")
         cur = orders_today[0].get("totalPriceSet",{}).get("shopMoney",{}).get("currencyCode","EUR")
-        lines.append(f"AUJOURD'HUI ({today}): {len(orders_today)} commandes, CA: {rev_today:.2f} {cur}, Payees: {paid_today}")
-        for o in orders_today[:10]:
+        lines.append(f"=== COMMANDES AUJOURD'HUI ({today}) ===")
+        lines.append(f"Nombre: {len(orders_today)} commandes ({paid} payees, {refunded} remboursees)")
+        lines.append(f"CA brut: {gross:.2f} {cur}")
+        if refunds > 0:
+            lines.append(f"Remboursements: -{refunds:.2f} {cur}")
+            lines.append(f"CA net (apres remboursements): {net:.2f} {cur}")
+        else:
+            lines.append(f"CA net: {gross:.2f} {cur} (aucun remboursement)")
+        lines.append(f"Detail des commandes:")
+        for o in orders_today:
             lines.append(fmt_order(o))
     else:
-        lines.append(f"AUJOURD'HUI ({today}): 0 commandes, CA: 0.00 EUR")
+        lines.append(f"=== COMMANDES AUJOURD'HUI ({today}) ===")
+        lines.append("Aucune commande aujourd'hui.")
 
-    # Recent orders (last 10)
+    # LAST 5 ORDERS (for "dernières commandes" questions)
     if orders_recent:
-        lines.append(f"\nDERNIERES COMMANDES (10 plus recentes, toutes dates):")
-        for o in orders_recent[:10]:
+        lines.append(f"\n=== 5 DERNIERES COMMANDES (toutes dates) ===")
+        for o in orders_recent[:5]:
             date = o.get("createdAt","")[:10]
             lines.append(f"  [{date}] " + fmt_order(o).strip())
 
@@ -524,6 +563,155 @@ async def memory_stats(session: dict = Depends(verify_request)):
             except: pass
             stats["postgres"] = {"connected": False}
     return stats
+
+# ══════════════════════ API: CLAUDE MEMORY (replaces stella-memory-v2) ══════════════════════
+CLAUDE_MEM_KEY = "stella-mem-2026-planetebeauty"
+
+def verify_claude_key(request):
+    key = request.headers.get("X-API-Key", "")
+    if key != CLAUDE_MEM_KEY:
+        raise HTTPException(401, "Invalid API key")
+    return True
+
+class MemoryCreate(BaseModel):
+    memory_type: str = "milestone"
+    category: str = "general"
+    importance: int = 5
+    title: str
+    content: str
+    tags: list = []
+
+class MemorySearch(BaseModel):
+    query: str
+    category: str = ""
+    limit: int = 10
+
+class SnapshotCreate(BaseModel):
+    session_id: str = ""
+    snapshot_type: str = "milestone"
+    state_data: dict = {}
+    ai_summary: str = ""
+    key_decisions: list = []
+    next_actions: list = []
+
+@app.get("/context/summary")
+async def context_summary(request: Request):
+    verify_claude_key(request)
+    db = get_db()
+    if not db: return {"status": "error", "message": "DB unavailable"}
+    try:
+        cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        # Last 20 memories by importance
+        cur.execute("SELECT id,memory_type,category,importance,title,content,tags,created_at FROM claude_memories ORDER BY importance DESC, created_at DESC LIMIT 20")
+        memories = cur.fetchall()
+        # Latest snapshot
+        cur.execute("SELECT * FROM claude_snapshots ORDER BY created_at DESC LIMIT 1")
+        snap = cur.fetchone()
+        # Chat stats
+        cur.execute("SELECT COUNT(*) as cnt FROM chat_messages")
+        msg_count = cur.fetchone()["cnt"]
+        cur.execute("SELECT COUNT(*) as cnt FROM chat_conversations WHERE is_archived=FALSE")
+        conv_count = cur.fetchone()["cnt"]
+        cur.close(); db.close()
+        return {
+            "status": "ok",
+            "memories": [{**m, "created_at": m["created_at"].isoformat() if m["created_at"] else None} for m in memories],
+            "latest_snapshot": {**snap, "created_at": snap["created_at"].isoformat() if snap["created_at"] else None} if snap else None,
+            "stats": {"messages": msg_count, "conversations": conv_count, "memories": len(memories)}
+        }
+    except Exception as e:
+        try: db.close()
+        except: pass
+        return {"status": "error", "message": str(e)}
+
+@app.get("/memory")
+async def list_memories(request: Request):
+    verify_claude_key(request)
+    db = get_db()
+    if not db: return {"memories": []}
+    try:
+        cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("SELECT * FROM claude_memories ORDER BY created_at DESC LIMIT 50")
+        rows = cur.fetchall(); cur.close(); db.close()
+        return {"memories": [{**r, "created_at": r["created_at"].isoformat() if r["created_at"] else None} for r in rows]}
+    except Exception as e:
+        try: db.close()
+        except: pass
+        return {"memories": [], "error": str(e)}
+
+@app.post("/memory")
+async def create_memory(mem: MemoryCreate, request: Request):
+    verify_claude_key(request)
+    db = get_db()
+    if not db: return {"status": "error", "message": "DB unavailable"}
+    try:
+        cur = db.cursor()
+        cur.execute("INSERT INTO claude_memories (memory_type,category,importance,title,content,tags) VALUES (%s,%s,%s,%s,%s,%s) RETURNING id",
+            (mem.memory_type, mem.category, mem.importance, mem.title, mem.content, json.dumps(mem.tags)))
+        mid = cur.fetchone()[0]
+        db.commit(); cur.close(); db.close()
+        # Also vectorize important memories to Qdrant
+        if mem.importance >= 7:
+            await save_to_qdrant(f"[{mem.category}] {mem.title}: {mem.content}", source=f"claude_memory_{mid}")
+        return {"status": "ok", "id": mid}
+    except Exception as e:
+        try: db.close()
+        except: pass
+        return {"status": "error", "message": str(e)}
+
+@app.post("/memory/search")
+async def search_memories(search: MemorySearch, request: Request):
+    verify_claude_key(request)
+    db = get_db()
+    if not db: return {"results": []}
+    try:
+        cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        q = f"%{search.query}%"
+        if search.category:
+            cur.execute("SELECT * FROM claude_memories WHERE category=%s AND (title ILIKE %s OR content ILIKE %s) ORDER BY importance DESC LIMIT %s",
+                (search.category, q, q, search.limit))
+        else:
+            cur.execute("SELECT * FROM claude_memories WHERE title ILIKE %s OR content ILIKE %s ORDER BY importance DESC LIMIT %s",
+                (q, q, search.limit))
+        rows = cur.fetchall(); cur.close(); db.close()
+        return {"results": [{**r, "created_at": r["created_at"].isoformat() if r["created_at"] else None} for r in rows]}
+    except Exception as e:
+        try: db.close()
+        except: pass
+        return {"results": [], "error": str(e)}
+
+@app.post("/session/snapshot")
+async def create_snapshot(snap: SnapshotCreate, request: Request):
+    verify_claude_key(request)
+    db = get_db()
+    if not db: return {"status": "error"}
+    try:
+        cur = db.cursor()
+        cur.execute("INSERT INTO claude_snapshots (session_id,snapshot_type,state_data,ai_summary,key_decisions,next_actions) VALUES (%s,%s,%s,%s,%s,%s) RETURNING id",
+            (snap.session_id, snap.snapshot_type, json.dumps(snap.state_data), snap.ai_summary, json.dumps(snap.key_decisions), json.dumps(snap.next_actions)))
+        sid = cur.fetchone()[0]
+        db.commit(); cur.close(); db.close()
+        return {"status": "ok", "id": sid}
+    except Exception as e:
+        try: db.close()
+        except: pass
+        return {"status": "error", "message": str(e)}
+
+@app.get("/session/snapshot/latest")
+async def latest_snapshot(request: Request):
+    verify_claude_key(request)
+    db = get_db()
+    if not db: return {"snapshot": None}
+    try:
+        cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("SELECT * FROM claude_snapshots ORDER BY created_at DESC LIMIT 1")
+        snap = cur.fetchone(); cur.close(); db.close()
+        if snap: snap["created_at"] = snap["created_at"].isoformat() if snap["created_at"] else None
+        return {"snapshot": snap}
+    except Exception as e:
+        try: db.close()
+        except: pass
+        return {"snapshot": None, "error": str(e)}
 
 # ══════════════════════ HEALTH ══════════════════════
 APP_VERSION = "2.1.0-date-filter"
