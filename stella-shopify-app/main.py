@@ -1,439 +1,269 @@
 """
-STELLA V7 — Shopify Embedded App
-FULL VERSION: Chat persistence, file upload, Shopify API, 3-layer memory
+STELLA V7 — Shopify Embedded App (Full Version)
+- Persistent chat memory (PostgreSQL) across ALL layers
+- File upload & document analysis  
+- Conversation management
+- Real-time Shopify data
+- Auto-vectorization to Qdrant long-term memory
 """
 import os, time, hmac, hashlib, base64, json, logging, uuid, re
-from datetime import datetime, timedelta
-from typing import Optional, Dict, List
+from datetime import datetime
+from typing import Optional, List
 import httpx
 from fastapi import FastAPI, Request, HTTPException, Depends, UploadFile, File, Form
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
-import psycopg2
-import psycopg2.extras
+import psycopg2, psycopg2.extras
+import redis as redis_lib
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("stella-shopify")
 
-# ══════════════════════════════════════════════
-# CONFIG
-# ══════════════════════════════════════════════
+# ══════════════════════ CONFIG ══════════════════════
 SHOPIFY_API_KEY = os.getenv("SHOPIFY_API_KEY", "")
 SHOPIFY_API_SECRET = os.getenv("SHOPIFY_API_SECRET", "")
 SHOPIFY_SHOP = os.getenv("SHOPIFY_SHOP", "planetemode.myshopify.com")
 SHOPIFY_ACCESS_TOKEN = os.getenv("SHOPIFY_ACCESS_TOKEN", "")
 SHOPIFY_STORE_DOMAIN = os.getenv("SHOPIFY_STORE_DOMAIN", SHOPIFY_SHOP)
 CONTEXT_ENGINE_URL = os.getenv("CONTEXT_ENGINE_URL", "https://context-engine-production-e525.up.railway.app")
-DATABASE_URL = os.getenv("DATABASE_URL", "")
-EMBEDDING_URL = os.getenv("EMBEDDING_URL", "https://embedding-service-production-7f52.up.railway.app")
 DEV_MODE = os.getenv("DEV_MODE", "false").lower() == "true"
 PORT = int(os.getenv("PORT", "8080"))
-MAX_UPLOAD_MB = 10
-
+REDIS_URL = os.getenv("REDIS_URL", "")
+DATABASE_URL = os.getenv("DATABASE_URL", "")
 SHOPIFY_API_VERSION = "2026-01"
 SHOPIFY_GRAPHQL_URL = f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/{SHOPIFY_API_VERSION}/graphql.json"
+MAX_FILE_SIZE = 10 * 1024 * 1024
 
 app = FastAPI(title="STELLA Shopify App")
 
-# ══════════════════════════════════════════════
-# DATABASE
-# ══════════════════════════════════════════════
+# ══════════════════════ DB & REDIS ══════════════════════
+r_client = None
+def get_redis():
+    global r_client
+    if r_client is None and REDIS_URL:
+        try:
+            r_client = redis_lib.from_url(REDIS_URL, decode_responses=True)
+            r_client.ping()
+        except Exception as e:
+            logger.warning(f"Redis: {e}")
+            r_client = None
+    return r_client
+
 def get_db():
-    """Get a database connection. Try direct DATABASE_URL first, fallback to Context Engine's DB."""
-    db_url = DATABASE_URL
-    if not db_url:
-        # Use the same PostgreSQL as Context Engine
-        db_url = "postgresql://stella:35f212b369c668b7101c578f2e28aeed@postgresql.railway.internal/stella_v7"
-    return psycopg2.connect(db_url)
+    if not DATABASE_URL: return None
+    try: return psycopg2.connect(DATABASE_URL)
+    except Exception as e:
+        logger.error(f"DB: {e}")
+        return None
 
-MIGRATION_SQL = """
--- Conversations table
-CREATE TABLE IF NOT EXISTS conversations (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    title VARCHAR(200) NOT NULL DEFAULT 'Nouvelle conversation',
-    project VARCHAR(50) NOT NULL DEFAULT 'GENERAL',
-    user_id VARCHAR(100) DEFAULT 'benoit',
-    message_count INTEGER DEFAULT 0,
-    is_archived BOOLEAN DEFAULT FALSE,
+# ══════════════════════ MIGRATION ══════════════════════
+CHAT_MIGRATION = """
+CREATE TABLE IF NOT EXISTS chat_conversations (
+    id VARCHAR(36) PRIMARY KEY,
+    title VARCHAR(255) DEFAULT 'Nouvelle conversation',
+    project VARCHAR(50) DEFAULT 'GENERAL',
     created_at TIMESTAMP DEFAULT NOW(),
-    updated_at TIMESTAMP DEFAULT NOW()
+    updated_at TIMESTAMP DEFAULT NOW(),
+    message_count INTEGER DEFAULT 0,
+    is_archived BOOLEAN DEFAULT FALSE
 );
-CREATE INDEX IF NOT EXISTS idx_conv_user ON conversations(user_id, updated_at DESC);
-CREATE INDEX IF NOT EXISTS idx_conv_active ON conversations(is_archived, updated_at DESC);
-
--- Chat messages table - PERMANENT STORAGE
+CREATE INDEX IF NOT EXISTS idx_conv_updated ON chat_conversations(updated_at DESC);
 CREATE TABLE IF NOT EXISTS chat_messages (
     id SERIAL PRIMARY KEY,
-    conversation_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-    role VARCHAR(20) NOT NULL,  -- 'user', 'assistant', 'system'
+    conversation_id VARCHAR(36) NOT NULL REFERENCES chat_conversations(id) ON DELETE CASCADE,
+    role VARCHAR(20) NOT NULL,
     content TEXT NOT NULL,
     metadata JSONB DEFAULT '{}',
-    shopify_data BOOLEAN DEFAULT FALSE,
-    file_id INTEGER,
     created_at TIMESTAMP DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS idx_messages_conv ON chat_messages(conversation_id, created_at);
-CREATE INDEX IF NOT EXISTS idx_messages_search ON chat_messages USING gin(to_tsvector('french', content));
-
--- Uploaded files table
-CREATE TABLE IF NOT EXISTS uploaded_files (
+CREATE INDEX IF NOT EXISTS idx_msg_conv ON chat_messages(conversation_id, created_at);
+CREATE TABLE IF NOT EXISTS chat_documents (
     id SERIAL PRIMARY KEY,
-    conversation_id UUID REFERENCES conversations(id) ON DELETE SET NULL,
-    filename VARCHAR(500) NOT NULL,
-    original_name VARCHAR(500) NOT NULL,
-    mime_type VARCHAR(100),
+    conversation_id VARCHAR(36) REFERENCES chat_conversations(id) ON DELETE SET NULL,
+    filename VARCHAR(255) NOT NULL,
+    file_type VARCHAR(50),
     file_size INTEGER,
-    file_data BYTEA,
     text_content TEXT,
-    project VARCHAR(50) DEFAULT 'GENERAL',
-    user_id VARCHAR(100) DEFAULT 'benoit',
     created_at TIMESTAMP DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_files_conv ON uploaded_files(conversation_id);
-
--- Memory index tracking (what's been indexed to Qdrant)
-CREATE TABLE IF NOT EXISTS memory_index_log (
-    id SERIAL PRIMARY KEY,
-    conversation_id UUID,
-    message_id INTEGER,
-    collection VARCHAR(50) DEFAULT 'stella_conversations',
-    indexed_at TIMESTAMP DEFAULT NOW()
 );
 """
 
 @app.on_event("startup")
 async def startup():
-    try:
-        db = get_db()
-        cur = db.cursor()
-        cur.execute(MIGRATION_SQL)
-        db.commit()
-        cur.close()
-        db.close()
-        logger.info("Database migration OK — conversations, chat_messages, uploaded_files ready")
-    except Exception as e:
-        logger.error(f"Database migration error: {e}")
-        logger.info("Will retry DB connection on first request")
-
-
-# ══════════════════════════════════════════════
-# SHOPIFY GRAPHQL
-# ══════════════════════════════════════════════
-async def shopify_graphql(query: str, variables: dict = None) -> dict:
-    if not SHOPIFY_ACCESS_TOKEN:
-        return {"error": "SHOPIFY_ACCESS_TOKEN not configured"}
-    payload = {"query": query}
-    if variables:
-        payload["variables"] = variables
-    async with httpx.AsyncClient(timeout=30.0) as c:
+    db = get_db()
+    if db:
         try:
-            r = await c.post(SHOPIFY_GRAPHQL_URL, json=payload, headers={
-                "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
-                "Content-Type": "application/json"
-            })
-            return r.json()
+            cur = db.cursor(); cur.execute(CHAT_MIGRATION); db.commit(); cur.close(); db.close()
+            logger.info("Chat tables ready")
         except Exception as e:
-            return {"error": str(e)}
+            logger.error(f"Migration: {e}")
+            try: db.close()
+            except: pass
+    get_redis()
 
+# ══════════════════════ 3-LAYER MEMORY ══════════════════════
+def save_to_redis(conv_id, role, content):
+    rc = get_redis()
+    if not rc: return
+    try:
+        key = f"stella:chat:{conv_id}"
+        rc.rpush(key, json.dumps({"role": role, "content": content[:1000], "ts": datetime.now().isoformat()}))
+        rc.ltrim(key, -50, -1)
+        rc.expire(key, 86400 * 365)  # 1 year TTL
+    except Exception as e: logger.warning(f"Redis save: {e}")
 
-async def fetch_products_summary() -> str:
-    data = await shopify_graphql("""
-    { all: products(first: 250) { edges { node { title status vendor productType totalInventory } } } }
-    """)
-    products = [e["node"] for e in data.get("data", {}).get("all", {}).get("edges", [])]
-    active = sum(1 for p in products if p["status"] == "ACTIVE")
-    draft = sum(1 for p in products if p["status"] == "DRAFT")
-    archived = sum(1 for p in products if p["status"] == "ARCHIVED")
+def save_to_postgres(conv_id, role, content, metadata=None):
+    db = get_db()
+    if not db: return
+    try:
+        cur = db.cursor()
+        cur.execute("INSERT INTO chat_messages (conversation_id,role,content,metadata) VALUES (%s,%s,%s,%s)", (conv_id, role, content, json.dumps(metadata or {})))
+        cur.execute("UPDATE chat_conversations SET updated_at=NOW(), message_count=message_count+1 WHERE id=%s", (conv_id,))
+        db.commit(); cur.close(); db.close()
+    except Exception as e:
+        logger.error(f"PG save: {e}")
+        try: db.close()
+        except: pass
+
+async def save_to_qdrant(content, source="chat"):
+    try:
+        async with httpx.AsyncClient(timeout=15) as c:
+            await c.post(f"{CONTEXT_ENGINE_URL}/learn", json={"text": content, "project": "CHAT_HISTORY", "collection": "knowledge", "source": source})
+    except Exception as e: logger.warning(f"Qdrant save: {e}")
+
+def should_vectorize(msg, answer):
+    combined = (msg + " " + answer).lower()
+    kws = ["décid","stratégi","budget","prix","stock","fournisseur","objectif","plan","lancement","problème","solution","important","urgent","commande","client","campagne","google ads","revenue","chiffre","investir","priorit","roadmap","contrat","partenaire","concurrent","résultat","mettre en place","créer","développer","modifier","supprimer"]
+    return any(k in combined for k in kws) or len(msg) > 200 or len(answer) > 500
+
+async def save_all_layers(conv_id, role, content, metadata=None):
+    save_to_redis(conv_id, role, content)
+    save_to_postgres(conv_id, role, content, metadata)
+
+# ══════════════════════ CONVERSATIONS ══════════════════════
+def create_conversation(title="Nouvelle conversation", project="GENERAL"):
+    conv_id = str(uuid.uuid4())
+    db = get_db()
+    if db:
+        try:
+            cur = db.cursor()
+            cur.execute("INSERT INTO chat_conversations (id,title,project) VALUES (%s,%s,%s)", (conv_id, title[:255], project))
+            db.commit(); cur.close(); db.close()
+        except Exception as e:
+            logger.error(f"Create conv: {e}")
+            try: db.close()
+            except: pass
+    return conv_id
+
+# ══════════════════════ SHOPIFY API ══════════════════════
+async def shopify_graphql(query, variables=None):
+    if not SHOPIFY_ACCESS_TOKEN: return {"error": "No token"}
+    payload = {"query": query}
+    if variables: payload["variables"] = variables
+    async with httpx.AsyncClient(timeout=30) as c:
+        try:
+            r = await c.post(SHOPIFY_GRAPHQL_URL, json=payload, headers={"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"})
+            return r.json()
+        except Exception as e: return {"error": str(e)}
+
+async def fetch_products_summary():
+    data = await shopify_graphql("{ all: products(first:250) { edges { node { title status vendor totalInventory } } } }")
+    products = [e["node"] for e in data.get("data",{}).get("all",{}).get("edges",[])]
+    active = sum(1 for p in products if p["status"]=="ACTIVE")
     brands = {}
     for p in products:
-        b = p.get("vendor", "?")
-        brands[b] = brands.get(b, 0) + 1
-    top = sorted(brands.items(), key=lambda x: -x[1])[:10]
-    low = [p for p in products if p.get("totalInventory") is not None and 0 < p["totalInventory"] <= 5]
-    oos = [p for p in products if p.get("totalInventory") is not None and p["totalInventory"] <= 0]
-    lines = [
-        f"SHOPIFY TEMPS REEL ({SHOPIFY_STORE_DOMAIN}):",
-        f"Produits: {len(products)} total (Actifs: {active}, Brouillons: {draft}, Archives: {archived})",
-        f"Marques ({len(brands)}): {', '.join(f'{b}({c})' for b,c in top)}",
-    ]
-    if oos:
-        oos_names = ", ".join(p["title"][:40] for p in oos[:5])
-        lines.append(f"RUPTURES ({len(oos)}): {oos_names}")
-    if low:
-        low_items = []
-        for p in low[:5]:
-            inv = p.get("totalInventory", "?")
-            low_items.append(f"{p['title'][:35]}({inv})")
-        lines.append(f"STOCK BAS ({len(low)}): {', '.join(low_items)}")
+        b = p.get("vendor","?"); brands[b] = brands.get(b,0)+1
+    top = sorted(brands.items(), key=lambda x:-x[1])[:10]
+    low = [p for p in products if p.get("totalInventory") is not None and 0<p["totalInventory"]<=5]
+    out = [p for p in products if p.get("totalInventory") is not None and p["totalInventory"]<=0]
+    lines = [f"SHOPIFY TEMPS REEL: {len(products)} produits (Actifs:{active})", f"Marques({len(brands)}): {', '.join(f'{b}({c})' for b,c in top)}"]
+    if out: lines.append(f"RUPTURE({len(out)}): {', '.join(p['title'][:35] for p in out[:5])}")
+    if low: lines.append(f"STOCK BAS({len(low)}): {', '.join(p['title'][:35] for p in low[:5])}")
     return "\n".join(lines)
 
-
-async def fetch_orders_summary() -> str:
-    data = await shopify_graphql("""
-    { orders(first: 50, sortKey: CREATED_AT, reverse: true) {
-        edges { node { name createdAt displayFinancialStatus displayFulfillmentStatus
-            totalPriceSet { shopMoney { amount currencyCode } }
-            lineItems(first: 5) { edges { node { title quantity } } }
-        } }
-    } }
-    """)
-    orders = [e["node"] for e in data.get("data", {}).get("orders", {}).get("edges", [])]
-    if not orders:
-        return "COMMANDES: Aucune commande recente."
-    revenue = sum(float(o.get("totalPriceSet", {}).get("shopMoney", {}).get("amount", 0)) for o in orders)
-    cur = orders[0].get("totalPriceSet", {}).get("shopMoney", {}).get("currencyCode", "EUR")
-    paid = sum(1 for o in orders if o.get("displayFinancialStatus") == "PAID")
-    lines = [f"COMMANDES (50 dern.): CA={revenue:.2f}{cur}, {paid} payees/{len(orders)} total"]
+async def fetch_orders_summary():
+    data = await shopify_graphql("""{ orders(first:50,sortKey:CREATED_AT,reverse:true) { edges { node { name createdAt displayFinancialStatus totalPriceSet { shopMoney { amount currencyCode } } lineItems(first:3) { edges { node { title quantity } } } } } } }""")
+    orders = [e["node"] for e in data.get("data",{}).get("orders",{}).get("edges",[])]
+    if not orders: return "Aucune commande recente."
+    rev = sum(float(o.get("totalPriceSet",{}).get("shopMoney",{}).get("amount",0)) for o in orders)
+    cur = orders[0].get("totalPriceSet",{}).get("shopMoney",{}).get("currencyCode","EUR")
+    paid = sum(1 for o in orders if o.get("displayFinancialStatus")=="PAID")
+    lines = [f"COMMANDES(50 dern): {len(orders)} cmd, CA:{rev:.2f}{cur}, Payees:{paid}"]
     for o in orders[:5]:
-        amt = o.get("totalPriceSet", {}).get("shopMoney", {}).get("amount", "?")
-        items = [f"{i['node']['title'][:25]}x{i['node']['quantity']}" for i in o.get("lineItems", {}).get("edges", [])[:3]]
-        lines.append(f"  {o['name']}|{amt}{cur}|{o.get('displayFinancialStatus','?')}|{','.join(items)}")
+        a = o.get("totalPriceSet",{}).get("shopMoney",{}).get("amount","?")
+        items = [f"{i['node']['title'][:25]}x{i['node']['quantity']}" for i in o.get("lineItems",{}).get("edges",[])[:3]]
+        lines.append(f"  {o['name']}|{a}{cur}|{o.get('displayFinancialStatus','?')}|{','.join(items)}")
     return "\n".join(lines)
 
-
-async def fetch_stock_alerts() -> str:
-    data = await shopify_graphql("""
-    { products(first: 250) { edges { node { title vendor status totalInventory } } } }
-    """)
-    products = [e["node"] for e in data.get("data", {}).get("products", {}).get("edges", [])]
-    critical = [p for p in products if p.get("status") == "ACTIVE" and p.get("totalInventory") is not None and p["totalInventory"] <= 0]
-    low = [p for p in products if p.get("status") == "ACTIVE" and p.get("totalInventory") is not None and 0 < p["totalInventory"] <= 5]
-    lines = [f"ALERTES STOCK: {len(critical)} ruptures, {len(low)} bas"]
-    for p in critical[:8]: lines.append(f"  RUPTURE: {p['title'][:50]} ({p.get('vendor','?')})")
-    for p in low[:8]:
-        inv = p.get("totalInventory", "?")
-        lines.append(f"  BAS({inv}): {p['title'][:50]}")
+async def fetch_stock_alerts():
+    data = await shopify_graphql("{ products(first:250) { edges { node { title vendor status totalInventory } } } }")
+    products = [e["node"] for e in data.get("data",{}).get("products",{}).get("edges",[])]
+    crit = [p for p in products if p.get("status")=="ACTIVE" and p.get("totalInventory") is not None and p["totalInventory"]<=0]
+    low = [p for p in products if p.get("status")=="ACTIVE" and p.get("totalInventory") is not None and 0<p["totalInventory"]<=5]
+    lines = [f"ALERTES STOCK: {len(crit)} ruptures, {len(low)} bas"]
+    for p in crit[:10]: lines.append(f"  RUPTURE: {p['title'][:50]} ({p.get('vendor','?')})")
+    for p in low[:10]: lines.append(f"  BAS({p.get('totalInventory')}): {p['title'][:50]}")
     return "\n".join(lines)
 
+# Shopify intent detection
+PROD_KW = ["produit","product","catalogue","inventaire","marque","brand","vendor","combien de produit","fiche","actif"]
+ORD_KW = ["commande","order","vente","revenue","chiffre","ca ","panier","expedition","rembours"]
+STK_KW = ["stock","rupture","out of stock","alerte","reapprovision"]
 
-# ══════════════════════════════════════════════
-# SMART CONTEXT DETECTION
-# ══════════════════════════════════════════════
-PRODUCT_KW = ["produit", "product", "catalogue", "marque", "brand", "vendor", "combien de produit", "fiche", "actif"]
-ORDER_KW = ["commande", "order", "vente", "revenue", "chiffre", "ca ", "c.a.", "panier", "expedition", "rembours"]
-STOCK_KW = ["stock", "inventaire", "rupture", "out of stock", "alerte", "reapprovision", "bas"]
-
-def detect_shopify_intent(msg: str) -> List[str]:
-    m = msg.lower()
-    intents = []
-    if any(k in m for k in PRODUCT_KW): intents.append("products")
-    if any(k in m for k in ORDER_KW): intents.append("orders")
-    if any(k in m for k in STOCK_KW): intents.append("stock")
-    if "shopify" in m or ("donn" in m and "acc" in m):
-        intents = list(set(intents + ["products", "orders"]))
+def detect_shopify_intent(msg):
+    m = msg.lower(); intents = []
+    if any(k in m for k in PROD_KW): intents.append("products")
+    if any(k in m for k in ORD_KW): intents.append("orders")
+    if any(k in m for k in STK_KW): intents.append("stock")
+    if "shopify" in m or ("donn" in m and "acc" in m): intents = list(set(intents+["products","orders"]))
     return intents
 
-async def build_shopify_context(intents: List[str]) -> str:
-    if not SHOPIFY_ACCESS_TOKEN or not intents:
-        return ""
+async def build_shopify_context(intents):
+    if not SHOPIFY_ACCESS_TOKEN or not intents: return ""
     parts = []
     try:
         if "products" in intents: parts.append(await fetch_products_summary())
         if "orders" in intents: parts.append(await fetch_orders_summary())
         if "stock" in intents: parts.append(await fetch_stock_alerts())
-    except Exception as e:
-        parts.append(f"[Erreur Shopify: {e}]")
+    except Exception as e: parts.append(f"[Erreur Shopify: {e}]")
     return "\n\n".join(parts)
 
+# ══════════════════════ FILE PROCESSING ══════════════════════
+def extract_text(content, filename):
+    ext = filename.rsplit(".",1)[-1].lower() if "." in filename else ""
+    if ext in ("txt","md","csv","json","html","xml","log"):
+        try: return content.decode("utf-8")
+        except: return content.decode("latin-1", errors="replace")
+    if ext == "pdf":
+        return f"[Document PDF: {filename}, {len(content)//1024}KB. Décrivez ce que contient le document pour que je puisse vous aider.]"
+    if ext in ("png","jpg","jpeg","webp","gif"):
+        return f"[Image: {filename}, {len(content)//1024}KB. Décrivez ce que vous souhaitez que j'en fasse.]"
+    if ext in ("xlsx","xls","docx","doc","pptx"):
+        return f"[Document {ext.upper()}: {filename}, {len(content)//1024}KB. Posez des questions spécifiques sur son contenu.]"
+    return f"[Fichier: {filename}, {len(content)//1024}KB]"
 
-# ══════════════════════════════════════════════
-# CONVERSATION HISTORY (MEMORY LAYER 1: PostgreSQL)
-# ══════════════════════════════════════════════
-def get_or_create_conversation(conversation_id: str = None, project: str = "GENERAL", title: str = None) -> tuple:
-    """Returns (conversation_id, is_new)"""
-    db = get_db()
-    cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    
-    if conversation_id:
-        cur.execute("SELECT id FROM conversations WHERE id = %s AND is_archived = FALSE", (conversation_id,))
-        if cur.fetchone():
-            cur.close(); db.close()
-            return conversation_id, False
-    
-    # Create new conversation
-    new_id = str(uuid.uuid4())
-    cur.execute(
-        "INSERT INTO conversations (id, title, project) VALUES (%s, %s, %s) RETURNING id",
-        (new_id, title or "Nouvelle conversation", project)
-    )
-    db.commit()
-    cur.close(); db.close()
-    return new_id, True
-
-
-def save_message(conversation_id: str, role: str, content: str, metadata: dict = None, shopify_data: bool = False, file_id: int = None) -> int:
-    """Save message to PostgreSQL. Returns message ID."""
-    db = get_db()
-    cur = db.cursor()
-    cur.execute(
-        """INSERT INTO chat_messages (conversation_id, role, content, metadata, shopify_data, file_id)
-           VALUES (%s, %s, %s, %s, %s, %s) RETURNING id""",
-        (conversation_id, role, content, json.dumps(metadata or {}), shopify_data, file_id)
-    )
-    msg_id = cur.fetchone()[0]
-    
-    # Update conversation
-    title_sql = ""
-    if role == "user":
-        # Auto-title from first user message
-        cur.execute("SELECT message_count FROM conversations WHERE id = %s", (conversation_id,))
-        row = cur.fetchone()
-        if row and row[0] == 0:
-            title = content[:80].replace('\n', ' ').strip()
-            cur.execute("UPDATE conversations SET title = %s WHERE id = %s", (title, conversation_id))
-    
-    cur.execute(
-        "UPDATE conversations SET message_count = message_count + 1, updated_at = NOW() WHERE id = %s",
-        (conversation_id,)
-    )
-    db.commit()
-    cur.close(); db.close()
-    return msg_id
-
-
-def get_conversation_messages(conversation_id: str, limit: int = 200) -> List[dict]:
-    """Get all messages for a conversation."""
-    db = get_db()
-    cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cur.execute(
-        "SELECT id, role, content, metadata, shopify_data, file_id, created_at FROM chat_messages WHERE conversation_id = %s ORDER BY created_at LIMIT %s",
-        (conversation_id, limit)
-    )
-    rows = [dict(r) for r in cur.fetchall()]
-    cur.close(); db.close()
-    return rows
-
-
-def get_recent_context(conversation_id: str, n: int = 6) -> str:
-    """Get last N messages as context for the LLM."""
-    db = get_db()
-    cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cur.execute(
-        "SELECT role, content FROM chat_messages WHERE conversation_id = %s ORDER BY created_at DESC LIMIT %s",
-        (conversation_id, n)
-    )
-    msgs = list(reversed([dict(r) for r in cur.fetchall()]))
-    cur.close(); db.close()
-    if not msgs:
-        return ""
-    ctx = "HISTORIQUE CONVERSATION:\n"
-    for m in msgs:
-        prefix = "Benoit" if m["role"] == "user" else "STELLA"
-        ctx += f"  {prefix}: {m['content'][:300]}\n"
-    return ctx
-
-
-def list_conversations(user_id: str = "benoit", limit: int = 50) -> List[dict]:
-    """List all active conversations."""
-    db = get_db()
-    cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cur.execute(
-        "SELECT id, title, project, message_count, created_at, updated_at FROM conversations WHERE user_id = %s AND is_archived = FALSE ORDER BY updated_at DESC LIMIT %s",
-        (user_id, limit)
-    )
-    rows = [dict(r) for r in cur.fetchall()]
-    cur.close(); db.close()
-    return rows
-
-
-# ══════════════════════════════════════════════
-# LONG-TERM MEMORY (Qdrant via Embedding Service)
-# ══════════════════════════════════════════════
-async def index_to_long_memory(text: str, source: str, project: str = "GENERAL"):
-    """Index important content to Qdrant for permanent recall."""
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as c:
-            await c.post(f"{EMBEDDING_URL}/index", json={
-                "text": text,
-                "collection": "stella_conversations",
-                "project": project,
-                "source": source
-            })
-    except Exception as e:
-        logger.warning(f"Qdrant index error: {e}")
-
-
-async def search_long_memory(query: str, project: str = "GENERAL") -> str:
-    """Search Qdrant for relevant past conversations."""
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as c:
-            r = await c.post(f"{EMBEDDING_URL}/search_all", json={
-                "query": query,
-                "collections": ["knowledge", "products", "decisions", "lessons", "stella_conversations"],
-                "project": project,
-                "top_k_per_collection": 2,
-                "rerank_top": 5
-            }, timeout=15)
-            results = r.json().get("results", [])
-            if results:
-                text = "MEMOIRE LONG TERME:\n"
-                for lr in results[:5]:
-                    text += f"  [{lr.get('source','?')}] {lr.get('text','')[:250]}\n"
-                return text
-    except Exception as e:
-        logger.warning(f"Qdrant search error: {e}")
-    return ""
-
-
-# ══════════════════════════════════════════════
-# FILE PROCESSING
-# ══════════════════════════════════════════════
-def extract_text_from_file(content: bytes, mime: str, filename: str) -> str:
-    """Extract text content from uploaded files."""
-    text = ""
-    try:
-        if mime and mime.startswith("text/"):
-            text = content.decode("utf-8", errors="replace")
-        elif filename.endswith(".csv"):
-            text = content.decode("utf-8", errors="replace")
-        elif filename.endswith(".json"):
-            text = content.decode("utf-8", errors="replace")
-        elif filename.endswith(".md"):
-            text = content.decode("utf-8", errors="replace")
-        elif mime and "pdf" in mime:
-            text = f"[PDF uploadé: {filename} — {len(content)} octets. Extraction PDF nécessite PyPDF2.]"
-        elif mime and ("excel" in mime or "spreadsheet" in mime) or filename.endswith((".xlsx", ".xls")):
-            text = f"[Excel uploadé: {filename} — {len(content)} octets]"
-        elif mime and "image" in mime:
-            text = f"[Image uploadée: {filename} — {len(content)} octets]"
-        else:
-            try:
-                text = content.decode("utf-8", errors="replace")
-            except:
-                text = f"[Fichier binaire: {filename} — {len(content)} octets]"
-    except Exception as e:
-        text = f"[Erreur extraction: {e}]"
-    return text[:50000]  # Limit to 50k chars
-
-
-# ══════════════════════════════════════════════
-# AUTH
-# ══════════════════════════════════════════════
-def decode_session_token(token: str) -> dict:
-    if not SHOPIFY_API_SECRET:
-        raise HTTPException(500, "SHOPIFY_API_SECRET not configured")
+# ══════════════════════ AUTH ══════════════════════
+def decode_session_token(token):
+    if not SHOPIFY_API_SECRET: raise HTTPException(500, "No secret")
     try:
         parts = token.split(".")
         if len(parts) != 3: raise ValueError("Invalid JWT")
-        header_b64, payload_b64, sig_b64 = parts
-        signing_input = f"{header_b64}.{payload_b64}".encode()
-        expected = base64.urlsafe_b64encode(
-            hmac.new(SHOPIFY_API_SECRET.encode(), signing_input, hashlib.sha256).digest()
-        ).rstrip(b"=").decode()
-        if not hmac.compare_digest(expected, sig_b64.rstrip("=")): raise ValueError("Bad signature")
-        pad = 4 - len(payload_b64) % 4
-        if pad != 4: payload_b64 += "=" * pad
-        payload = json.loads(base64.urlsafe_b64decode(payload_b64))
+        h, p, s = parts
+        exp = base64.urlsafe_b64encode(hmac.new(SHOPIFY_API_SECRET.encode(), f"{h}.{p}".encode(), hashlib.sha256).digest()).rstrip(b"=").decode()
+        if not hmac.compare_digest(exp, s.rstrip("=")): raise ValueError("Bad sig")
+        pad = 4 - len(p) % 4
+        if pad != 4: p += "=" * pad
+        payload = json.loads(base64.urlsafe_b64decode(p))
         now = time.time()
-        if payload.get("exp", 0) < now - 10: raise ValueError("Expired")
-        if payload.get("nbf", 0) > now + 10: raise ValueError("Not yet valid")
-        if payload.get("aud") != SHOPIFY_API_KEY: raise ValueError(f"Wrong audience")
+        if payload.get("exp",0) < now-10: raise ValueError("Expired")
+        if payload.get("nbf",0) > now+10: raise ValueError("Not yet valid")
+        if payload.get("aud") != SHOPIFY_API_KEY: raise ValueError("Wrong aud")
         return payload
-    except ValueError as e: raise HTTPException(401, f"Invalid token: {e}")
-    except Exception as e: raise HTTPException(401, f"Token error: {e}")
+    except ValueError as e: raise HTTPException(401, str(e))
+    except Exception as e: raise HTTPException(401, str(e))
 
-async def verify_request(request: Request) -> dict:
+async def verify_request(request: Request):
     if DEV_MODE: return {"sub": "dev", "dest": SHOPIFY_SHOP}
     auth = request.headers.get("authorization", "")
     if auth.startswith("Bearer "): return decode_session_token(auth[7:])
@@ -441,276 +271,196 @@ async def verify_request(request: Request) -> dict:
     if token: return decode_session_token(token)
     raise HTTPException(401, "No session token")
 
-
-# ══════════════════════════════════════════════
-# API ROUTES — CHAT
-# ══════════════════════════════════════════════
+# ══════════════════════ API: CHAT ══════════════════════
 class ChatReq(BaseModel):
     message: str
     conversation_id: Optional[str] = None
     project: str = "GENERAL"
 
-
 @app.post("/api/chat")
 async def chat(req: ChatReq, session: dict = Depends(verify_request)):
-    """Chat with STELLA — full persistence + Shopify data + memory."""
-    
-    # 1. Get or create conversation
-    conv_id, is_new = get_or_create_conversation(req.conversation_id, req.project, req.message[:80])
-    
-    # 2. Save user message to PostgreSQL
-    save_message(conv_id, "user", req.message)
-    
-    # 3. Detect Shopify intents & fetch data
+    is_new = False
+    conv_id = req.conversation_id
+    if not conv_id:
+        title = req.message.strip()[:80] + ("..." if len(req.message)>80 else "")
+        conv_id = create_conversation(title, req.project)
+        is_new = True
+
+    # Save user message to ALL layers
+    await save_all_layers(conv_id, "user", req.message, {"project": req.project, "ts": datetime.now().isoformat()})
+
+    # Shopify real-time data
     intents = detect_shopify_intent(req.message)
-    shopify_context = await build_shopify_context(intents) if intents else ""
-    
-    # 4. Get conversation history context
-    conv_context = get_recent_context(conv_id, n=8)
-    
-    # 5. Search long-term memory
-    long_memory = await search_long_memory(req.message, req.project)
-    
-    # 6. Build enriched context for Context Engine
-    task_context_parts = []
-    if conv_context:
-        task_context_parts.append(conv_context)
-    if shopify_context:
-        task_context_parts.append(f"--- DONNEES SHOPIFY TEMPS REEL ---\n{shopify_context}")
-    if long_memory:
-        task_context_parts.append(long_memory)
-    
-    task_context = "\n\n".join(task_context_parts)
-    if shopify_context:
-        task_context += "\nINSTRUCTION: Utilise ces donnees Shopify REELLES. Ne dis JAMAIS que tu n'as pas acces."
-    
-    # 7. Call Context Engine
-    async with httpx.AsyncClient(timeout=120.0) as c:
+    shopify_ctx = await build_shopify_context(intents) if intents else ""
+
+    # Recent history from Redis
+    recent = ""
+    rc = get_redis()
+    if rc:
         try:
-            r = await c.post(f"{CONTEXT_ENGINE_URL}/chat", json={
-                "message": req.message,
-                "project": req.project,
-                "task_context": task_context,
-            })
+            msgs = rc.lrange(f"stella:chat:{conv_id}", -10, -1)
+            if msgs:
+                lines = []
+                for m in msgs:
+                    p = json.loads(m)
+                    lines.append(f"{'Benoit' if p['role']=='user' else 'STELLA'}: {p['content'][:300]}")
+                recent = "\n--- HISTORIQUE ---\n" + "\n".join(lines) + "\n--- FIN ---\n"
+        except: pass
+
+    task_ctx = recent
+    if shopify_ctx:
+        task_ctx += f"\n--- SHOPIFY TEMPS REEL ---\n{shopify_ctx}\n--- FIN SHOPIFY ---\nUtilise ces donnees REELLES. Ne dis jamais que tu n'as pas acces."
+
+    # Call Context Engine
+    async with httpx.AsyncClient(timeout=120) as c:
+        try:
+            r = await c.post(f"{CONTEXT_ENGINE_URL}/chat", json={"message": req.message, "project": req.project, "task_context": task_ctx})
             result = r.json()
         except Exception as e:
-            result = {"answer": f"Erreur Context Engine: {e}", "error": str(e)}
-    
+            result = {"answer": f"Erreur connexion: {e}"}
+
     answer = result.get("answer", "Pas de réponse")
-    
-    # 8. Save STELLA's response to PostgreSQL
-    save_message(conv_id, "assistant", answer, metadata={
-        "shopify_intents": intents,
-        "llm": result.get("llm_used"),
-        "had_shopify_data": bool(shopify_context),
-        "had_long_memory": bool(long_memory),
-    }, shopify_data=bool(shopify_context))
-    
-    # 9. Index important exchanges to Qdrant (async, non-blocking)
-    if len(req.message) > 50 or intents:
-        summary = f"Q: {req.message[:200]}\nA: {answer[:300]}"
-        await index_to_long_memory(summary, source=f"conversation:{conv_id}", project=req.project)
-    
-    return {
-        "answer": answer,
-        "conversation_id": conv_id,
-        "is_new_conversation": is_new,
-        "project": req.project,
-        "llm_used": result.get("llm_used"),
-        "shopify_data": bool(shopify_context),
-        "shopify_intents": intents if intents else None,
-    }
 
+    # Save STELLA response to ALL layers
+    await save_all_layers(conv_id, "assistant", answer, {"llm": result.get("llm_used"), "shopify": intents or None, "ts": datetime.now().isoformat()})
 
-# ══════════════════════════════════════════════
-# API ROUTES — CONVERSATIONS
-# ══════════════════════════════════════════════
+    # Auto-vectorize important exchanges to Qdrant
+    if should_vectorize(req.message, answer):
+        summary = f"[{datetime.now().strftime('%Y-%m-%d')}] Q: {req.message[:200]} | R: {answer[:400]}"
+        await save_to_qdrant(summary, source=f"chat_{conv_id[:8]}")
+
+    return {"answer": answer, "conversation_id": conv_id, "is_new_conversation": is_new, "llm_used": result.get("llm_used"), "shopify_data": bool(intents)}
+
+# ══════════════════════ API: CONVERSATIONS ══════════════════════
 @app.get("/api/conversations")
-async def get_conversations(session: dict = Depends(verify_request)):
-    """List all conversations."""
-    convs = list_conversations()
-    return {"conversations": convs}
-
+async def list_conversations(session: dict = Depends(verify_request)):
+    db = get_db()
+    if not db: return {"conversations": []}
+    try:
+        cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("SELECT id,title,project,created_at,updated_at,message_count FROM chat_conversations WHERE is_archived=FALSE ORDER BY updated_at DESC LIMIT 100")
+        rows = cur.fetchall(); cur.close(); db.close()
+        return {"conversations": [{"id":r["id"],"title":r["title"],"project":r["project"],"created_at":r["created_at"].isoformat() if r["created_at"] else None,"updated_at":r["updated_at"].isoformat() if r["updated_at"] else None,"message_count":r["message_count"]} for r in rows]}
+    except Exception as e:
+        try: db.close()
+        except: pass
+        return {"conversations": [], "error": str(e)}
 
 @app.get("/api/conversations/{conv_id}/messages")
 async def get_messages(conv_id: str, session: dict = Depends(verify_request)):
-    """Get all messages for a conversation."""
-    msgs = get_conversation_messages(conv_id)
-    return {"messages": msgs, "conversation_id": conv_id}
-
+    db = get_db()
+    if not db: return {"messages": []}
+    try:
+        cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("SELECT role,content,metadata,created_at FROM chat_messages WHERE conversation_id=%s ORDER BY created_at", (conv_id,))
+        rows = cur.fetchall(); cur.close(); db.close()
+        return {"messages": [{"role":r["role"],"content":r["content"],"metadata":r["metadata"] if isinstance(r["metadata"],dict) else {},"created_at":r["created_at"].isoformat() if r["created_at"] else None} for r in rows]}
+    except Exception as e:
+        try: db.close()
+        except: pass
+        return {"messages": [], "error": str(e)}
 
 @app.delete("/api/conversations/{conv_id}")
-async def archive_conversation(conv_id: str, session: dict = Depends(verify_request)):
-    """Archive (soft-delete) a conversation. Data stays in DB for memory."""
+async def delete_conv(conv_id: str, session: dict = Depends(verify_request)):
     db = get_db()
-    cur = db.cursor()
-    cur.execute("UPDATE conversations SET is_archived = TRUE WHERE id = %s", (conv_id,))
-    db.commit()
-    cur.close(); db.close()
-    return {"archived": True}
+    if not db: return {"deleted": False}
+    try:
+        cur = db.cursor()
+        cur.execute("DELETE FROM chat_messages WHERE conversation_id=%s", (conv_id,))
+        cur.execute("DELETE FROM chat_conversations WHERE id=%s", (conv_id,))
+        db.commit(); cur.close(); db.close()
+        rc = get_redis()
+        if rc:
+            try: rc.delete(f"stella:chat:{conv_id}")
+            except: pass
+        return {"deleted": True}
+    except Exception as e:
+        try: db.close()
+        except: pass
+        return {"deleted": False, "error": str(e)}
 
-
-# ══════════════════════════════════════════════
-# API ROUTES — FILE UPLOAD
-# ══════════════════════════════════════════════
+# ══════════════════════ API: UPLOAD ══════════════════════
 @app.post("/api/upload")
-async def upload_file(
-    file: UploadFile = File(...),
-    conversation_id: str = Form(None),
-    project: str = Form("GENERAL"),
-    session: dict = Depends(verify_request)
-):
-    """Upload a file, extract text, save to DB, index to Qdrant."""
-    
-    # Read file
+async def upload_file(file: UploadFile = File(...), conversation_id: str = Form(None), project: str = Form("GENERAL"), session: dict = Depends(verify_request)):
     content = await file.read()
-    if len(content) > MAX_UPLOAD_MB * 1024 * 1024:
-        raise HTTPException(413, f"File too large. Max {MAX_UPLOAD_MB}MB")
+    if len(content) > MAX_FILE_SIZE: raise HTTPException(413, "File too large (10MB max)")
+    text = extract_text(content, file.filename)
     
-    # Extract text
-    text_content = extract_text_from_file(content, file.content_type, file.filename)
-    
-    # Get or create conversation
-    if conversation_id:
-        conv_id, is_new = get_or_create_conversation(conversation_id, project)
-    else:
-        conv_id, is_new = get_or_create_conversation(None, project, f"📎 {file.filename}")
-    
-    # Save to DB
+    # Save to PostgreSQL
     db = get_db()
-    cur = db.cursor()
-    cur.execute(
-        """INSERT INTO uploaded_files (conversation_id, filename, original_name, mime_type, file_size, file_data, text_content, project)
-           VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
-        (conv_id, f"{uuid.uuid4()}_{file.filename}", file.filename, file.content_type, len(content),
-         psycopg2.Binary(content), text_content, project)
-    )
-    file_id = cur.fetchone()[0]
-    db.commit()
-    cur.close(); db.close()
+    doc_id = None
+    if db:
+        try:
+            cur = db.cursor()
+            cur.execute("INSERT INTO chat_documents (conversation_id,filename,file_type,file_size,text_content) VALUES (%s,%s,%s,%s,%s) RETURNING id", (conversation_id, file.filename, file.content_type, len(content), text[:50000]))
+            doc_id = cur.fetchone()[0]; db.commit(); cur.close(); db.close()
+        except Exception as e:
+            logger.error(f"Doc save: {e}")
+            try: db.close()
+            except: pass
     
-    # Save system message about the upload
-    save_message(conv_id, "system", f"📎 Fichier uploadé: {file.filename} ({len(content)//1024}KB, {file.content_type})", file_id=file_id)
+    # Vectorize to Qdrant
+    if text and len(text) > 50:
+        await save_to_qdrant(f"[Doc {datetime.now().strftime('%Y-%m-%d')}] {file.filename}: {text[:2000]}", source=f"upload_{file.filename}")
     
-    # Index text to Qdrant for long-term memory
-    if text_content and len(text_content) > 20:
-        await index_to_long_memory(
-            f"Document: {file.filename}\n{text_content[:2000]}",
-            source=f"upload:{file.filename}",
-            project=project
-        )
-    
-    return {
-        "file_id": file_id,
-        "filename": file.filename,
-        "size": len(content),
-        "text_extracted": len(text_content) if text_content else 0,
-        "conversation_id": conv_id,
-        "is_new_conversation": is_new,
-    }
+    return {"success": True, "filename": file.filename, "file_size": len(content), "text_content": text[:5000], "doc_id": doc_id}
 
-
-# ══════════════════════════════════════════════
-# API ROUTES — ACTIONS & STATUS
-# ══════════════════════════════════════════════
-class ActionReq(BaseModel):
-    action: str
-
-@app.post("/api/action")
-async def action(req: ActionReq, session: dict = Depends(verify_request)):
-    if req.action == "shopify_products":
-        return {"data": await fetch_products_summary()}
-    if req.action == "shopify_orders":
-        return {"data": await fetch_orders_summary()}
-    if req.action == "shopify_stock":
-        return {"data": await fetch_stock_alerts()}
-    endpoints = {"queue_stats": "/admin/queue-stats", "health": "/health", "next_product": "/admin/next-product"}
-    ep = endpoints.get(req.action)
-    if not ep: raise HTTPException(400, f"Unknown action: {req.action}")
-    async with httpx.AsyncClient(timeout=30.0) as c:
-        r = await c.get(f"{CONTEXT_ENGINE_URL}{ep}")
-        return r.json()
-
-
-@app.get("/api/shopify/status")
-async def shopify_status():
-    if not SHOPIFY_ACCESS_TOKEN:
-        return {"connected": False, "error": "No token"}
-    try:
-        data = await shopify_graphql("{ shop { name } }")
-        return {"connected": True, "shop": data.get("data", {}).get("shop", {}).get("name")}
-    except Exception as e:
-        return {"connected": False, "error": str(e)}
-
-
-@app.get("/api/stats")
-async def stats():
-    """Dashboard stats."""
-    try:
-        db = get_db()
-        cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute("SELECT COUNT(*) as total_conversations FROM conversations WHERE is_archived = FALSE")
-        convs = cur.fetchone()["total_conversations"]
-        cur.execute("SELECT COUNT(*) as total_messages FROM chat_messages")
-        msgs = cur.fetchone()["total_messages"]
-        cur.execute("SELECT COUNT(*) as total_files FROM uploaded_files")
-        files = cur.fetchone()["total_files"]
-        cur.close(); db.close()
-        return {"conversations": convs, "messages": msgs, "files": files, "shopify": bool(SHOPIFY_ACCESS_TOKEN)}
-    except Exception as e:
-        return {"error": str(e)}
-
-
-@app.get("/api/search")
-async def search_messages(q: str, session: dict = Depends(verify_request)):
-    """Full-text search across all conversations."""
+# ══════════════════════ API: MEMORY STATS ══════════════════════
+@app.get("/api/memory/stats")
+async def memory_stats(session: dict = Depends(verify_request)):
+    stats = {"redis": {}, "postgres": {}, "qdrant": {}}
+    rc = get_redis()
+    if rc:
+        try: stats["redis"] = {"conversations": len(rc.keys("stella:chat:*")), "connected": True}
+        except: stats["redis"] = {"connected": False}
     db = get_db()
-    cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cur.execute(
-        """SELECT cm.id, cm.role, cm.content, cm.created_at, c.title as conversation_title, c.id as conversation_id
-           FROM chat_messages cm JOIN conversations c ON cm.conversation_id = c.id
-           WHERE to_tsvector('french', cm.content) @@ plainto_tsquery('french', %s)
-           ORDER BY cm.created_at DESC LIMIT 20""",
-        (q,)
-    )
-    results = [dict(r) for r in cur.fetchall()]
-    cur.close(); db.close()
-    return {"results": results, "query": q}
+    if db:
+        try:
+            cur = db.cursor()
+            cur.execute("SELECT COUNT(*) FROM chat_messages"); msgs = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM chat_conversations WHERE is_archived=FALSE"); convs = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM chat_documents"); docs = cur.fetchone()[0]
+            cur.close(); db.close()
+            stats["postgres"] = {"messages": msgs, "conversations": convs, "documents": docs, "connected": True}
+        except Exception as e:
+            try: db.close()
+            except: pass
+            stats["postgres"] = {"connected": False}
+    return stats
 
+# ══════════════════════ HEALTH ══════════════════════
+@app.get("/health")
+async def health():
+    redis_ok = False
+    rc = get_redis()
+    if rc:
+        try: redis_ok = rc.ping()
+        except: pass
+    db_ok = False
+    db = get_db()
+    if db:
+        try:
+            cur = db.cursor(); cur.execute("SELECT 1"); cur.close(); db.close(); db_ok = True
+        except:
+            try: db.close()
+            except: pass
+    qdrant_ok = False
+    try:
+        async with httpx.AsyncClient(timeout=5) as c:
+            r = await c.get(f"{CONTEXT_ENGINE_URL}/health")
+            qdrant_ok = r.json().get("status") == "ok"
+    except: pass
+    return {"status": "ok" if (redis_ok or db_ok) else "degraded", "redis": redis_ok, "database": db_ok, "qdrant": qdrant_ok, "shopify_api": "connected" if SHOPIFY_ACCESS_TOKEN else "no_token", "dev_mode": DEV_MODE, "llm": "mistral_api" if qdrant_ok else "unknown"}
 
-# ══════════════════════════════════════════════
-# SERVE FRONTEND
-# ══════════════════════════════════════════════
+# ══════════════════════ FRONTEND ══════════════════════
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     html_path = os.path.join(os.path.dirname(__file__), "static", "index.html")
-    with open(html_path) as f:
-        html = f.read()
+    with open(html_path) as f: html = f.read()
     html = html.replace("__SHOPIFY_API_KEY__", SHOPIFY_API_KEY)
     html = html.replace("__SHOPIFY_SHOP__", SHOPIFY_SHOP)
     html = html.replace("__SHOPIFY_HOST__", request.query_params.get("host", ""))
     return HTMLResponse(html)
-
-
-@app.get("/health")
-async def health():
-    db_ok = False
-    try:
-        db = get_db()
-        cur = db.cursor()
-        cur.execute("SELECT 1")
-        cur.close(); db.close()
-        db_ok = True
-    except: pass
-    return {
-        "status": "ok" if db_ok else "degraded",
-        "app": "stella-shopify-v2",
-        "dev_mode": DEV_MODE,
-        "shopify_api": "connected" if SHOPIFY_ACCESS_TOKEN else "no_token",
-        "database": "connected" if db_ok else "disconnected",
-        "features": ["chat_persistence", "file_upload", "voice_input", "shopify_data", "long_term_memory"]
-    }
-
 
 app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static")), name="static")
 
