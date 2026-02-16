@@ -24,16 +24,17 @@ def get_db():
     return psycopg2.connect(DATABASE_URL)
 
 def get_llm_client():
-    if RUNPOD_ENDPOINT and RUNPOD_API_KEY:
-        return OpenAI(
-            base_url=f"https://api.runpod.ai/v2/{RUNPOD_ENDPOINT}/openai/v1",
-            api_key=RUNPOD_API_KEY
-        ), "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
-    elif MISTRAL_API_KEY:
+    """Mistral API = principal, RunPod = fallback"""
+    if MISTRAL_API_KEY:
         return OpenAI(
             base_url="https://api.mistral.ai/v1",
             api_key=MISTRAL_API_KEY
         ), "mistral-small-latest"
+    elif RUNPOD_ENDPOINT and RUNPOD_API_KEY:
+        return OpenAI(
+            base_url=f"https://api.runpod.ai/v2/{RUNPOD_ENDPOINT}/openai/v1",
+            api_key=RUNPOD_API_KEY
+        ), "casperhansen/mistral-small-24b-instruct-2501-awq"
     else:
         return None, None
 
@@ -292,7 +293,7 @@ async def health():
         cur.close(); db.close()
         db_ok = True
     except: pass
-    return {"status": "ok" if redis_ok and db_ok else "degraded", "redis": redis_ok, "database": db_ok, "tables": tables, "llm": "runpod" if RUNPOD_ENDPOINT else ("mistral_api" if MISTRAL_API_KEY else "none")}
+    return {"status": "ok" if redis_ok and db_ok else "degraded", "redis": redis_ok, "database": db_ok, "tables": tables, "llm": "mistral_api" if MISTRAL_API_KEY else ("runpod" if RUNPOD_ENDPOINT else "none")}
 
 @app.post("/chat")
 async def chat(req: ChatRequest):
@@ -323,7 +324,7 @@ REGLES: 1. Ne JAMAIS inventer de donnees 2. Utiliser UNIQUEMENT les donnees du c
     buf.append({"role":"assistant","content":answer[:500]})
     short["conversation_buffer"] = buf[-20:]
     save_short_memory(req.project, short)
-    return {"answer": answer, "project": req.project, "llm_used": "runpod" if RUNPOD_ENDPOINT else "mistral_api"}
+    return {"answer": answer, "project": req.project, "llm_used": "mistral_api" if MISTRAL_API_KEY else "runpod"}
 
 @app.post("/snapshot")
 async def snapshot(req: SnapshotRequest):
