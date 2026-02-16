@@ -157,8 +157,15 @@ async def fetch_products_summary() -> str:
         f"Produits: {len(products)} total (Actifs: {active}, Brouillons: {draft}, Archives: {archived})",
         f"Marques ({len(brands)}): {', '.join(f'{b}({c})' for b,c in top)}",
     ]
-    if oos: lines.append(f"RUPTURES ({len(oos)}): {', '.join(p['title'][:40] for p in oos[:5])}")
-    if low: lines.append(f"STOCK BAS ({len(low)}): {', '.join(p['title'][:35]+f'({p[\"totalInventory\"]})' for p in low[:5])}")
+    if oos:
+        oos_names = ", ".join(p["title"][:40] for p in oos[:5])
+        lines.append(f"RUPTURES ({len(oos)}): {oos_names}")
+    if low:
+        low_items = []
+        for p in low[:5]:
+            inv = p.get("totalInventory", "?")
+            low_items.append(f"{p['title'][:35]}({inv})")
+        lines.append(f"STOCK BAS ({len(low)}): {', '.join(low_items)}")
     return "\n".join(lines)
 
 
@@ -194,7 +201,9 @@ async def fetch_stock_alerts() -> str:
     low = [p for p in products if p.get("status") == "ACTIVE" and p.get("totalInventory") is not None and 0 < p["totalInventory"] <= 5]
     lines = [f"ALERTES STOCK: {len(critical)} ruptures, {len(low)} bas"]
     for p in critical[:8]: lines.append(f"  RUPTURE: {p['title'][:50]} ({p.get('vendor','?')})")
-    for p in low[:8]: lines.append(f"  BAS({p['totalInventory']}): {p['title'][:50]}")
+    for p in low[:8]:
+        inv = p.get("totalInventory", "?")
+        lines.append(f"  BAS({inv}): {p['title'][:50]}")
     return "\n".join(lines)
 
 
