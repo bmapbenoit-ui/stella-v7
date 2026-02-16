@@ -526,6 +526,18 @@ async def memory_stats(session: dict = Depends(verify_request)):
     return stats
 
 # ══════════════════════ HEALTH ══════════════════════
+APP_VERSION = "2.1.0-date-filter"
+
+@app.get("/debug/shopify")
+async def debug_shopify():
+    """Debug endpoint to see raw Shopify data"""
+    try:
+        orders = await fetch_orders_summary()
+        refunds = await fetch_refunds_summary()
+        return {"version": APP_VERSION, "orders_raw": orders[:1000], "refunds_raw": refunds[:1000]}
+    except Exception as e:
+        return {"version": APP_VERSION, "error": str(e)}
+
 @app.get("/health")
 async def health():
     redis_ok = False
@@ -547,7 +559,7 @@ async def health():
             r = await c.get(f"{CONTEXT_ENGINE_URL}/health")
             qdrant_ok = r.json().get("status") == "ok"
     except: pass
-    return {"status": "ok" if (redis_ok or db_ok) else "degraded", "redis": redis_ok, "database": db_ok, "qdrant": qdrant_ok, "shopify_api": "connected" if SHOPIFY_ACCESS_TOKEN else "no_token", "dev_mode": DEV_MODE, "llm": "mistral_api" if qdrant_ok else "unknown"}
+    return {"status": "ok" if (redis_ok or db_ok) else "degraded", "version": APP_VERSION, "redis": redis_ok, "database": db_ok, "qdrant": qdrant_ok, "shopify_api": "connected" if SHOPIFY_ACCESS_TOKEN else "no_token", "dev_mode": DEV_MODE, "llm": "mistral_api" if qdrant_ok else "unknown"}
 
 # ══════════════════════ FRONTEND ══════════════════════
 @app.get("/", response_class=HTMLResponse)
