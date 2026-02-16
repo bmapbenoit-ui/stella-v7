@@ -397,3 +397,54 @@ async def queue_stats():
     total = cur.fetchone()['total']
     cur.close(); db.close()
     return {"total": total, "brands": brands}
+
+@app.get("/admin/next-product")
+async def next_product():
+    """Get next PENDING product from queue (highest priority first)"""
+    db = get_db()
+    cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute("""
+        SELECT id, shopify_id, handle, brand, title, priority, data_json
+        FROM product_queue 
+        WHERE status = 'PENDING'
+        ORDER BY priority DESC, id ASC
+        LIMIT 1
+    """)
+    row = cur.fetchone()
+    if row:
+        # Mark as IN_PROGRESS
+        cur.execute("UPDATE product_queue SET status='IN_PROGRESS', started_at=NOW() WHERE id=%s", (row['id'],))
+        db.commit()
+    cur.close(); db.close()
+    if row:
+        return {"product": dict(row), "remaining": None}
+    return {"product": None, "message": "No pending products"}
+
+@app.post("/admin/update-product")
+async def update_product(data: dict):
+    """Update product status after enrichment"""
+    db = get_db()
+    cur = db.cursor()
+    status = data.get('status', 'COMPLETED')
+    product_id = data.get('product_id') or data.get('id')
+    error_msg = data.get('error_message', None)
+    
+    if status == 'COMPLETED':
+        cur.execute("""
+            UPDATE product_queue SET status='COMPLETED', completed_at=NOW(), error_message=NULL
+            WHERE id=%s OR shopify_id=%s::bigint
+        """, (product_id, str(product_id)))
+    elif status == 'ERROR':
+        cur.execute("""
+            UPDATE product_queue SET status='ERROR', error_message=%s, retry_count=retry_count+1
+            WHERE id=%s OR shopify_id=%s::bigint
+        """, (error_msg, product_id, str(product_id)))
+    else:
+        cur.execute("""
+            UPDATE product_queue SET status=%s WHERE id=%s OR shopify_id=%s::bigint
+        """, (status, product_id, str(product_id)))
+    
+    db.commit()
+    affected = cur.rowcount
+    cur.close(); db.close()
+    return {"updated": affected, "status": status, "product_id": product_id}
