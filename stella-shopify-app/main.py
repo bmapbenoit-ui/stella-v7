@@ -183,17 +183,55 @@ async def fetch_products_summary():
     return "\n".join(lines)
 
 async def fetch_orders_summary():
-    data = await shopify_graphql("""{ orders(first:50,sortKey:CREATED_AT,reverse:true) { edges { node { name createdAt displayFinancialStatus totalPriceSet { shopMoney { amount currencyCode } } lineItems(first:3) { edges { node { title quantity } } } } } } }""")
-    orders = [e["node"] for e in data.get("data",{}).get("orders",{}).get("edges",[])]
-    if not orders: return "Aucune commande recente."
-    rev = sum(float(o.get("totalPriceSet",{}).get("shopMoney",{}).get("amount",0)) for o in orders)
-    cur = orders[0].get("totalPriceSet",{}).get("shopMoney",{}).get("currencyCode","EUR")
-    paid = sum(1 for o in orders if o.get("displayFinancialStatus")=="PAID")
-    lines = [f"COMMANDES(50 dern): {len(orders)} cmd, CA:{rev:.2f}{cur}, Payees:{paid}"]
-    for o in orders[:5]:
+    today = datetime.now().strftime("%Y-%m-%d")
+    today_start = f"{today}T00:00:00Z"
+    # Query: today's orders
+    q_today = f"""{{ orders(first:50, sortKey:CREATED_AT, reverse:true, query:"created_at:>={today_start}") {{
+        edges {{ node {{ name createdAt displayFinancialStatus
+            totalPriceSet {{ shopMoney {{ amount currencyCode }} }}
+            lineItems(first:3) {{ edges {{ node {{ title quantity }} }} }}
+        }} }}
+    }} }}"""
+    # Query: last 50 orders (for recent context)
+    q_recent = """{ orders(first:10, sortKey:CREATED_AT, reverse:true) {
+        edges { node { name createdAt displayFinancialStatus
+            totalPriceSet { shopMoney { amount currencyCode } }
+            lineItems(first:3) { edges { node { title quantity } } }
+        } }
+    } }"""
+
+    data_today = await shopify_graphql(q_today)
+    data_recent = await shopify_graphql(q_recent)
+
+    orders_today = [e["node"] for e in data_today.get("data",{}).get("orders",{}).get("edges",[])]
+    orders_recent = [e["node"] for e in data_recent.get("data",{}).get("orders",{}).get("edges",[])]
+
+    def fmt_order(o):
         a = o.get("totalPriceSet",{}).get("shopMoney",{}).get("amount","?")
-        items = [f"{i['node']['title'][:25]}x{i['node']['quantity']}" for i in o.get("lineItems",{}).get("edges",[])[:3]]
-        lines.append(f"  {o['name']}|{a}{cur}|{o.get('displayFinancialStatus','?')}|{','.join(items)}")
+        cur = o.get("totalPriceSet",{}).get("shopMoney",{}).get("currencyCode","EUR")
+        items = [f"{i['node']['title'][:30]} x{i['node']['quantity']}" for i in o.get("lineItems",{}).get("edges",[])[:3]]
+        return f"  {o['name']} | {a} {cur} | {o.get('displayFinancialStatus','?')} | {', '.join(items)}"
+
+    lines = []
+
+    # Today's stats
+    if orders_today:
+        rev_today = sum(float(o.get("totalPriceSet",{}).get("shopMoney",{}).get("amount",0)) for o in orders_today)
+        paid_today = sum(1 for o in orders_today if o.get("displayFinancialStatus")=="PAID")
+        cur = orders_today[0].get("totalPriceSet",{}).get("shopMoney",{}).get("currencyCode","EUR")
+        lines.append(f"AUJOURD'HUI ({today}): {len(orders_today)} commandes, CA: {rev_today:.2f} {cur}, Payees: {paid_today}")
+        for o in orders_today[:10]:
+            lines.append(fmt_order(o))
+    else:
+        lines.append(f"AUJOURD'HUI ({today}): 0 commandes, CA: 0.00 EUR")
+
+    # Recent orders (last 10)
+    if orders_recent:
+        lines.append(f"\nDERNIERES COMMANDES (10 plus recentes, toutes dates):")
+        for o in orders_recent[:10]:
+            date = o.get("createdAt","")[:10]
+            lines.append(f"  [{date}] " + fmt_order(o).strip())
+
     return "\n".join(lines)
 
 async def fetch_stock_alerts():
@@ -208,6 +246,7 @@ async def fetch_stock_alerts():
 
 async def fetch_refunds_summary():
     today = datetime.now().strftime("%Y-%m-%d")
+    logger.info(f"REFUND: Searching refunds, today={today}")
     # Sort by UPDATED_AT to catch refunds on old orders (refund updates the order)
     data = await shopify_graphql("""{ orders(first: 100, sortKey: UPDATED_AT, reverse: true) {
         edges { node { name createdAt updatedAt displayFinancialStatus
@@ -215,6 +254,8 @@ async def fetch_refunds_summary():
                 refundLineItems(first:10) { edges { node { quantity lineItem { title } } } } note }
         } }
     } }""")
+    orders = [e["node"] for e in data.get("data",{}).get("orders",{}).get("edges",[])]
+    logger.info(f"REFUND: Got {len(orders)} orders from Shopify")
     orders = [e["node"] for e in data.get("data",{}).get("orders",{}).get("edges",[])]
     
     today_refunds = []
@@ -232,6 +273,7 @@ async def fetch_refunds_summary():
             recent_refunds.append(entry)
     
     lines = [f"REMBOURSEMENTS SHOPIFY:"]
+    logger.info(f"REFUND: Found {len(today_refunds)} today, {len(recent_refunds)} total")
     today_total = sum(float(ref.get("totalRefundedSet",{}).get("shopMoney",{}).get("amount",0)) for o in orders for ref in o.get("refunds",[]) if ref.get("createdAt","")[:10] == today)
     
     if today_refunds:
