@@ -23,29 +23,49 @@ app.add_middleware(
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis.railway.internal:6379")
 DATABASE_URL = os.getenv("DATABASE_URL")
 EMBEDDING_URL = os.getenv("EMBEDDING_URL", "http://embedding-service.railway.internal:8080")
+
 RUNPOD_ENDPOINT = os.getenv("RUNPOD_ENDPOINT_ID", "")
 RUNPOD_API_KEY = os.getenv("RUNPOD_API_KEY", "")
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
 
+LLM_API_URL = os.getenv("LLM_API_URL", "")
+LLM_MODEL = os.getenv("LLM_MODEL", "")
+LLM_PRIORITY = os.getenv("LLM_PRIORITY", "mistral")
+
 r = redis.from_url(REDIS_URL, decode_responses=True)
+
 
 def get_db():
     return psycopg2.connect(DATABASE_URL)
 
+
 def get_llm_client():
-    """Mistral API = principal, RunPod = fallback"""
+    """Priorité configurable : RunPod vLLM local, puis Mistral API, puis ancien RunPod serverless."""
+    priority = (LLM_PRIORITY or "mistral").lower()
+
+    # 1) Priorité au serveur vLLM RunPod
+    if priority == "runpod" and LLM_API_URL and LLM_MODEL:
+        return OpenAI(
+            base_url=LLM_API_URL,
+            api_key="not-needed"
+        ), LLM_MODEL
+
+    # 2) Fallback Mistral API
     if MISTRAL_API_KEY:
         return OpenAI(
             base_url="https://api.mistral.ai/v1",
             api_key=MISTRAL_API_KEY
         ), "mistral-small-latest"
-    elif RUNPOD_ENDPOINT and RUNPOD_API_KEY:
+
+    # 3) Ancien RunPod serverless si encore disponible
+    if RUNPOD_ENDPOINT and RUNPOD_API_KEY:
         return OpenAI(
             base_url=f"https://api.runpod.ai/v2/{RUNPOD_ENDPOINT}/openai/v1",
             api_key=RUNPOD_API_KEY
         ), "casperhansen/mistral-small-24b-instruct-2501-awq"
-    else:
-        return None, None
+
+    return None, None
+
 
 # === AUTO MIGRATION ===
 MIGRATION_SQL = """
@@ -173,6 +193,7 @@ INSERT INTO brand_config (brand_name, site_url, fragrantica_brand_name, style_bg
 ON CONFLICT (brand_name) DO NOTHING;
 """
 
+
 @app.on_event("startup")
 async def startup():
     if DATABASE_URL:
@@ -187,12 +208,14 @@ async def startup():
         except Exception as e:
             print(f"DB migration error: {e}")
 
+
 # === MODELS ===
 class ChatRequest(BaseModel):
     message: str
     project: str = "GENERAL"
     task_context: str = ""
     system_override: str = ""
+
 
 class SnapshotRequest(BaseModel):
     project: str
@@ -201,51 +224,87 @@ class SnapshotRequest(BaseModel):
     decisions: List[str] = []
     next_actions: List[str] = []
 
+
 class LearnRequest(BaseModel):
     text: str
     project: str = "GENERAL"
     collection: str = "knowledge"
     source: str = "manual"
 
+
 # === MEMORY ===
 def read_short_memory(project):
     session = r.get(f"stella:session:{project}")
-    return json.loads(session) if session else {"project": project, "conversation_buffer": [], "current_task": None}
+    return json.loads(session) if session else {
+        "project": project,
+        "conversation_buffer": [],
+        "current_task": None
+    }
+
 
 def read_medium_memory(project, limit=5):
     try:
         db = get_db()
         cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute("SELECT ai_summary, key_decisions, next_actions, created_at FROM snapshots WHERE project = %s ORDER BY created_at DESC LIMIT %s", (project, limit))
+        cur.execute(
+            "SELECT ai_summary, key_decisions, next_actions, created_at FROM snapshots WHERE project = %s ORDER BY created_at DESC LIMIT %s",
+            (project, limit)
+        )
         rows = cur.fetchall()
-        cur.close(); db.close()
+        cur.close()
+        db.close()
         return [dict(row) for row in rows]
     except Exception as e:
         return [{"error": str(e)}]
 
+
 def read_long_memory(query, project):
     try:
-        resp = httpx.post(f"{EMBEDDING_URL}/search_all", json={"query": query, "collections": ["knowledge","products","decisions","lessons"], "project": project, "top_k_per_collection": 3, "rerank_top": 5}, timeout=30)
+        resp = httpx.post(
+            f"{EMBEDDING_URL}/search_all",
+            json={
+                "query": query,
+                "collections": ["knowledge", "products", "decisions", "lessons"],
+                "project": project,
+                "top_k_per_collection": 3,
+                "rerank_top": 5
+            },
+            timeout=30
+        )
         return resp.json().get("results", [])
     except Exception as e:
         return [{"text": f"[RAG indisponible: {e}]", "source": "error"}]
 
+
 def save_short_memory(project, data):
     r.setex(f"stella:session:{project}", 86400, json.dumps(data, default=str))
+
 
 def save_snapshot(project, state, summary, decisions, next_actions, snap_type="auto_5min"):
     try:
         db = get_db()
         cur = db.cursor()
-        cur.execute("INSERT INTO snapshots (project, snapshot_type, state_data, ai_summary, key_decisions, next_actions) VALUES (%s,%s,%s,%s,%s,%s)",
-                     (project, snap_type, json.dumps(state, default=str), summary, json.dumps(decisions), json.dumps(next_actions)))
-        db.commit(); cur.close(); db.close()
-    except: pass
+        cur.execute(
+            "INSERT INTO snapshots (project, snapshot_type, state_data, ai_summary, key_decisions, next_actions) VALUES (%s,%s,%s,%s,%s,%s)",
+            (project, snap_type, json.dumps(state, default=str), summary, json.dumps(decisions), json.dumps(next_actions))
+        )
+        db.commit()
+        cur.close()
+        db.close()
+    except Exception:
+        pass
+
 
 def save_to_long_memory(text, project, collection, source):
     try:
-        httpx.post(f"{EMBEDDING_URL}/index", json={"text": text, "collection": collection, "project": project, "source": source}, timeout=30)
-    except: pass
+        httpx.post(
+            f"{EMBEDDING_URL}/index",
+            json={"text": text, "collection": collection, "project": project, "source": source},
+            timeout=30
+        )
+    except Exception:
+        pass
+
 
 def build_context(message, project, task_context=""):
     short = read_short_memory(project)
@@ -265,8 +324,10 @@ def build_context(message, project, task_context=""):
             medium_text += f"  [{snap.get('created_at','?')}] {snap.get('ai_summary','N/A')}\n"
             decs = snap.get('key_decisions', [])
             if isinstance(decs, str):
-                try: decs = json.loads(decs)
-                except: decs = []
+                try:
+                    decs = json.loads(decs)
+                except Exception:
+                    decs = []
             for d in (decs or [])[:2]:
                 medium_text += f"    -> Decision: {d}\n"
 
@@ -286,12 +347,16 @@ def build_context(message, project, task_context=""):
 --- MEMOIRE LONGUE ---
 {long_text or "Pas de connaissances pertinentes."}"""
 
+
 # === ENDPOINTS ===
 @app.get("/health")
 async def health():
     redis_ok = False
-    try: redis_ok = r.ping()
-    except: pass
+    try:
+        redis_ok = r.ping()
+    except Exception:
+        pass
+
     db_ok = False
     tables = []
     try:
@@ -299,10 +364,28 @@ async def health():
         cur = db.cursor()
         cur.execute("SELECT tablename FROM pg_tables WHERE schemaname='public'")
         tables = [row[0] for row in cur.fetchall()]
-        cur.close(); db.close()
+        cur.close()
+        db.close()
         db_ok = True
-    except: pass
-    return {"status": "ok" if redis_ok and db_ok else "degraded", "redis": redis_ok, "database": db_ok, "tables": tables, "llm": "mistral_api" if MISTRAL_API_KEY else ("runpod" if RUNPOD_ENDPOINT else "none")}
+    except Exception:
+        pass
+
+    llm_status = "none"
+    if LLM_PRIORITY.lower() == "runpod" and LLM_API_URL and LLM_MODEL:
+        llm_status = "runpod"
+    elif MISTRAL_API_KEY:
+        llm_status = "mistral_api"
+    elif RUNPOD_ENDPOINT:
+        llm_status = "runpod_serverless"
+
+    return {
+        "status": "ok" if redis_ok and db_ok else "degraded",
+        "redis": redis_ok,
+        "database": db_ok,
+        "tables": tables,
+        "llm": llm_status
+    }
+
 
 @app.post("/chat")
 async def chat(req: ChatRequest):
@@ -318,44 +401,93 @@ REGLES ABSOLUES:
 5. Ne repete JAMAIS la meme reponse. Si Benoit dit que c est faux, admets-le.
 6. Pas de listes d etapes ni plans d action sauf si Benoit le demande explicitement.
 {context}"""
+
     client, model = get_llm_client()
     if not client:
-        return {"error": "No LLM configured. Set RUNPOD_ENDPOINT_ID+RUNPOD_API_KEY or MISTRAL_API_KEY", "answer": None}
+        return {
+            "error": "No LLM configured. Set LLM_API_URL+LLM_MODEL or RUNPOD_ENDPOINT_ID+RUNPOD_API_KEY or MISTRAL_API_KEY",
+            "answer": None
+        }
+
     try:
-        response = client.chat.completions.create(model=model, messages=[{"role":"system","content":system},{"role":"user","content":req.message}], temperature=0.3, max_tokens=4096)
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": req.message}
+            ],
+            temperature=0.3,
+            max_tokens=4096
+        )
         answer = response.choices[0].message.content
     except Exception as e:
-        if MISTRAL_API_KEY and RUNPOD_ENDPOINT:
+        # fallback cloud si priorité runpod et échec
+        if MISTRAL_API_KEY:
             try:
-                fallback = OpenAI(base_url="https://api.mistral.ai/v1", api_key=MISTRAL_API_KEY)
-                response = fallback.chat.completions.create(model="mistral-small-latest", messages=[{"role":"system","content":system},{"role":"user","content":req.message}], temperature=0.3, max_tokens=4096)
+                fallback = OpenAI(
+                    base_url="https://api.mistral.ai/v1",
+                    api_key=MISTRAL_API_KEY
+                )
+                response = fallback.chat.completions.create(
+                    model="mistral-small-latest",
+                    messages=[
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": req.message}
+                    ],
+                    temperature=0.3,
+                    max_tokens=4096
+                )
                 answer = response.choices[0].message.content
             except Exception as e2:
                 return {"error": f"Both LLMs failed: {e} / {e2}", "answer": None}
         else:
             return {"error": str(e), "answer": None}
+
     short = read_short_memory(req.project)
     buf = short.get("conversation_buffer", [])
-    buf.append({"role":"user","content":req.message[:500]})
-    buf.append({"role":"assistant","content":answer[:500]})
+    buf.append({"role": "user", "content": req.message[:500]})
+    buf.append({"role": "assistant", "content": answer[:500]})
     short["conversation_buffer"] = buf[-20:]
     save_short_memory(req.project, short)
-    return {"answer": answer, "project": req.project, "llm_used": "mistral_api" if MISTRAL_API_KEY else "runpod"}
+
+    llm_used = "unknown"
+    if LLM_PRIORITY.lower() == "runpod" and LLM_API_URL and LLM_MODEL:
+        llm_used = "runpod"
+    elif MISTRAL_API_KEY:
+        llm_used = "mistral_api"
+    elif RUNPOD_ENDPOINT:
+        llm_used = "runpod_serverless"
+
+    return {"answer": answer, "project": req.project, "llm_used": llm_used}
+
 
 @app.post("/snapshot")
 async def snapshot(req: SnapshotRequest):
     short = read_short_memory(req.project)
-    save_snapshot(req.project, short, req.summary or f"Auto-snapshot {req.project}", req.decisions, req.next_actions, req.snapshot_type)
+    save_snapshot(
+        req.project,
+        short,
+        req.summary or f"Auto-snapshot {req.project}",
+        req.decisions,
+        req.next_actions,
+        req.snapshot_type
+    )
     return {"saved": True, "project": req.project, "type": req.snapshot_type}
+
 
 @app.post("/learn")
 async def learn(req: LearnRequest):
     save_to_long_memory(req.text, req.project, req.collection, req.source)
     return {"indexed": True}
 
+
 @app.get("/memory/{project}")
 async def get_memory(project: str):
-    return {"short_term": read_short_memory(project), "medium_term": read_medium_memory(project, limit=5)}
+    return {
+        "short_term": read_short_memory(project),
+        "medium_term": read_medium_memory(project, limit=5)
+    }
+
 
 @app.get("/brands")
 async def list_brands():
@@ -364,15 +496,17 @@ async def list_brands():
         cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cur.execute("SELECT * FROM brand_config ORDER BY brand_name")
         rows = cur.fetchall()
-        cur.close(); db.close()
+        cur.close()
+        db.close()
         return {"brands": [dict(r) for r in rows]}
     except Exception as e:
         return {"error": str(e)}
 
-# === ADMIN ENDPOINTS ===
 
+# === ADMIN ENDPOINTS ===
 class ProductBatch(BaseModel):
     products: list  # [{shopify_id, handle, brand, title, priority, data_json}]
+
 
 @app.post("/admin/load-queue")
 async def load_product_queue(batch: ProductBatch):
@@ -386,14 +520,22 @@ async def load_product_queue(batch: ProductBatch):
                 INSERT INTO product_queue (shopify_id, handle, brand, title, priority, status, data_json)
                 VALUES (%s, %s, %s, %s, %s, 'PENDING', %s)
                 ON CONFLICT (shopify_id) DO NOTHING
-            """, (int(p['shopify_id']), p['handle'], p['brand'], p['title'], 
-                  p.get('priority', 50), json.dumps(p.get('data_json', {}), ensure_ascii=False)))
+            """, (
+                int(p['shopify_id']),
+                p['handle'],
+                p['brand'],
+                p['title'],
+                p.get('priority', 50),
+                json.dumps(p.get('data_json', {}), ensure_ascii=False)
+            ))
             inserted += 1
-        except Exception as e:
+        except Exception:
             skipped += 1
     db.commit()
-    cur.close(); db.close()
+    cur.close()
+    db.close()
     return {"inserted": inserted, "skipped": skipped}
+
 
 @app.get("/admin/queue-stats")
 async def queue_stats():
@@ -411,8 +553,10 @@ async def queue_stats():
     brands = [dict(r) for r in cur.fetchall()]
     cur.execute("SELECT COUNT(*) as total FROM product_queue")
     total = cur.fetchone()['total']
-    cur.close(); db.close()
+    cur.close()
+    db.close()
     return {"total": total, "brands": brands}
+
 
 @app.get("/admin/next-product")
 async def next_product():
@@ -421,20 +565,21 @@ async def next_product():
     cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute("""
         SELECT id, shopify_id, handle, brand, title, priority, data_json
-        FROM product_queue 
+        FROM product_queue
         WHERE status = 'PENDING'
         ORDER BY priority DESC, id ASC
         LIMIT 1
     """)
     row = cur.fetchone()
     if row:
-        # Mark as IN_PROGRESS
         cur.execute("UPDATE product_queue SET status='IN_PROGRESS', started_at=NOW() WHERE id=%s", (row['id'],))
         db.commit()
-    cur.close(); db.close()
+    cur.close()
+    db.close()
     if row:
         return {"product": dict(row), "remaining": None}
     return {"product": None, "message": "No pending products"}
+
 
 @app.post("/admin/update-product")
 async def update_product(data: dict):
@@ -444,7 +589,7 @@ async def update_product(data: dict):
     status = data.get('status', 'COMPLETED')
     product_id = data.get('product_id') or data.get('id')
     error_msg = data.get('error_message', None)
-    
+
     if status == 'COMPLETED':
         cur.execute("""
             UPDATE product_queue SET status='COMPLETED', completed_at=NOW(), error_message=NULL
@@ -459,10 +604,11 @@ async def update_product(data: dict):
         cur.execute("""
             UPDATE product_queue SET status=%s WHERE id=%s OR shopify_id=%s::bigint
         """, (status, product_id, str(product_id)))
-    
+
     db.commit()
     affected = cur.rowcount
-    cur.close(); db.close()
+    cur.close()
+    db.close()
     return {"updated": affected, "status": status, "product_id": product_id}
 
 
@@ -566,7 +712,7 @@ addMsg("stella", "Bonjour Benoit ! Je suis STELLA V7, le cerveau permanent de Pl
 
 // Load health + stats
 fetch(API + "/health").then(r=>r.json()).then(d=>{
-  document.getElementById("status").innerHTML = d.status === "ok" 
+  document.getElementById("status").innerHTML = d.status === "ok"
     ? '<span class="dot"></span> En ligne — ' + d.llm
     : '<span class="dot" style="background:#C62828"></span> Dégradé';
 }).catch(()=>{
@@ -576,7 +722,7 @@ fetch(API + "/health").then(r=>r.json()).then(d=>{
 fetch(API + "/admin/queue-stats").then(r=>r.json()).then(d=>{
   let p=0,c=0,e=0;
   (d.brands||[]).forEach(b=>{p+=b.pending||0;c+=b.completed||0;e+=b.errors||0});
-  document.getElementById("stats").innerHTML = 
+  document.getElementById("stats").innerHTML =
     `Produits: <b>${d.total}</b> &nbsp;·&nbsp; Enrichis: <b style="color:#2E7D32">${c}</b> &nbsp;·&nbsp; En attente: <b style="color:#E8871E">${p}</b> &nbsp;·&nbsp; Erreurs: <b style="color:#C62828">${e}</b> &nbsp;·&nbsp; Marques: <b>${(d.brands||[]).length}</b>`;
 }).catch(()=>{});
 
@@ -610,16 +756,15 @@ function addMsg(role, text, extra) {
   const chat = document.getElementById("chat");
   const time = new Date().toLocaleTimeString("fr-FR", {hour:"2-digit",minute:"2-digit"});
   const initials = role === "stella" ? "★" : "B";
-  
+
   const div = document.createElement("div");
   div.className = "msg " + role;
   div.innerHTML = `<div class="avatar">${initials}</div><div><div class="bubble">${escHtml(text)}</div><div class="meta">${time}${extra||""}</div></div>`;
   chat.appendChild(div);
   chat.scrollTop = chat.scrollHeight;
-  
-  // Hide quick actions after first message
+
   if (msgCount > 1) document.getElementById("quick").style.display = "none";
-  
+
   return div;
 }
 
@@ -645,15 +790,15 @@ function hideTyping() {
 async function sendMsg(text) {
   text = text || inp.value.trim();
   if (!text || loading) return;
-  
+
   loading = true;
   inp.value = "";
   inp.style.height = "42px";
   document.getElementById("send").disabled = true;
-  
+
   addMsg("user", text);
   showTyping();
-  
+
   try {
     const resp = await fetch(API + "/chat", {
       method: "POST",
@@ -667,15 +812,15 @@ async function sendMsg(text) {
     hideTyping();
     addMsg("stella", "❌ Erreur de connexion: " + err.message);
   }
-  
+
   loading = false;
   document.getElementById("send").disabled = false;
   inp.focus();
 }
 </script>
 </body>
-</html>"""
-
+</html>
+"""
 
 @app.get("/stella", response_class=HTMLResponse)
 async def stella_chat():
