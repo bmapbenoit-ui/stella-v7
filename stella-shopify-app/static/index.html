@@ -654,14 +654,20 @@ async function sendMessage(text) {
   showTyping();
 
   try {
+    const chatBody = {
+      message: text,
+      conversation_id: conversationId,
+      project: 'GENERAL'
+    };
+    // Include image base64 + media_type for vision support
+    if (fileInfo && fileInfo.image_base64 && fileInfo.image_media_type) {
+      chatBody.image_base64 = fileInfo.image_base64;
+      chatBody.image_media_type = fileInfo.image_media_type;
+    }
     const resp = await fetch(API + '/api/chat', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
-        message: text,
-        conversation_id: conversationId,
-        project: 'GENERAL'
-      })
+      body: JSON.stringify(chatBody)
     });
     const data = await resp.json();
     hideTyping();

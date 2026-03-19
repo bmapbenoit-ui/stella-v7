@@ -215,6 +215,8 @@ class ChatRequest(BaseModel):
     project: str = "GENERAL"
     task_context: str = ""
     system_override: str = ""
+    image_base64: Optional[str] = None
+    image_media_type: Optional[str] = None
 
 
 class SnapshotRequest(BaseModel):
@@ -473,12 +475,26 @@ CONTEXTE
             "answer": None
         }
 
+    # Build user message content: text only, or multimodal with image
+    if req.image_base64 and req.image_media_type:
+        user_content = [
+            {"type": "text", "text": req.message},
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:{req.image_media_type};base64,{req.image_base64}"
+                }
+            }
+        ]
+    else:
+        user_content = req.message
+
     try:
         response = client.chat.completions.create(
             model=model,
             messages=[
                 {"role": "system", "content": system},
-                {"role": "user", "content": req.message}
+                {"role": "user", "content": user_content}
             ],
             temperature=0.3,
             max_tokens=4096
@@ -496,7 +512,7 @@ CONTEXTE
                     model="mistral-small-latest",
                     messages=[
                         {"role": "system", "content": system},
-                        {"role": "user", "content": req.message}
+                        {"role": "user", "content": user_content}
                     ],
                     temperature=0.3,
                     max_tokens=4096

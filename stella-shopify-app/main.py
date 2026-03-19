@@ -353,6 +353,14 @@ async def build_shopify_context(intents):
     return "\n\n".join(parts)
 
 # ══════════════════════ FILE PROCESSING ══════════════════════
+IMAGE_MEDIA_TYPES = {
+    "png": "image/png",
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "webp": "image/webp",
+    "gif": "image/gif",
+}
+
 def extract_text(content, filename):
     ext = filename.rsplit(".",1)[-1].lower() if "." in filename else ""
     if ext in ("txt","md","csv","json","html","xml","log"):
@@ -360,11 +368,19 @@ def extract_text(content, filename):
         except: return content.decode("latin-1", errors="replace")
     if ext == "pdf":
         return f"[Document PDF: {filename}, {len(content)//1024}KB. Décrivez ce que contient le document pour que je puisse vous aider.]"
-    if ext in ("png","jpg","jpeg","webp","gif"):
+    if ext in IMAGE_MEDIA_TYPES:
         return f"[Image: {filename}, {len(content)//1024}KB. Décrivez ce que vous souhaitez que j'en fasse.]"
     if ext in ("xlsx","xls","docx","doc","pptx"):
         return f"[Document {ext.upper()}: {filename}, {len(content)//1024}KB. Posez des questions spécifiques sur son contenu.]"
     return f"[Fichier: {filename}, {len(content)//1024}KB]"
+
+def extract_image_base64(content, filename):
+    """Return (base64_data, media_type) for image files, or (None, None)."""
+    ext = filename.rsplit(".",1)[-1].lower() if "." in filename else ""
+    media_type = IMAGE_MEDIA_TYPES.get(ext)
+    if not media_type:
+        return None, None
+    return base64.b64encode(content).decode("utf-8"), media_type
 
 # ══════════════════════ AUTH ══════════════════════
 def decode_session_token(token):
@@ -399,6 +415,8 @@ class ChatReq(BaseModel):
     message: str
     conversation_id: Optional[str] = None
     project: str = "GENERAL"
+    image_base64: Optional[str] = None
+    image_media_type: Optional[str] = None
 
 @app.post("/api/chat")
 async def chat(req: ChatReq, session: dict = Depends(verify_request)):
@@ -448,9 +466,13 @@ REGLE 5: Tutoie Benoit. Sois concis comme un collegue competent.
         task_ctx += f"\n=== DONNEES SHOPIFY TEMPS REEL (lues maintenant depuis l'API) ===\n{shopify_ctx}\n=== FIN DONNEES SHOPIFY ===\n"
 
     # Call Context Engine (NO system_override - let CE build context with our task_context + RAG + memory)
+    chat_payload = {"message": req.message, "project": req.project, "task_context": task_ctx}
+    if req.image_base64 and req.image_media_type:
+        chat_payload["image_base64"] = req.image_base64
+        chat_payload["image_media_type"] = req.image_media_type
     async with httpx.AsyncClient(timeout=120) as c:
         try:
-            r = await c.post(f"{CONTEXT_ENGINE_URL}/chat", json={"message": req.message, "project": req.project, "task_context": task_ctx})
+            r = await c.post(f"{CONTEXT_ENGINE_URL}/chat", json=chat_payload)
             result = r.json()
         except Exception as e:
             result = {"answer": f"Erreur connexion: {e}"}
@@ -539,7 +561,13 @@ async def upload_file(file: UploadFile = File(...), conversation_id: str = Form(
     if text and len(text) > 50:
         await save_to_qdrant(f"[Doc {datetime.now().strftime('%Y-%m-%d')}] {file.filename}: {text[:2000]}", source=f"upload_{file.filename}")
     
-    return {"success": True, "filename": file.filename, "file_size": len(content), "text_content": text[:5000], "doc_id": doc_id}
+    # For images, also return base64 data and media_type for vision support
+    image_base64, image_media_type = extract_image_base64(content, file.filename)
+    result = {"success": True, "filename": file.filename, "file_size": len(content), "text_content": text[:5000], "doc_id": doc_id}
+    if image_base64 and image_media_type:
+        result["image_base64"] = image_base64
+        result["image_media_type"] = image_media_type
+    return result
 
 # ══════════════════════ API: MEMORY STATS ══════════════════════
 @app.get("/api/memory/stats")
