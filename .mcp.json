@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "stella-railway": {
+      "command": "python3",
+      "args": ["/home/user/stella-v7/mcp-railway/server.py"],
+      "env": {
+        "STELLA_APP_URL": "https://stella-shopify-app-production.up.railway.app",
+        "CONTEXT_ENGINE_URL": "https://context-engine-production-e525.up.railway.app",
+        "EMBEDDING_URL": "https://embedding-service-production-7f52.up.railway.app",
+        "CLAUDE_MEM_KEY": "stella-mem-2026-planetebeauty"
+      }
+    }
+  }
+}
