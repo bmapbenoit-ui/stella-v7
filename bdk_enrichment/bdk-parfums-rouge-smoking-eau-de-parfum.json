@@ -1,0 +1,43 @@
+{
+  "shopify_id": "gid://shopify/Product/9530627260758",
+  "handle": "bdk-parfums-rouge-smoking-eau-de-parfum",
+  "title": "BDK PARFUMS Rouge Smoking Eau de parfum",
+  "vendor": "BDK PARFUMS",
+  "productType": "Eau de Parfum",
+  "seo": {
+    "title": "Rouge Smoking – BDK PARFUMS | Eau de Parfum 100ml | PlanèteBeauty",
+    "description": "Rouge Smoking BDK PARFUMS – Oriental. Cerise, Vanille noire, Fève Tonka. 24h · Try&Buy · Cashback 5% · -10%/180€ · Livraison dès 99€."
+  },
+  "descriptionHtml": "<p><strong>Rouge Smoking</strong> est un hommage au génie créatif d'Yves Saint Laurent qui révolutionna la mode en 1966 avec le smoking féminin. Inspiré du quartier de Pigalle, ce parfum oriental assume sa sensualité avec une cerise vibrante relevée de poivre rose, un cœur de vanille noire et d'héliotrope, posé sur un fond addictif de fève tonka et bois de cachemire.</p>\n<p><em>\"Assumément oriental, contemporain. Un parfum sensuel et chic marqué d'élégance... La cerise et le poivre révèlent son côté rouge.\"</em><br/><small>— Amélie Bourgeois, parfumeur</small></p>\n<p><small>⭐ Note communauté Fragrantica : 4,06/5 (mars 2026)</small></p>",
+  "metafields": {
+    "concentration": "Eau de Parfum",
+    "parfumeur": "Amélie Bourgeois",
+    "genre": "Mixte",
+    "accord_principal": "Oriental",
+    "sillage": "Modéré",
+    "tenacite": "Longue tenue",
+    "longevite": "Longue",
+    "moment": "Nuit",
+    "note_tete_principale": "Cerise",
+    "note_coeur_principale": "Vanille noire",
+    "note_fond_principale": "Fève Tonka",
+    "citation_parfumeur": "Assumément oriental, contemporain. Un parfum sensuel et chic marqué d'élégance... La cerise et le poivre révèlent son côté rouge.",
+    "profil_porteur": "Personnalité glamour et assumée, qui aime les parfums gourmands et sensuels. Idéal pour une soirée, un dîner ou une sortie qui marque les esprits.",
+    "inci": "ALCOHOL DENAT., PARFUM (FRAGRANCE), AQUA (WATER), LINALOOL, LIMONENE, COUMARIN, EUGENOL, CITRONELLOL, CITRAL, CI 19140 (YELLOW 5), CI 17200 (RED 33).",
+    "allergenes": "Linalool, Limonene, Coumarin, Eugenol, Citronellol, Citral",
+    "intensite": 4,
+    "sillage_level": 2,
+    "duree_tenue_heures": 8,
+    "contenance_ml": 100,
+    "annee_creation": 2018,
+    "famille_olfactive": ["Oriental", "Gourmand"],
+    "notes_tete_secondaires": ["Poivre rose", "Bergamote"],
+    "notes_coeur_secondaires": ["Héliotrope", "Fleur d'oranger"],
+    "notes_fond_secondaires": ["Bois de cachemire", "Musc blanc", "Ambroxan", "Violette", "Labdanum"],
+    "notes_cles": ["Cerise", "Vanille noire", "Fève Tonka"],
+    "accords_secondaires": ["Vanillé", "Fruité", "Musqué"],
+    "saison": ["Automne", "Hiver"],
+    "occasions": ["Soirée", "Rendez-vous", "Sortie"],
+    "attributs_speciaux": ["Finaliste FiFi Awards France 2019"]
+  }
+}

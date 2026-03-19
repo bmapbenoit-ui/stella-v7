@@ -1,0 +1,43 @@
+{
+  "shopify_id": "gid://shopify/Product/9571977331030",
+  "handle": "bdk-parfums-impadia-eau-de-parfum",
+  "title": "BDK Parfums Impadia eau de parfum",
+  "vendor": "BDK PARFUMS",
+  "productType": "Eau de Parfum",
+  "seo": {
+    "title": "Impadia – BDK PARFUMS | Eau de Parfum 100ml | PlanèteBeauty",
+    "description": "Impadia BDK PARFUMS – Floral Fruité Gourmand. Poire, Rose bulgare, Vanille. 24h · Try&Buy · Cashback 5% · -10%/180€ · Livraison dès 99€."
+  },
+  "descriptionHtml": "<p><strong>Impadia</strong> capture la dualité d'un paysage urbain baigné dans les teintes roses et orangées du lever de soleil parisien. Un bouquet lumineux de rose bulgare et turque s'épanouit sur un accord toffee addictif, porté par la vanille de Madagascar et la chaleur boisée de l'akigalawood.</p>\n<p><em>\"Impadia capture l'intersection entre ville et nature, quand le printemps parisien explose en nuances de rose et d'orange.\"</em><br/><small>— (PlanèteBeauty)</small></p>\n<p><small>⭐ Nouveauté 2025 – Avis en cours sur Fragrantica</small></p>",
+  "metafields": {
+    "concentration": "Eau de Parfum",
+    "parfumeur": "Jordi Fernández",
+    "genre": "Mixte",
+    "accord_principal": "Floral Fruité Gourmand",
+    "sillage": "Modéré à fort",
+    "tenacite": "Longue tenue",
+    "longevite": "Longue",
+    "moment": "Jour & Nuit",
+    "note_tete_principale": "Poire",
+    "note_coeur_principale": "Rose bulgare",
+    "note_fond_principale": "Vanille absolue",
+    "citation_parfumeur": "Impadia capture l'intersection entre ville et nature, quand le printemps parisien explose en nuances de rose et d'orange.",
+    "profil_porteur": "Personnalité lumineuse et élégante, attirée par les floraux gourmands sophistiqués. Idéal pour qui cherche une rose moderne et addictive.",
+    "inci": "Alcohol Denat., Parfum (Fragrance), Aqua (Water), Ethylhexyl Salicylate, Citrus Aurantium Bergamia (Bergamot) Peel Oil, Butylmethoxydibenzoylmethane, Vanillin, Limonene, Citronellol, CI 14700 (Red 4), Linalyl Acetate, CI 15985 (Yellow 6), CI 19140 (Yellow 5), CI 60730 (Ext. Violet 2), Pinene, Linalool, Alpha-Isomethyl Ionone, Tetramethylacetyloctahydronaphthalenes, Myroxylon Pereirae Oil/Extract, Rose Flower Oil/Extract, Rose Ketones, Benzyl Benzoate, Alcohol, Eugenol, Terpineol, Benzyl Cinnamate, Pentaerythrityl Tetra-Di-T-Butyl Hydroxyhydrocinnamate, Beta-Caryophyllene, Citral, Geraniol, Tris (Tetramethylhydroxypiperidinol) Citrate, Terpinolene, Geranyl Acetate, Isoeugenol, Alpha-Terpinene, Benzoic Acid.",
+    "allergenes": "Limonene, Citronellol, Linalool, Alpha-Isomethyl Ionone, Benzyl Benzoate, Eugenol, Benzyl Cinnamate, Citral, Geraniol, Isoeugenol",
+    "intensite": 4,
+    "sillage_level": 3,
+    "duree_tenue_heures": 8,
+    "contenance_ml": 100,
+    "annee_creation": 2025,
+    "famille_olfactive": ["Floral", "Fruité", "Gourmand"],
+    "notes_tete_secondaires": ["Bergamote", "Mandarine"],
+    "notes_coeur_secondaires": ["Rose turque", "Fleur d'oranger d'Afrique"],
+    "notes_fond_secondaires": ["Akigalawood", "Santal"],
+    "notes_cles": ["Poire", "Rose bulgare", "Vanille absolue"],
+    "accords_secondaires": ["Boisé", "Poudré", "Toffee"],
+    "saison": ["Printemps", "Automne"],
+    "occasions": ["Quotidien chic", "Bureau", "Rendez-vous"],
+    "attributs_speciaux": ["Collection Parisienne", "Première collaboration Givaudan"]
+  }
+}

@@ -1,0 +1,43 @@
+{
+  "shopify_id": "gid://shopify/Product/10267061158230",
+  "handle": "bdk-parfums-vanille-caviar-eau-de-parfum",
+  "title": "BDK Parfums vanille caviar eau de parfum",
+  "vendor": "BDK PARFUMS",
+  "productType": "Eau de Parfum",
+  "seo": {
+    "title": "Vanille Caviar – BDK PARFUMS | Eau de Parfum 100ml | PlanèteBeauty",
+    "description": "Vanille Caviar BDK PARFUMS – Oriental Vanillé. Vanille, Cacao, Baume du Pérou. 24h · Try&Buy · Cashback 5% · -10%/180€ · Livraison dès 99€."
+  },
+  "descriptionHtml": "<p><strong>Vanille Caviar</strong> traite la vanille comme un matériau de luxe — pas un dessert, mais un joyau olfactif. Structuré autour de l'extrait CO₂ et de l'absolue de vanille de Madagascar, ce parfum révèle toutes les nuances de la précieuse gousse : ses grains de caviar au parfum à la fois délicieux et phénolique, sublimés par le cacao, le baume du Pérou et le ciste labdanum.</p>\n<p><em>\"J'ai souvent visité Madagascar. Je me souviens de l'image de ces gousses pleines de 'caviar' — ces fameux grains qu'elles contiennent précieusement — avec un parfum délicieux, mais aussi phénolique.\"</em><br/><small>— Alexandra Carlin, parfumeur</small></p>\n<p><small>⭐ Nouveauté 2025 – Avis en cours sur Fragrantica</small></p>",
+  "metafields": {
+    "concentration": "Eau de Parfum",
+    "parfumeur": "Alexandra Carlin",
+    "genre": "Mixte",
+    "accord_principal": "Oriental Vanillé",
+    "sillage": "Modéré",
+    "tenacite": "Longue tenue",
+    "longevite": "Longue",
+    "moment": "Jour & Nuit",
+    "note_tete_principale": "Cassis",
+    "note_coeur_principale": "Vanille caviar",
+    "note_fond_principale": "Vanille de Madagascar",
+    "citation_parfumeur": "J'ai souvent visité Madagascar. Je me souviens de l'image de ces gousses pleines de 'caviar' — ces fameux grains qu'elles contiennent précieusement — avec un parfum délicieux, mais aussi phénolique, légèrement 'olive'.",
+    "profil_porteur": "Amateur de vanilles sophistiquées et non-conventionnelles. Pour ceux qui recherchent une vanille sombre, texturée et luxueuse, loin des clichés gourmands sucrés.",
+    "inci": "Alcohol Denat., Parfum (Fragrance), Aqua (Water), Tetramethyl Acetyloctahydronaphthalenes, Vanillin, Myroxylon Pereirae Oil/Extract, Benzyl Benzoate, Pentaerythrityl Tetra-Di-T-Butyl Hydroxyhydrocinnamate, Benzyl Cinnamate, Coumarin, Tocopherol, Cinnamomum Zeylanicum Bark Oil, Cinnamal, Rose Ketones, Isoeugenol, Benzyl Alcohol, Pinene, Beta-Caryophyllene, Terpineol, Linalool, Linalyl Acetate, Eugenol, Limonene.",
+    "allergenes": "Benzyl Benzoate, Benzyl Cinnamate, Coumarin, Cinnamal, Isoeugenol, Benzyl Alcohol, Linalool, Eugenol, Limonene",
+    "intensite": 4,
+    "sillage_level": 2,
+    "duree_tenue_heures": 8,
+    "contenance_ml": 100,
+    "annee_creation": 2025,
+    "famille_olfactive": ["Oriental", "Vanillé", "Ambré"],
+    "notes_tete_secondaires": ["Calamus", "Cardamome"],
+    "notes_coeur_secondaires": ["Cacao", "Osmanthus"],
+    "notes_fond_secondaires": ["Baume du Pérou", "Ciste Labdanum"],
+    "notes_cles": ["Cassis", "Vanille caviar", "Vanille de Madagascar"],
+    "accords_secondaires": ["Balsamique", "Boisé", "Épicé"],
+    "saison": ["Automne", "Hiver"],
+    "occasions": ["Soirée", "Rendez-vous", "Quotidien chic"],
+    "attributs_speciaux": ["Collection Matières", "Extrait CO₂ de vanille"]
+  }
+}

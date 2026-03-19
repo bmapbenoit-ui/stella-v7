@@ -1,0 +1,43 @@
+{
+  "shopify_id": "gid://shopify/Product/9530631913814",
+  "handle": "bdk-parfums-gris-charnel-extrait-de-parfum",
+  "title": "BDK PARFUMS Gris Charnel Extrait de parfum",
+  "vendor": "BDK PARFUMS",
+  "productType": "Extrait de Parfum",
+  "seo": {
+    "title": "Gris Charnel Extrait – BDK PARFUMS | Extrait 100ml | PlanèteBeauty",
+    "description": "Gris Charnel Extrait BDK PARFUMS – Boisé Épicé. Cardamome, Iris, Vanille. 24h · Try&Buy · Cashback 5% · -10%/180€ · Livraison dès 99€."
+  },
+  "descriptionHtml": "<p><strong>Gris Charnel Extrait</strong> magnifie la sensualité de la signature originale avec une intensité concentrée à 30%. Le cardamome et le thé noir s'enlacent autour d'un iris marocain absolu, tandis qu'un fond de patchouli indonésien, vanille de Madagascar et santal enveloppent la peau d'un sillage magnétique et captivant.</p>\n<p><em>\"Revisiter un parfum qui a déjà trouvé son public est bien plus complexe que de partir d'une page blanche. Avec ce second chapitre, j'ai voulu magnifier la sensualité de la signature originale de Gris Charnel.\"</em><br/><small>— Mathilde Bijaoui, parfumeur</small></p>\n<p><small>⭐ Note communauté Fragrantica : 4,06/5 (mars 2026)</small></p>",
+  "metafields": {
+    "concentration": "Extrait de Parfum",
+    "parfumeur": "Mathilde Bijaoui",
+    "genre": "Mixte",
+    "accord_principal": "Boisé Épicé",
+    "sillage": "Modéré à fort",
+    "tenacite": "Très longue tenue",
+    "longevite": "Très longue",
+    "moment": "Nuit",
+    "note_tete_principale": "Cardamome",
+    "note_coeur_principale": "Iris",
+    "note_fond_principale": "Santal",
+    "citation_parfumeur": "Revisiter un parfum qui a déjà trouvé son public est bien plus complexe que de partir d'une page blanche. Avec ce second chapitre, j'ai voulu magnifier la sensualité de la signature originale de Gris Charnel, en sculptant un sillage encore plus magnétique et captivant.",
+    "profil_porteur": "Personnalité raffinée et magnétique, aimant les parfums profonds et sensuels. Porteur confiant qui recherche un sillage mémorable sans ostentation.",
+    "inci": "ALCOHOL DENAT., PARFUM (FRAGRANCE), AQUA (WATER), COUMARIN, ALPHA-ISOMETHYL IONONE, ISOEUGENOL, TOCOPHEROL, LINALOOL, LIMONENE, GERANIOL, CITRAL, FARNESOL.",
+    "allergenes": "Coumarin, Alpha-Isomethyl Ionone, Isoeugenol, Linalool, Limonene, Geraniol, Citral, Farnesol",
+    "intensite": 5,
+    "sillage_level": 3,
+    "duree_tenue_heures": 10,
+    "contenance_ml": 100,
+    "annee_creation": 2022,
+    "famille_olfactive": ["Boisé", "Épicé"],
+    "notes_tete_secondaires": ["Figue", "Thé noir"],
+    "notes_coeur_secondaires": ["Vétiver Bourbon", "Ciste"],
+    "notes_fond_secondaires": ["Vanille de Madagascar", "Fève Tonka", "Cèdre", "Patchouli indonésien"],
+    "notes_cles": ["Cardamome", "Iris", "Santal"],
+    "accords_secondaires": ["Ambré", "Vanillé", "Fumé"],
+    "saison": ["Automne", "Hiver"],
+    "occasions": ["Soirée", "Rendez-vous", "Occasion spéciale"],
+    "attributs_speciaux": ["Concentration 30%", "Prix Perfume Extraordinaire 2023"]
+  }
+}

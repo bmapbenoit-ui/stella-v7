@@ -1,0 +1,43 @@
+{
+  "shopify_id": "gid://shopify/Product/9530648330582",
+  "handle": "bdk-parfums-rouge-smoking-extrait-de-parfum",
+  "title": "BDK PARFUMS Rouge Smoking Extrait de parfum",
+  "vendor": "BDK PARFUMS",
+  "productType": "Extrait de Parfum",
+  "seo": {
+    "title": "Rouge Smoking Extrait – BDK PARFUMS | Extrait 100ml | PlanèteBeauty",
+    "description": "Rouge Smoking Extrait BDK PARFUMS – Oriental Ambré. Cerise, Fève Tonka, Oud. 24h · Try&Buy · Cashback 5% · -10%/180€ · Livraison dès 99€."
+  },
+  "descriptionHtml": "<p><strong>Rouge Smoking Extrait</strong> réinvente l'accord cerise-ambre-tonka avec profondeur et intensité. Concentré à 30%, ce troisième extrait de la maison sublime la cerise Napoléon et l'amande dans une ouverture éclatante, avant de révéler un cœur crémeux de lait et fève tonka absolue, posé sur un fond somptueux d'oud thaïlandais, vanille noire et rhum de Martinique.</p>\n<p><em>\"Rouge Smoking Extrait est une cerise dans un gant de velours — une réinterprétation profonde et magnétique.\"</em><br/><small>— (PlanèteBeauty)</small></p>\n<p><small>⭐ Nouveauté 2024 – Avis en cours sur Fragrantica</small></p>",
+  "metafields": {
+    "concentration": "Extrait de Parfum",
+    "parfumeur": "Amélie Bourgeois & Margaux Le Paih Guérin",
+    "genre": "Mixte",
+    "accord_principal": "Oriental Ambré",
+    "sillage": "Modéré à fort",
+    "tenacite": "Très longue tenue",
+    "longevite": "Très longue",
+    "moment": "Nuit",
+    "note_tete_principale": "Cerise",
+    "note_coeur_principale": "Fève Tonka absolue",
+    "note_fond_principale": "Oud de Thaïlande",
+    "citation_parfumeur": "Rouge Smoking Extrait est une cerise dans un gant de velours — une réinterprétation concentrée à 30% qui magnifie l'accord cerise, ambre et fève tonka avec profondeur et intensité.",
+    "profil_porteur": "Personnalité intense et séductrice, amateur de parfums opulents et profonds. Pour les amoureux de l'oud et des orientaux boisés qui recherchent un sillage puissant.",
+    "inci": "ALCOHOL DENAT., PARFUM (FRAGRANCE), AQUA (WATER), TETRAMETHYL ACETYLOCTAHYDRO-NAPHTHALENES, VANILLIN, COUMARIN, BENZYL BENZOATE, LIMONENE, LINALOOL, CITRUS AURANTIUM BERGAMIA (BERGAMOT) PEEL OIL, PINENE, LINALYL ACETATE, MYROXYLON BALSAMUM PEREIRAE (BALSAM PERU) OIL, EUGENOL, POGOSTEMON CABLIN OIL, BENZYL CINNAMATE, BENZALDEHYDE, CINNAMOMUM ZEYLANICUM BARK OIL, CITRONELLOL, BETA-CARYOPHYLLENE, CINNAMAL, FARNESOL, TERPINOLENE, TERPINEOL, CITRAL.",
+    "allergenes": "Coumarin, Benzyl Benzoate, Limonene, Linalool, Eugenol, Benzyl Cinnamate, Citronellol, Cinnamal, Farnesol, Citral",
+    "intensite": 5,
+    "sillage_level": 3,
+    "duree_tenue_heures": 12,
+    "contenance_ml": 100,
+    "annee_creation": 2024,
+    "famille_olfactive": ["Oriental", "Ambré", "Fruité"],
+    "notes_tete_secondaires": ["Amande", "Poivre rose", "Mandarine rouge", "Bergamote"],
+    "notes_coeur_secondaires": ["Baume du Pérou", "Accord lait", "Labdanum absolue"],
+    "notes_fond_secondaires": ["Rhum de Martinique", "Ambroxan", "Vanille noire absolue", "Ambre", "Patchouli indonésien", "Benjoin de Siam"],
+    "notes_cles": ["Cerise", "Fève Tonka absolue", "Oud de Thaïlande"],
+    "accords_secondaires": ["Boisé", "Épicé", "Gourmand"],
+    "saison": ["Automne", "Hiver"],
+    "occasions": ["Soirée", "Occasion spéciale", "Rendez-vous"],
+    "attributs_speciaux": ["Concentration 30%", "3ème Extrait de la collection"]
+  }
+}
