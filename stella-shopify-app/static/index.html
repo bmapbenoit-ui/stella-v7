@@ -814,26 +814,26 @@ function closeSidebar() {
   document.getElementById('sidebarOverlay').classList.remove('open');
 }
 </script>
-<script src="https://cdn.shopify.com/shopifycloud/app-bridge/client.js"></script>
+<script src="https://cdn.shopify.com/shopifycloud/app-bridge.js"></script>
 <script>
 // STELLA V8: Auto-exchange session token for offline access token (with retry)
 (async function stellaTokenExchange() {
-  // Wait for App Bridge to be ready (retry up to 10 times, 500ms apart)
+  // Wait for App Bridge to be ready (retry up to 20 times, 500ms apart = 10s max)
   let attempts = 0;
-  while (attempts < 10) {
-    if (typeof shopify !== 'undefined' && shopify.idToken) break;
+  while (attempts < 20) {
+    if (typeof shopify !== 'undefined' && typeof shopify.idToken === 'function') break;
     await new Promise(r => setTimeout(r, 500));
     attempts++;
   }
-  if (typeof shopify === 'undefined' || !shopify.idToken) {
-    console.log('STELLA V8: App Bridge not available (not in Shopify admin iframe)');
+  if (typeof shopify === 'undefined' || typeof shopify.idToken !== 'function') {
+    console.log('STELLA V8: App Bridge not available after ' + attempts + ' attempts');
     return;
   }
   try {
-    console.log('STELLA V8: App Bridge ready, requesting session token...');
+    console.log('STELLA V8: App Bridge ready after ' + attempts + ' attempts, requesting session token...');
     const token = await shopify.idToken();
     if (!token) { console.log('STELLA V8: No session token returned'); return; }
-    console.log('STELLA V8: Got session token, exchanging for offline access...');
+    console.log('STELLA V8: Got session token (' + token.substring(0, 20) + '...), exchanging...');
     const resp = await fetch('/auth/token-exchange', {
       method: 'POST',
       headers: {'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'},
@@ -841,11 +841,11 @@ function closeSidebar() {
     });
     const data = await resp.json();
     if (data.success) {
-      console.log('STELLA V8: Offline access token obtained -', data.token_preview);
+      console.log('STELLA V8: SUCCESS - Offline access token obtained:', data.token_preview);
       const el = document.getElementById('statusDot');
       if (el) el.style.background = '#16A34A';
     } else {
-      console.error('STELLA V8: Token exchange failed -', JSON.stringify(data));
+      console.error('STELLA V8: Token exchange failed:', JSON.stringify(data));
     }
   } catch (e) { console.error('STELLA V8: Token exchange error:', e.message); }
 })();
