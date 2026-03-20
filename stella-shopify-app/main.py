@@ -882,7 +882,7 @@ async def latest_snapshot(request: Request):
         return {"snapshot": None, "error": str(e)}
 
 # ══════════════════════ HEALTH ══════════════════════
-APP_VERSION = "2.5.0-appbridge-fix"
+APP_VERSION = "2.6.0-appbridge-apikey"
 
 @app.get("/debug/shopify")
 async def debug_shopify():
