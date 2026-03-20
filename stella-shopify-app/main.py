@@ -567,24 +567,6 @@ async def auth_callback(request: Request):
 <p><a href="/health">Verifier le health check</a></p>
 </body></html>""")
 
-@app.get("/auth/token-full")
-async def token_full(request: Request):
-    """Return full token for local config (temporary, protected by API key)."""
-    verify_claude_key(request)
-    db = get_db()
-    full_token = None
-    if db:
-        try:
-            cur = db.cursor()
-            cur.execute("SELECT access_token, scope FROM shopify_tokens WHERE shop=%s", (SHOPIFY_STORE_DOMAIN,))
-            row = cur.fetchone()
-            if row: full_token = row[0]
-            cur.close(); db.close()
-        except:
-            try: db.close()
-            except: pass
-    return {"token": full_token or SHOPIFY_ACCESS_TOKEN}
-
 @app.get("/auth/token-status")
 async def token_status(request: Request):
     """Check current token status."""
