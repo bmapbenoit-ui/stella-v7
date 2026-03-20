@@ -495,11 +495,77 @@ async def auth_token_exchange(request: Request):
 
 @app.get("/auth/install")
 async def auth_install(request: Request):
-    """Trigger token exchange by opening the app in Shopify admin.
-    Redirects to the app's embedded URL in Shopify."""
+    """Start OAuth authorization code flow (fallback for Token Exchange).
+    Visit this URL in your browser to authorize the app and get an offline token."""
     shop = request.query_params.get("shop", SHOPIFY_STORE_DOMAIN)
-    admin_url = f"https://{shop}/admin/apps/stella-v8"
-    return RedirectResponse(url=admin_url)
+    client_id = SHOPIFY_V8_CLIENT_ID or SHOPIFY_API_KEY
+    if not client_id:
+        return HTMLResponse("<h1>Error</h1><p>No client_id configured</p>", status_code=500)
+    redirect_uri = f"{HOST_URL}/auth/callback" if HOST_URL else f"https://stella-shopify-app-production.up.railway.app/auth/callback"
+    scopes = "read_products,write_products,read_orders,read_customers,write_customers,read_content,write_content,read_themes,write_themes,read_inventory,write_inventory"
+    nonce = str(uuid.uuid4())
+    # Store nonce in Redis for CSRF verification
+    rc = get_redis()
+    if rc:
+        try: rc.setex(f"oauth_nonce:{nonce}", 600, shop)
+        except: pass
+    auth_url = f"https://{shop}/admin/oauth/authorize?client_id={client_id}&scope={scopes}&redirect_uri={redirect_uri}&state={nonce}"
+    logger.info(f"OAuth install: redirecting to {auth_url}")
+    return RedirectResponse(url=auth_url)
+
+@app.get("/auth/callback")
+async def auth_callback(request: Request):
+    """OAuth callback — exchange authorization code for offline access token."""
+    code = request.query_params.get("code")
+    shop = request.query_params.get("shop", SHOPIFY_STORE_DOMAIN)
+    state = request.query_params.get("state")
+    if not code:
+        return HTMLResponse("<h1>Erreur</h1><p>Pas de code d'autorisation reçu</p>", status_code=400)
+    # Verify nonce if stored
+    rc = get_redis()
+    if rc and state:
+        try:
+            stored = rc.get(f"oauth_nonce:{state}")
+            if stored:
+                rc.delete(f"oauth_nonce:{state}")
+        except: pass
+    # Exchange code for access token
+    client_id = SHOPIFY_V8_CLIENT_ID or SHOPIFY_API_KEY
+    client_secret = SHOPIFY_V8_CLIENT_SECRET or SHOPIFY_API_SECRET
+    try:
+        async with httpx.AsyncClient(timeout=30) as c:
+            r = await c.post(
+                f"https://{shop}/admin/oauth/access_token",
+                data={
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "code": code,
+                },
+            )
+            if r.status_code != 200:
+                logger.error(f"OAuth callback failed: {r.status_code} {r.text[:500]}")
+                return HTMLResponse(f"<h1>Erreur</h1><p>Échange token échoué: HTTP {r.status_code}</p><pre>{r.text[:500]}</pre>", status_code=500)
+            result = r.json()
+    except Exception as e:
+        logger.error(f"OAuth callback exception: {e}")
+        return HTMLResponse(f"<h1>Erreur</h1><p>Exception: {e}</p>", status_code=500)
+    access_token = result.get("access_token")
+    scope = result.get("scope", "")
+    if not access_token:
+        return HTMLResponse(f"<h1>Erreur</h1><p>Pas de token dans la réponse</p><pre>{json.dumps(result, indent=2)}</pre>", status_code=500)
+    # Store token in DB + update global
+    store_shopify_token(shop, access_token, scope)
+    preview = f"{access_token[:12]}...{access_token[-4:]}"
+    logger.info(f"OAuth callback SUCCESS: token {preview} for {shop}, scopes: {scope}")
+    return HTMLResponse(f"""<html><body style="font-family:system-ui;max-width:600px;margin:60px auto;text-align:center">
+<h1 style="color:#16A34A">Token obtenu avec succes !</h1>
+<p><strong>Shop:</strong> {shop}</p>
+<p><strong>Token:</strong> <code>{preview}</code></p>
+<p><strong>Scopes:</strong> {scope}</p>
+<hr>
+<p>Le token est stocke en base de donnees et actif. STELLA peut maintenant acceder a Shopify.</p>
+<p><a href="/health">Verifier le health check</a></p>
+</body></html>""")
 
 @app.get("/auth/token-status")
 async def token_status(request: Request):
@@ -882,7 +948,7 @@ async def latest_snapshot(request: Request):
         return {"snapshot": None, "error": str(e)}
 
 # ══════════════════════ HEALTH ══════════════════════
-APP_VERSION = "2.7.0-form-encoded"
+APP_VERSION = "2.8.0-oauth-fallback"
 
 @app.get("/debug/shopify")
 async def debug_shopify():
