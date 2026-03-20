@@ -882,7 +882,7 @@ async def latest_snapshot(request: Request):
         return {"snapshot": None, "error": str(e)}
 
 # ══════════════════════ HEALTH ══════════════════════
-APP_VERSION = "2.3.0-auto-exchange"
+APP_VERSION = "2.4.0-appbridge-retry"
 
 @app.get("/debug/shopify")
 async def debug_shopify():
@@ -920,24 +920,8 @@ async def health():
 # ══════════════════════ FRONTEND ══════════════════════
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
-    # Auto Token Exchange: if Shopify sends id_token in URL (embedded app load), exchange it server-side
-    id_token = request.query_params.get("id_token")
-    if id_token and SHOPIFY_V8_CLIENT_ID and SHOPIFY_V8_CLIENT_SECRET:
-        try:
-            parts = id_token.split(".")
-            pad = 4 - len(parts[1]) % 4
-            if pad != 4: parts[1] += "=" * pad
-            payload = json.loads(base64.urlsafe_b64decode(parts[1]))
-            shop = payload.get("dest", "").replace("https://", "").replace("http://", "") or SHOPIFY_STORE_DOMAIN
-            logger.info(f"Auto token exchange: id_token detected for {shop}")
-            result = await exchange_session_for_offline_token(id_token, shop)
-            if "error" not in result and result.get("access_token"):
-                store_shopify_token(shop, result["access_token"], result.get("scope", ""))
-                logger.info(f"Auto token exchange SUCCESS: {result['access_token'][:12]}...")
-            else:
-                logger.warning(f"Auto token exchange failed: {result}")
-        except Exception as e:
-            logger.warning(f"Auto token exchange error: {e}")
+    # Note: id_token from URL is NOT suitable for Token Exchange (invalid_subject_token_type)
+    # Token exchange is handled client-side via App Bridge shopify.idToken() -> POST /auth/token-exchange
     html_path = os.path.join(os.path.dirname(__file__), "static", "index.html")
     with open(html_path) as f: html = f.read()
     html = html.replace("__SHOPIFY_API_KEY__", SHOPIFY_V8_CLIENT_ID or SHOPIFY_API_KEY)

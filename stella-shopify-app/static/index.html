@@ -816,12 +816,24 @@ function closeSidebar() {
 </script>
 <script src="https://cdn.shopify.com/shopifycloud/app-bridge/client.js"></script>
 <script>
-// STELLA V8: Auto-exchange session token for offline access token
+// STELLA V8: Auto-exchange session token for offline access token (with retry)
 (async function stellaTokenExchange() {
+  // Wait for App Bridge to be ready (retry up to 10 times, 500ms apart)
+  let attempts = 0;
+  while (attempts < 10) {
+    if (typeof shopify !== 'undefined' && shopify.idToken) break;
+    await new Promise(r => setTimeout(r, 500));
+    attempts++;
+  }
+  if (typeof shopify === 'undefined' || !shopify.idToken) {
+    console.log('STELLA V8: App Bridge not available (not in Shopify admin iframe)');
+    return;
+  }
   try {
-    if (typeof shopify === 'undefined' || !shopify.idToken) return;
+    console.log('STELLA V8: App Bridge ready, requesting session token...');
     const token = await shopify.idToken();
-    if (!token) return;
+    if (!token) { console.log('STELLA V8: No session token returned'); return; }
+    console.log('STELLA V8: Got session token, exchanging for offline access...');
     const resp = await fetch('/auth/token-exchange', {
       method: 'POST',
       headers: {'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'},
@@ -832,8 +844,10 @@ function closeSidebar() {
       console.log('STELLA V8: Offline access token obtained -', data.token_preview);
       const el = document.getElementById('statusDot');
       if (el) el.style.background = '#16A34A';
+    } else {
+      console.error('STELLA V8: Token exchange failed -', JSON.stringify(data));
     }
-  } catch (e) { console.log('Token exchange skipped (not in Shopify admin):', e.message); }
+  } catch (e) { console.error('STELLA V8: Token exchange error:', e.message); }
 })();
 </script>
 </body>
