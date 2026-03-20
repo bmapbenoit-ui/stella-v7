@@ -26,6 +26,9 @@ SHOPIFY_API_SECRET = os.getenv("SHOPIFY_API_SECRET", "")
 SHOPIFY_SHOP = os.getenv("SHOPIFY_SHOP", "planetemode.myshopify.com")
 SHOPIFY_ACCESS_TOKEN = os.getenv("SHOPIFY_ACCESS_TOKEN", "")
 SHOPIFY_STORE_DOMAIN = os.getenv("SHOPIFY_STORE_DOMAIN", SHOPIFY_SHOP)
+SHOPIFY_V8_CLIENT_ID = os.getenv("SHOPIFY_V8_CLIENT_ID", "")
+SHOPIFY_V8_CLIENT_SECRET = os.getenv("SHOPIFY_V8_CLIENT_SECRET", "")
+HOST_URL = os.getenv("HOST_URL", "")
 CONTEXT_ENGINE_URL = os.getenv("CONTEXT_ENGINE_URL", "https://context-engine-production-e525.up.railway.app")
 DEV_MODE = os.getenv("DEV_MODE", "false").lower() == "true"
 PORT = int(os.getenv("PORT", "8080"))
@@ -98,6 +101,14 @@ CREATE TABLE IF NOT EXISTS claude_memories (
     created_at TIMESTAMP DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_claude_mem ON claude_memories(category, importance DESC);
+CREATE TABLE IF NOT EXISTS shopify_tokens (
+    id SERIAL PRIMARY KEY,
+    shop VARCHAR(255) NOT NULL UNIQUE,
+    access_token TEXT NOT NULL,
+    scope TEXT DEFAULT '',
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
 CREATE TABLE IF NOT EXISTS claude_snapshots (
     id SERIAL PRIMARY KEY,
     session_id VARCHAR(100),
@@ -109,6 +120,24 @@ CREATE TABLE IF NOT EXISTS claude_snapshots (
     created_at TIMESTAMP DEFAULT NOW()
 );
 """
+
+def load_shopify_token_from_db():
+    """Load V8 OAuth token from DB if available (overrides env var)."""
+    global SHOPIFY_ACCESS_TOKEN
+    db = get_db()
+    if not db: return
+    try:
+        cur = db.cursor()
+        cur.execute("SELECT access_token FROM shopify_tokens WHERE shop=%s ORDER BY updated_at DESC LIMIT 1", (SHOPIFY_STORE_DOMAIN,))
+        row = cur.fetchone()
+        if row and row[0]:
+            SHOPIFY_ACCESS_TOKEN = row[0]
+            logger.info(f"Loaded Shopify V8 token from DB: {SHOPIFY_ACCESS_TOKEN[:12]}...")
+        cur.close(); db.close()
+    except Exception as e:
+        logger.warning(f"Load token from DB: {e}")
+        try: db.close()
+        except: pass
 
 @app.on_event("startup")
 async def startup():
@@ -122,6 +151,7 @@ async def startup():
             try: db.close()
             except: pass
     get_redis()
+    load_shopify_token_from_db()
 
 # ══════════════════════ 3-LAYER MEMORY ══════════════════════
 def save_to_redis(conv_id, role, content):
@@ -365,6 +395,153 @@ def extract_text(content, filename):
     if ext in ("xlsx","xls","docx","doc","pptx"):
         return f"[Document {ext.upper()}: {filename}, {len(content)//1024}KB. Posez des questions spécifiques sur son contenu.]"
     return f"[Fichier: {filename}, {len(content)//1024}KB]"
+
+# ══════════════════════ OAUTH V8 ══════════════════════
+import secrets
+from fastapi.responses import RedirectResponse
+
+OAUTH_SCOPES = ",".join([
+    "read_products", "write_products", "read_orders", "read_customers",
+    "read_analytics", "read_inventory", "read_content", "read_themes",
+    "write_script_tags", "read_script_tags", "read_metaobjects",
+    "read_metaobject_definitions", "read_locations", "read_shipping",
+    "read_product_listings", "write_product_listings", "read_files",
+    "read_publications", "read_discounts", "read_price_rules",
+    "read_fulfillments", "read_draft_orders", "read_markets",
+    "read_translations", "read_online_store_pages",
+    "read_online_store_navigation", "read_locales",
+    "write_custom_pixels", "read_custom_pixels",
+    "read_customer_events", "read_reports",
+])
+
+@app.get("/auth/install")
+async def auth_install(request: Request):
+    """Initiate Shopify OAuth V8 flow."""
+    shop = request.query_params.get("shop", SHOPIFY_STORE_DOMAIN)
+    if not SHOPIFY_V8_CLIENT_ID:
+        raise HTTPException(500, "SHOPIFY_V8_CLIENT_ID not configured")
+    if not HOST_URL:
+        raise HTTPException(500, "HOST_URL not configured")
+    nonce = secrets.token_urlsafe(24)
+    rc = get_redis()
+    if rc:
+        rc.setex(f"stella:oauth:nonce:{nonce}", 600, shop)
+    redirect_uri = f"{HOST_URL}/auth/callback"
+    oauth_url = (
+        f"https://{shop}/admin/oauth/authorize"
+        f"?client_id={SHOPIFY_V8_CLIENT_ID}"
+        f"&scope={OAUTH_SCOPES}"
+        f"&redirect_uri={redirect_uri}"
+        f"&state={nonce}"
+    )
+    logger.info(f"OAuth install: redirecting to {shop}")
+    return RedirectResponse(url=oauth_url)
+
+@app.get("/auth/callback")
+async def auth_callback(request: Request):
+    """Handle Shopify OAuth callback — exchange code for token."""
+    code = request.query_params.get("code")
+    shop = request.query_params.get("shop")
+    state = request.query_params.get("state")
+    hmac_param = request.query_params.get("hmac")
+    if not code or not shop:
+        raise HTTPException(400, "Missing code or shop")
+    # Verify HMAC
+    if hmac_param:
+        params = {k: v for k, v in request.query_params.items() if k != "hmac"}
+        message = "&".join(f"{k}={params[k]}" for k in sorted(params))
+        computed = hmac.new(
+            SHOPIFY_V8_CLIENT_SECRET.encode(), message.encode(), hashlib.sha256
+        ).hexdigest()
+        if not hmac.compare_digest(computed, hmac_param):
+            raise HTTPException(400, "Invalid HMAC signature")
+    # Verify nonce
+    rc = get_redis()
+    if rc and state:
+        stored = rc.get(f"stella:oauth:nonce:{state}")
+        if stored:
+            rc.delete(f"stella:oauth:nonce:{state}")
+    # Exchange code for access token
+    async with httpx.AsyncClient(timeout=30) as c:
+        r = await c.post(
+            f"https://{shop}/admin/oauth/access_token",
+            json={
+                "client_id": SHOPIFY_V8_CLIENT_ID,
+                "client_secret": SHOPIFY_V8_CLIENT_SECRET,
+                "code": code,
+            },
+        )
+        if r.status_code != 200:
+            logger.error(f"Token exchange failed: {r.status_code} {r.text}")
+            raise HTTPException(500, f"Token exchange failed: {r.text[:200]}")
+        data = r.json()
+    access_token = data.get("access_token")
+    scope = data.get("scope", "")
+    if not access_token:
+        raise HTTPException(500, "No access_token in response")
+    # Store in DB
+    db = get_db()
+    if db:
+        try:
+            cur = db.cursor()
+            cur.execute(
+                """INSERT INTO shopify_tokens (shop, access_token, scope, updated_at)
+                   VALUES (%s, %s, %s, NOW())
+                   ON CONFLICT (shop) DO UPDATE
+                   SET access_token=EXCLUDED.access_token, scope=EXCLUDED.scope, updated_at=NOW()""",
+                (shop, access_token, scope),
+            )
+            db.commit(); cur.close(); db.close()
+            logger.info(f"Stored V8 token for {shop}")
+        except Exception as e:
+            logger.error(f"Store token: {e}")
+            try: db.close()
+            except: pass
+    # Update global so app uses it immediately
+    global SHOPIFY_ACCESS_TOKEN
+    SHOPIFY_ACCESS_TOKEN = access_token
+    logger.info(f"OAuth V8 SUCCESS for {shop} — scopes: {scope}")
+    return HTMLResponse(f"""<html><head><title>STELLA V8 — OAuth OK</title></head><body style="font-family:sans-serif;max-width:600px;margin:50px auto;text-align:center;">
+    <h1 style="color:#C8984E;">STELLA V8 — Token obtenu</h1>
+    <p><strong>Shop:</strong> {shop}</p>
+    <p><strong>Token:</strong> {access_token[:10]}...{access_token[-4:]}</p>
+    <p><strong>Scopes:</strong> {scope[:200]}</p>
+    <p style="color:green;font-weight:bold;">Token stocke en base de donnees. L'app utilise maintenant ce token.</p>
+    <p><a href="/">Retour a STELLA</a></p>
+    </body></html>""")
+
+@app.get("/auth/token-status")
+async def token_status(request: Request):
+    """Check current token status."""
+    verify_claude_key(request)
+    token_preview = f"{SHOPIFY_ACCESS_TOKEN[:10]}...{SHOPIFY_ACCESS_TOKEN[-4:]}" if len(SHOPIFY_ACCESS_TOKEN) > 14 else "none"
+    # Test token
+    working = False
+    if SHOPIFY_ACCESS_TOKEN:
+        try:
+            async with httpx.AsyncClient(timeout=10) as c:
+                r = await c.post(
+                    SHOPIFY_GRAPHQL_URL,
+                    json={"query": "{ shop { name } }"},
+                    headers={"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"},
+                )
+                working = r.status_code == 200 and "errors" not in r.json()
+        except: pass
+    # Check DB token
+    db_token = None
+    db = get_db()
+    if db:
+        try:
+            cur = db.cursor()
+            cur.execute("SELECT access_token, scope, updated_at FROM shopify_tokens WHERE shop=%s", (SHOPIFY_STORE_DOMAIN,))
+            row = cur.fetchone()
+            if row:
+                db_token = {"preview": f"{row[0][:10]}...{row[0][-4:]}", "scope_count": len(row[1].split(",")) if row[1] else 0, "updated_at": row[2].isoformat() if row[2] else None}
+            cur.close(); db.close()
+        except:
+            try: db.close()
+            except: pass
+    return {"token_preview": token_preview, "working": working, "db_token": db_token, "v8_client_id": SHOPIFY_V8_CLIENT_ID[:8] + "..." if SHOPIFY_V8_CLIENT_ID else None}
 
 # ══════════════════════ AUTH ══════════════════════
 def decode_session_token(token):
@@ -714,7 +891,7 @@ async def latest_snapshot(request: Request):
         return {"snapshot": None, "error": str(e)}
 
 # ══════════════════════ HEALTH ══════════════════════
-APP_VERSION = "2.1.0-date-filter"
+APP_VERSION = "2.2.0-oauth-v8"
 
 @app.get("/debug/shopify")
 async def debug_shopify():
