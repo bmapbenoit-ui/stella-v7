@@ -419,7 +419,7 @@ async def exchange_session_for_offline_token(session_token: str, shop: str) -> d
     async with httpx.AsyncClient(timeout=30) as c:
         r = await c.post(
             f"https://{shop}/admin/oauth/access_token",
-            json={
+            data={
                 "client_id": SHOPIFY_V8_CLIENT_ID,
                 "client_secret": SHOPIFY_V8_CLIENT_SECRET,
                 "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
@@ -882,7 +882,7 @@ async def latest_snapshot(request: Request):
         return {"snapshot": None, "error": str(e)}
 
 # ══════════════════════ HEALTH ══════════════════════
-APP_VERSION = "2.6.0-appbridge-apikey"
+APP_VERSION = "2.7.0-form-encoded"
 
 @app.get("/debug/shopify")
 async def debug_shopify():
