@@ -414,72 +414,28 @@ OAUTH_SCOPES = ",".join([
     "read_customer_events", "read_reports",
 ])
 
-@app.get("/auth/install")
-async def auth_install(request: Request):
-    """Initiate Shopify OAuth V8 flow."""
-    shop = request.query_params.get("shop", SHOPIFY_STORE_DOMAIN)
-    if not SHOPIFY_V8_CLIENT_ID:
-        raise HTTPException(500, "SHOPIFY_V8_CLIENT_ID not configured")
-    if not HOST_URL:
-        raise HTTPException(500, "HOST_URL not configured")
-    nonce = secrets.token_urlsafe(24)
-    rc = get_redis()
-    if rc:
-        rc.setex(f"stella:oauth:nonce:{nonce}", 600, shop)
-    redirect_uri = f"{HOST_URL}/auth/callback"
-    oauth_url = (
-        f"https://{shop}/admin/oauth/authorize"
-        f"?client_id={SHOPIFY_V8_CLIENT_ID}"
-        f"&scope={OAUTH_SCOPES}"
-        f"&redirect_uri={redirect_uri}"
-        f"&state={nonce}"
-    )
-    logger.info(f"OAuth install: redirecting to {shop}")
-    return RedirectResponse(url=oauth_url)
-
-@app.get("/auth/callback")
-async def auth_callback(request: Request):
-    """Handle Shopify OAuth callback — exchange code for token."""
-    code = request.query_params.get("code")
-    shop = request.query_params.get("shop")
-    state = request.query_params.get("state")
-    hmac_param = request.query_params.get("hmac")
-    if not code or not shop:
-        raise HTTPException(400, "Missing code or shop")
-    # Verify HMAC
-    if hmac_param:
-        params = {k: v for k, v in request.query_params.items() if k != "hmac"}
-        message = "&".join(f"{k}={params[k]}" for k in sorted(params))
-        computed = hmac.new(
-            SHOPIFY_V8_CLIENT_SECRET.encode(), message.encode(), hashlib.sha256
-        ).hexdigest()
-        if not hmac.compare_digest(computed, hmac_param):
-            raise HTTPException(400, "Invalid HMAC signature")
-    # Verify nonce
-    rc = get_redis()
-    if rc and state:
-        stored = rc.get(f"stella:oauth:nonce:{state}")
-        if stored:
-            rc.delete(f"stella:oauth:nonce:{state}")
-    # Exchange code for access token
+async def exchange_session_for_offline_token(session_token: str, shop: str) -> dict:
+    """Exchange a Shopify session token (JWT) for an offline access token via Token Exchange API."""
     async with httpx.AsyncClient(timeout=30) as c:
         r = await c.post(
             f"https://{shop}/admin/oauth/access_token",
             json={
                 "client_id": SHOPIFY_V8_CLIENT_ID,
                 "client_secret": SHOPIFY_V8_CLIENT_SECRET,
-                "code": code,
+                "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+                "subject_token": session_token,
+                "subject_token_type": "urn:ietf:params:oauth:token-type:id-token",
+                "requested_token_type": "urn:shopify:params:oauth:token-type:offline-access-token",
             },
         )
         if r.status_code != 200:
-            logger.error(f"Token exchange failed: {r.status_code} {r.text}")
-            raise HTTPException(500, f"Token exchange failed: {r.text[:200]}")
-        data = r.json()
-    access_token = data.get("access_token")
-    scope = data.get("scope", "")
-    if not access_token:
-        raise HTTPException(500, "No access_token in response")
-    # Store in DB
+            logger.error(f"Token exchange failed: {r.status_code} {r.text[:300]}")
+            return {"error": f"HTTP {r.status_code}: {r.text[:200]}"}
+        return r.json()
+
+def store_shopify_token(shop: str, access_token: str, scope: str = ""):
+    """Store Shopify token in PostgreSQL and update global."""
+    global SHOPIFY_ACCESS_TOKEN
     db = get_db()
     if db:
         try:
@@ -497,18 +453,53 @@ async def auth_callback(request: Request):
             logger.error(f"Store token: {e}")
             try: db.close()
             except: pass
-    # Update global so app uses it immediately
-    global SHOPIFY_ACCESS_TOKEN
     SHOPIFY_ACCESS_TOKEN = access_token
-    logger.info(f"OAuth V8 SUCCESS for {shop} — scopes: {scope}")
-    return HTMLResponse(f"""<html><head><title>STELLA V8 — OAuth OK</title></head><body style="font-family:sans-serif;max-width:600px;margin:50px auto;text-align:center;">
-    <h1 style="color:#C8984E;">STELLA V8 — Token obtenu</h1>
-    <p><strong>Shop:</strong> {shop}</p>
-    <p><strong>Token:</strong> {access_token[:10]}...{access_token[-4:]}</p>
-    <p><strong>Scopes:</strong> {scope[:200]}</p>
-    <p style="color:green;font-weight:bold;">Token stocke en base de donnees. L'app utilise maintenant ce token.</p>
-    <p><a href="/">Retour a STELLA</a></p>
-    </body></html>""")
+    logger.info(f"Global token updated: {access_token[:12]}...")
+
+@app.post("/auth/token-exchange")
+async def auth_token_exchange(request: Request):
+    """Exchange a session token for an offline access token (Token Exchange API).
+    Called from embedded app frontend when loaded in Shopify admin."""
+    if not SHOPIFY_V8_CLIENT_ID or not SHOPIFY_V8_CLIENT_SECRET:
+        raise HTTPException(500, "V8 credentials not configured")
+    # Get session token from Authorization header
+    auth = request.headers.get("authorization", "")
+    session_token = None
+    if auth.startswith("Bearer "):
+        session_token = auth[7:]
+    if not session_token:
+        body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+        session_token = body.get("session_token")
+    if not session_token:
+        raise HTTPException(400, "No session token provided")
+    # Decode to get shop
+    try:
+        parts = session_token.split(".")
+        pad = 4 - len(parts[1]) % 4
+        if pad != 4: parts[1] += "=" * pad
+        payload = json.loads(base64.urlsafe_b64decode(parts[1]))
+        dest = payload.get("dest", "")
+        shop = dest.replace("https://", "").replace("http://", "")
+        if not shop: shop = SHOPIFY_STORE_DOMAIN
+    except: shop = SHOPIFY_STORE_DOMAIN
+    # Exchange
+    result = await exchange_session_for_offline_token(session_token, shop)
+    if "error" in result:
+        raise HTTPException(500, result["error"])
+    access_token = result.get("access_token")
+    scope = result.get("scope", "")
+    if not access_token:
+        raise HTTPException(500, "No access_token in response")
+    store_shopify_token(shop, access_token, scope)
+    return {"success": True, "shop": shop, "scope": scope, "token_preview": f"{access_token[:10]}...{access_token[-4:]}"}
+
+@app.get("/auth/install")
+async def auth_install(request: Request):
+    """Trigger token exchange by opening the app in Shopify admin.
+    Redirects to the app's embedded URL in Shopify."""
+    shop = request.query_params.get("shop", SHOPIFY_STORE_DOMAIN)
+    admin_url = f"https://{shop}/admin/apps/stella-v8"
+    return RedirectResponse(url=admin_url)
 
 @app.get("/auth/token-status")
 async def token_status(request: Request):
@@ -931,7 +922,7 @@ async def health():
 async def index(request: Request):
     html_path = os.path.join(os.path.dirname(__file__), "static", "index.html")
     with open(html_path) as f: html = f.read()
-    html = html.replace("__SHOPIFY_API_KEY__", SHOPIFY_API_KEY)
+    html = html.replace("__SHOPIFY_API_KEY__", SHOPIFY_V8_CLIENT_ID or SHOPIFY_API_KEY)
     html = html.replace("__SHOPIFY_SHOP__", SHOPIFY_SHOP)
     html = html.replace("__SHOPIFY_HOST__", request.query_params.get("host", ""))
     return HTMLResponse(html)
