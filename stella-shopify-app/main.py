@@ -1659,18 +1659,40 @@ async def index(request: Request):
 <style>
   *{{margin:0;padding:0;box-sizing:border-box}}
   body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#F9F7F4;color:#1A1A1A;padding:0}}
-  .app-header{{background:#1A1A1A;padding:20px 32px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px}}
+
+  /* ═══ HEADER ═══ */
+  .app-header{{background:#1A1A1A;padding:18px 32px 0;display:flex;flex-direction:column}}
+  .app-header__top{{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}}
   .app-header h1{{color:#D4AF37;font-size:20px;letter-spacing:2px;font-weight:800}}
-  .app-header .subtitle{{color:#888;font-size:13px}}
+  .app-header .subtitle{{color:#888;font-size:12px;margin-top:2px}}
   .app-header .refresh-btn{{background:#D4AF37;color:#fff;border:none;padding:8px 20px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;transition:.2s}}
   .app-header .refresh-btn:hover{{background:#b8862e}}
+
+  /* ═══ TABS ═══ */
+  .tabs{{display:flex;gap:0;overflow-x:auto;-webkit-overflow-scrolling:touch}}
+  .tabs::-webkit-scrollbar{{display:none}}
+  .tab{{padding:10px 20px;color:#888;font-size:13px;font-weight:600;cursor:pointer;border-bottom:3px solid transparent;transition:.2s;white-space:nowrap;display:flex;align-items:center;gap:6px}}
+  .tab:hover{{color:#ccc}}
+  .tab.active{{color:#D4AF37;border-bottom-color:#D4AF37}}
+  .tab .tab-icon{{font-size:15px}}
+  .tab .tab-badge{{background:#D4AF37;color:#fff;font-size:10px;padding:2px 7px;border-radius:10px;font-weight:700;min-width:18px;text-align:center}}
+  .tab.coming .tab-badge{{background:#555;color:#888}}
+  .tab.coming{{color:#555;cursor:default}}
+
+  /* ═══ TAB CONTENT ═══ */
+  .tab-content{{display:none}}
+  .tab-content.active{{display:block}}
   .container{{max-width:1100px;margin:0 auto;padding:24px 20px}}
+
+  /* ═══ CARDS ═══ */
   .cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px;margin-bottom:28px}}
   .card{{background:#fff;border-radius:14px;padding:24px 20px;box-shadow:0 2px 12px rgba(0,0,0,.04);text-align:center;transition:.2s}}
   .card:hover{{box-shadow:0 4px 20px rgba(0,0,0,.08)}}
   .card .num{{font-size:40px;font-weight:800;color:#D4AF37;line-height:1}}
   .card .label{{font-size:13px;color:#888;margin-top:8px;font-weight:500}}
   .card.ab{{border:2px solid #D4AF37;background:linear-gradient(135deg,#FFFDF7,#FFF8E7)}}
+
+  /* ═══ TABLES ═══ */
   .section-title{{font-size:15px;font-weight:700;margin:24px 0 10px;padding-left:4px;display:flex;align-items:center;gap:8px}}
   .section-title .icon{{font-size:18px}}
   table{{width:100%;background:#fff;border-radius:14px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,.04);border-collapse:collapse}}
@@ -1684,8 +1706,18 @@ async def index(request: Request):
   .badge-ab{{background:linear-gradient(135deg,#D4AF37,#B8862E);color:#fff;font-size:10px;padding:3px 8px;border-radius:6px;margin-left:8px;font-weight:700;letter-spacing:.5px;vertical-align:middle}}
   .status-badge{{color:#fff;font-size:11px;padding:4px 12px;border-radius:12px;font-weight:600}}
   .empty{{padding:24px;text-align:center;color:#aaa;font-size:14px}}
+
+  /* ═══ COMING SOON ═══ */
+  .coming-soon{{text-align:center;padding:80px 20px}}
+  .coming-soon .cs-icon{{font-size:48px;margin-bottom:16px}}
+  .coming-soon h2{{font-size:20px;font-weight:700;color:#1A1A1A;margin-bottom:8px}}
+  .coming-soon p{{font-size:14px;color:#888;max-width:400px;margin:0 auto}}
+
   .footer{{text-align:center;padding:20px;color:#bbb;font-size:12px}}
+
   @media(max-width:600px){{
+    .app-header{{padding:14px 16px 0}}
+    .tab{{padding:8px 14px;font-size:12px}}
     .cards{{grid-template-columns:1fr 1fr}}
     .card .num{{font-size:32px}}
     td,th{{padding:8px 10px;font-size:12px}}
@@ -1694,13 +1726,43 @@ async def index(request: Request):
 </style>
 </head>
 <body>
+
+<!-- ═══ HEADER + TABS ═══ -->
 <div class="app-header">
-  <div>
-    <h1>STELLA V8</h1>
-    <span class="subtitle">Liste d'attente &amp; notifications — {now_str} UTC</span>
+  <div class="app-header__top">
+    <div>
+      <h1>STELLA V8</h1>
+      <span class="subtitle">{now_str} UTC</span>
+    </div>
+    <button class="refresh-btn" onclick="location.reload()">Rafra&icirc;chir</button>
   </div>
-  <button class="refresh-btn" onclick="location.reload()">Rafra&icirc;chir</button>
+  <nav class="tabs">
+    <div class="tab active" data-tab="bis">
+      <span class="tab-icon">&#128276;</span> Liste d'attente
+      <span class="tab-badge">{total}</span>
+    </div>
+    <div class="tab" data-tab="analytics">
+      <span class="tab-icon">&#128200;</span> Analytics
+    </div>
+    <div class="tab" data-tab="enrichissement">
+      <span class="tab-icon">&#9997;&#65039;</span> Enrichissement
+    </div>
+    <div class="tab" data-tab="quiz">
+      <span class="tab-icon">&#128161;</span> Quiz Olfactif
+    </div>
+    <div class="tab coming" data-tab="images">
+      <span class="tab-icon">&#127912;</span> Images
+      <span class="tab-badge">Bient&ocirc;t</span>
+    </div>
+    <div class="tab coming" data-tab="settings">
+      <span class="tab-icon">&#9881;&#65039;</span> R&eacute;glages
+      <span class="tab-badge">Bient&ocirc;t</span>
+    </div>
+  </nav>
 </div>
+
+<!-- ═══ TAB: LISTE D'ATTENTE ═══ -->
+<div class="tab-content active" id="tab-bis">
 <div class="container">
   <div class="cards">
     <div class="card">
@@ -1720,20 +1782,92 @@ async def index(request: Request):
       <div class="label">Total inscriptions</div>
     </div>
   </div>
-
   <div class="section-title"><span class="icon">&#128230;</span> Par produit</div>
   <table>
     <tr><th>Produit</th><th style="text-align:center">Inscrits</th><th>Derni&egrave;re inscription</th></tr>
     {product_rows if product_rows else '<tr><td colspan="3" class="empty">Aucune inscription pour le moment</td></tr>'}
   </table>
-
   <div class="section-title"><span class="icon">&#128236;</span> Inscriptions r&eacute;centes</div>
   <table>
     <tr><th>Email</th><th>Produit</th><th>Date</th><th>Statut</th></tr>
     {recent_rows if recent_rows else '<tr><td colspan="4" class="empty">Aucune inscription</td></tr>'}
   </table>
 </div>
+</div>
+
+<!-- ═══ TAB: ANALYTICS ═══ -->
+<div class="tab-content" id="tab-analytics">
+<div class="container">
+  <div class="coming-soon">
+    <div class="cs-icon">&#128200;</div>
+    <h2>Analytics</h2>
+    <p>Chiffre d'affaires, visiteurs, conversions, top produits — bient&ocirc;t disponible.</p>
+  </div>
+</div>
+</div>
+
+<!-- ═══ TAB: ENRICHISSEMENT ═══ -->
+<div class="tab-content" id="tab-enrichissement">
+<div class="container">
+  <div class="coming-soon">
+    <div class="cs-icon">&#9997;&#65039;</div>
+    <h2>Enrichissement Catalogue</h2>
+    <p>Suivi de l'enrichissement produits par marque, progression metafields et SEO — bient&ocirc;t disponible.</p>
+  </div>
+</div>
+</div>
+
+<!-- ═══ TAB: QUIZ ═══ -->
+<div class="tab-content" id="tab-quiz">
+<div class="container">
+  <div class="coming-soon">
+    <div class="cs-icon">&#128161;</div>
+    <h2>Quiz Olfactif</h2>
+    <p>Configuration du quiz, statistiques de matching et recommandations — bient&ocirc;t disponible.</p>
+  </div>
+</div>
+</div>
+
+<!-- ═══ TAB: IMAGES ═══ -->
+<div class="tab-content" id="tab-images">
+<div class="container">
+  <div class="coming-soon">
+    <div class="cs-icon">&#127912;</div>
+    <h2>Images Produits</h2>
+    <p>G&eacute;n&eacute;ration d'images AB Signature 2D/3D, pipeline WebP — bient&ocirc;t disponible.</p>
+  </div>
+</div>
+</div>
+
+<!-- ═══ TAB: SETTINGS ═══ -->
+<div class="tab-content" id="tab-settings">
+<div class="container">
+  <div class="coming-soon">
+    <div class="cs-icon">&#9881;&#65039;</div>
+    <h2>R&eacute;glages</h2>
+    <p>Configuration SMTP, webhooks, tokens API et pr&eacute;f&eacute;rences — bient&ocirc;t disponible.</p>
+  </div>
+</div>
+</div>
+
 <div class="footer">STELLA V8 &middot; Plan&egrave;teBeauty &middot; Powered by Railway</div>
+
+<script>
+(function() {{
+  var tabs = document.querySelectorAll('.tab');
+  var contents = document.querySelectorAll('.tab-content');
+  tabs.forEach(function(tab) {{
+    tab.addEventListener('click', function() {{
+      if (tab.classList.contains('coming')) return;
+      tabs.forEach(function(t) {{ t.classList.remove('active'); }});
+      contents.forEach(function(c) {{ c.classList.remove('active'); }});
+      tab.classList.add('active');
+      var target = document.getElementById('tab-' + tab.getAttribute('data-tab'));
+      if (target) target.classList.add('active');
+    }});
+  }});
+}})();
+</script>
 </body>
 </html>"""
     return HTMLResponse(html)
