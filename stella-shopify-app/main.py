@@ -9,7 +9,10 @@ STELLA V7 — Shopify Embedded App (Full Version)
 import os, time, hmac, hashlib, base64, json, logging, uuid, re
 from datetime import datetime
 from typing import Optional, List
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 import httpx
+import aiosmtplib
 from fastapi import FastAPI, Request, HTTPException, Depends, UploadFile, File, Form
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
@@ -38,6 +41,14 @@ DATABASE_URL = os.getenv("DATABASE_URL", "")
 SHOPIFY_API_VERSION = "2026-01"
 SHOPIFY_GRAPHQL_URL = f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/{SHOPIFY_API_VERSION}/graphql.json"
 MAX_FILE_SIZE = 10 * 1024 * 1024
+
+# SMTP config for BIS notification emails
+SMTP_HOST = os.getenv("SMTP_HOST", "")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER", "")
+SMTP_PASS = os.getenv("SMTP_PASS", "")
+SMTP_FROM_NAME = os.getenv("SMTP_FROM_NAME", "PlanèteBeauty")
+SMTP_FROM_EMAIL = os.getenv("SMTP_FROM_EMAIL", "")
 
 app = FastAPI(title="STELLA Shopify App")
 
@@ -1136,6 +1147,108 @@ async def bis_dashboard(request: Request):
         return {"total_active": 0, "products": [], "recent": [], "error": str(e)}
 
 
+# ══════════════════════ BIS EMAIL ══════════════════════
+
+def bis_email_html(product_title: str, product_handle: str) -> str:
+    """Generate branded HTML email for back-in-stock notification."""
+    product_url = f"https://planetebeauty.com/products/{product_handle}"
+    return f"""<!DOCTYPE html>
+<html lang="fr">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head>
+<body style="margin:0;padding:0;background:#F9F7F4;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#F9F7F4;padding:30px 0">
+<tr><td align="center">
+<table width="600" cellpadding="0" cellspacing="0" style="background:#FFFFFF;border-radius:12px;overflow:hidden;box-shadow:0 4px 20px rgba(0,0,0,.06)">
+  <tr><td style="background:#1A1A1A;padding:28px 40px;text-align:center">
+    <span style="font-size:22px;font-weight:700;letter-spacing:3px;color:#D4AF37">PLANÈTE BEAUTY</span>
+  </td></tr>
+  <tr><td style="padding:40px">
+    <h1 style="margin:0 0 8px;font-size:20px;color:#1A1A1A;font-weight:600">Bonne nouvelle !</h1>
+    <p style="margin:0 0 24px;font-size:15px;color:#555;line-height:1.6">
+      Le produit que vous attendiez est de nouveau disponible :
+    </p>
+    <div style="background:#F9F7F4;border-radius:10px;padding:20px 24px;margin-bottom:28px;border-left:4px solid #D4AF37">
+      <p style="margin:0;font-size:17px;font-weight:600;color:#1A1A1A">{product_title}</p>
+    </div>
+    <table width="100%" cellpadding="0" cellspacing="0"><tr><td align="center">
+      <a href="{product_url}" style="display:inline-block;background:#D4AF37;color:#FFFFFF;text-decoration:none;padding:14px 40px;border-radius:8px;font-size:15px;font-weight:600;letter-spacing:.5px">
+        Découvrir maintenant
+      </a>
+    </td></tr></table>
+    <p style="margin:28px 0 0;font-size:13px;color:#999;line-height:1.5;text-align:center">
+      Les stocks sont limités — ne tardez pas !<br>
+      Livraison offerte dès 99€ · Try&amp;Buy · Cashback 5%
+    </p>
+  </td></tr>
+  <tr><td style="background:#F5F3EF;padding:20px 40px;text-align:center">
+    <p style="margin:0;font-size:12px;color:#999">
+      Vous recevez cet email car vous avez demandé à être averti(e) de la disponibilité de ce produit sur
+      <a href="https://planetebeauty.com" style="color:#D4AF37;text-decoration:none">planetebeauty.com</a>.
+    </p>
+  </td></tr>
+</table>
+</td></tr></table>
+</body></html>"""
+
+
+async def send_bis_email(to_email: str, product_title: str, product_handle: str) -> bool:
+    """Send a back-in-stock notification email via SMTP."""
+    if not SMTP_HOST or not SMTP_USER or not SMTP_FROM_EMAIL:
+        logger.warning("BIS email: SMTP not configured, skipping email send")
+        return False
+
+    msg = MIMEMultipart("alternative")
+    msg["From"] = f"{SMTP_FROM_NAME} <{SMTP_FROM_EMAIL}>"
+    msg["To"] = to_email
+    msg["Subject"] = f"{product_title} — De nouveau disponible !"
+
+    text_body = f"""Bonne nouvelle !
+
+Le produit que vous attendiez est de nouveau disponible :
+{product_title}
+
+Découvrez-le sur https://planetebeauty.com/products/{product_handle}
+
+Les stocks sont limités — ne tardez pas !
+Livraison offerte dès 99€ · Try&Buy · Cashback 5%
+
+---
+PlanèteBeauty — planetebeauty.com
+"""
+    msg.attach(MIMEText(text_body, "plain", "utf-8"))
+    msg.attach(MIMEText(bis_email_html(product_title, product_handle), "html", "utf-8"))
+
+    try:
+        await aiosmtplib.send(
+            msg,
+            hostname=SMTP_HOST,
+            port=SMTP_PORT,
+            username=SMTP_USER,
+            password=SMTP_PASS,
+            use_tls=False,
+            start_tls=True,
+        )
+        logger.info(f"BIS email sent to {to_email} for {product_title}")
+        return True
+    except Exception as e:
+        logger.error(f"BIS email failed for {to_email}: {e}")
+        return False
+
+
+@app.get("/api/bis/smtp-status")
+async def bis_smtp_status(request: Request):
+    """Check SMTP configuration status (authenticated)."""
+    api_key = request.headers.get("X-API-Key", "")
+    if api_key != "stella-mem-2026-planetebeauty":
+        raise HTTPException(403, "Unauthorized")
+    return {
+        "configured": bool(SMTP_HOST and SMTP_USER and SMTP_FROM_EMAIL),
+        "host": SMTP_HOST or "(not set)",
+        "port": SMTP_PORT,
+        "from": f"{SMTP_FROM_NAME} <{SMTP_FROM_EMAIL}>" if SMTP_FROM_EMAIL else "(not set)",
+    }
+
+
 @app.post("/api/bis/webhook/inventory")
 async def bis_webhook_inventory(request: Request):
     """Shopify webhook: inventory_levels/update — notify subscribers when back in stock."""
@@ -1213,8 +1326,14 @@ async def bis_webhook_inventory(request: Request):
             cur.close(); db.close()
             return {"ok": True, "action": "skipped", "reason": "no_subscribers", "product": product_title}
 
-        # 3. Mark as notified
+        # 3. Send notification emails + mark as notified
         sub_ids = [s["id"] for s in subscribers]
+        notified_emails = [s["email"] for s in subscribers]
+        emails_sent = 0
+        for s in subscribers:
+            if await send_bis_email(s["email"], product_title, product_handle):
+                emails_sent += 1
+
         cur.execute("""
             UPDATE bis_subscriptions SET status = 'notified', notified_at = NOW()
             WHERE id = ANY(%s)
@@ -1222,9 +1341,10 @@ async def bis_webhook_inventory(request: Request):
         db.commit()
         cur.close(); db.close()
 
+        logger.info(f"BIS webhook: {emails_sent}/{len(subscribers)} emails sent for {product_title}")
+
         # 4. Remove bis-{handle} tag from Shopify customers
         tag_to_remove = f"bis-{product_handle}"
-        notified_emails = [s["email"] for s in subscribers]
         async with httpx.AsyncClient(timeout=15) as client:
             for email in notified_emails:
                 try:
@@ -1250,13 +1370,14 @@ async def bis_webhook_inventory(request: Request):
                 except Exception as e:
                     logger.warning(f"BIS remove tag for {email}: {e}")
 
-        logger.info(f"BIS webhook: notified {len(subscribers)} subscribers for {product_title}, tags removed")
+        logger.info(f"BIS webhook: notified {len(subscribers)} subscribers for {product_title}, {emails_sent} emails sent, tags removed")
 
         return {
             "ok": True,
             "action": "notified",
             "product": product_title,
             "subscribers_notified": len(subscribers),
+            "emails_sent": emails_sent,
             "emails": notified_emails
         }
 
