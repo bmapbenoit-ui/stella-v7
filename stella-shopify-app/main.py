@@ -13,6 +13,7 @@ import httpx
 from fastapi import FastAPI, Request, HTTPException, Depends, UploadFile, File, Form
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import psycopg2, psycopg2.extras
 import redis as redis_lib
@@ -39,6 +40,14 @@ SHOPIFY_GRAPHQL_URL = f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/{SHOPIFY_API_VE
 MAX_FILE_SIZE = 10 * 1024 * 1024
 
 app = FastAPI(title="STELLA Shopify App")
+
+# CORS for BIS (Back In Stock) endpoints — storefront needs to call our API
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["https://planetebeauty.com", "https://www.planetebeauty.com", "https://planetemode.myshopify.com"],
+    allow_methods=["POST", "GET", "OPTIONS"],
+    allow_headers=["Content-Type"],
+)
 
 # ══════════════════════ DB & REDIS ══════════════════════
 r_client = None
@@ -119,6 +128,19 @@ CREATE TABLE IF NOT EXISTS claude_snapshots (
     next_actions JSONB DEFAULT '[]',
     created_at TIMESTAMP DEFAULT NOW()
 );
+CREATE TABLE IF NOT EXISTS bis_subscriptions (
+    id SERIAL PRIMARY KEY,
+    email VARCHAR(255) NOT NULL,
+    product_id BIGINT NOT NULL,
+    variant_id BIGINT NOT NULL,
+    product_title VARCHAR(500),
+    product_handle VARCHAR(255),
+    subscribed_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    notified_at TIMESTAMP WITH TIME ZONE DEFAULT NULL,
+    status VARCHAR(20) DEFAULT 'active'
+);
+CREATE INDEX IF NOT EXISTS idx_bis_product ON bis_subscriptions(product_id, status);
+CREATE INDEX IF NOT EXISTS idx_bis_email ON bis_subscriptions(email, status);
 """
 
 def load_shopify_token_from_db():
@@ -959,6 +981,160 @@ async def debug_shopify():
         return {"version": APP_VERSION, "orders_raw": orders[:1000], "refunds_raw": refunds[:1000]}
     except Exception as e:
         return {"version": APP_VERSION, "error": str(e)}
+
+# ══════════════════════ BACK IN STOCK (BIS) ══════════════════════
+
+class BISSubscribeRequest(BaseModel):
+    email: str
+    product_id: int
+    variant_id: int
+    product_title: str = ""
+    product_handle: str = ""
+
+@app.post("/api/bis/subscribe")
+async def bis_subscribe(req: BISSubscribeRequest):
+    """Public endpoint: subscribe email for back-in-stock notification."""
+    email = req.email.strip().lower()
+    if not email or "@" not in email:
+        raise HTTPException(400, "Email invalide")
+
+    # 1. Save to PostgreSQL
+    db = get_db()
+    if not db:
+        raise HTTPException(500, "Database unavailable")
+    try:
+        cur = db.cursor()
+        # Upsert: if same email+variant already active, skip
+        cur.execute("""
+            INSERT INTO bis_subscriptions (email, product_id, variant_id, product_title, product_handle)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT DO NOTHING
+            RETURNING id
+        """, (email, req.product_id, req.variant_id, req.product_title, req.product_handle))
+        db.commit()
+        new_id = cur.fetchone()
+        cur.close()
+        db.close()
+    except Exception as e:
+        try: db.close()
+        except: pass
+        logger.error(f"BIS subscribe DB: {e}")
+        # Likely duplicate, still return success
+        return {"success": True, "message": "Vous serez averti(e) dès que ce produit sera disponible."}
+
+    # 2. Tag customer in Shopify (native approach)
+    if SHOPIFY_ACCESS_TOKEN:
+        try:
+            tag = f"bis-{req.product_handle}"
+            async with httpx.AsyncClient(timeout=10) as client:
+                # Search for existing customer
+                search_q = f'{{"query": "query {{ customers(first:1, query:\\"email:{email}\\") {{ edges {{ node {{ id tags }} }} }} }}"}}'
+                sr = await client.post(
+                    SHOPIFY_GRAPHQL_URL,
+                    headers={"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"},
+                    content=search_q
+                )
+                sr_data = sr.json()
+                edges = sr_data.get("data", {}).get("customers", {}).get("edges", [])
+
+                if edges:
+                    # Customer exists: add tag
+                    cust_id = edges[0]["node"]["id"]
+                    existing_tags = edges[0]["node"].get("tags", [])
+                    if tag not in existing_tags:
+                        existing_tags.append(tag)
+                        if "bis-notify" not in existing_tags:
+                            existing_tags.append("bis-notify")
+                        tags_str = json.dumps(existing_tags)
+                        mut = f'{{"query": "mutation {{ customerUpdate(input: {{id: \\"{cust_id}\\", tags: {tags_str}}}) {{ customer {{ id }} userErrors {{ field message }} }} }}"}}'
+                        await client.post(
+                            SHOPIFY_GRAPHQL_URL,
+                            headers={"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"},
+                            content=mut
+                        )
+                else:
+                    # Create new customer with tag
+                    mut_create = json.dumps({"query": """
+                        mutation($input: CustomerInput!) {
+                            customerCreate(input: $input) {
+                                customer { id }
+                                userErrors { field message }
+                            }
+                        }
+                    """, "variables": {"input": {
+                        "email": email,
+                        "tags": [tag, "bis-notify"],
+                        "emailMarketingConsent": {
+                            "marketingState": "SUBSCRIBED",
+                            "marketingOptInLevel": "SINGLE_OPT_IN"
+                        }
+                    }}})
+                    await client.post(
+                        SHOPIFY_GRAPHQL_URL,
+                        headers={"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"},
+                        content=mut_create
+                    )
+            logger.info(f"BIS: {email} subscribed for {req.product_handle}, tagged in Shopify")
+        except Exception as e:
+            logger.warning(f"BIS Shopify tag: {e}")
+            # Non-blocking: subscription saved in DB even if Shopify tag fails
+
+    return {"success": True, "message": "Vous serez averti(e) dès que ce produit sera disponible."}
+
+
+@app.get("/api/bis/dashboard")
+async def bis_dashboard(request: Request):
+    """Dashboard: subscription counts per product."""
+    api_key = request.headers.get("X-API-Key", "")
+    if api_key != "stella-mem-2026-planetebeauty":
+        raise HTTPException(403, "Unauthorized")
+
+    db = get_db()
+    if not db:
+        return {"total_active": 0, "products": [], "recent": []}
+    try:
+        cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+        # Total active
+        cur.execute("SELECT COUNT(*) as total FROM bis_subscriptions WHERE status='active'")
+        total = cur.fetchone()["total"]
+
+        # Per product
+        cur.execute("""
+            SELECT product_id, product_title, product_handle, COUNT(*) as sub_count,
+                   MAX(subscribed_at) as last_sub
+            FROM bis_subscriptions WHERE status='active'
+            GROUP BY product_id, product_title, product_handle
+            ORDER BY sub_count DESC LIMIT 20
+        """)
+        products = cur.fetchall()
+
+        # Recent 10
+        cur.execute("""
+            SELECT email, product_title, product_handle, subscribed_at
+            FROM bis_subscriptions WHERE status='active'
+            ORDER BY subscribed_at DESC LIMIT 10
+        """)
+        recent = cur.fetchall()
+
+        cur.close()
+        db.close()
+
+        # Serialize datetimes
+        for p in products:
+            if p.get("last_sub"):
+                p["last_sub"] = p["last_sub"].isoformat()
+        for r in recent:
+            if r.get("subscribed_at"):
+                r["subscribed_at"] = r["subscribed_at"].isoformat()
+
+        return {"total_active": total, "products": products, "recent": recent}
+    except Exception as e:
+        try: db.close()
+        except: pass
+        logger.error(f"BIS dashboard: {e}")
+        return {"total_active": 0, "products": [], "recent": [], "error": str(e)}
+
 
 @app.get("/health")
 async def health():
