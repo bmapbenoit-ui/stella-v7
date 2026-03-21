@@ -1002,6 +1002,44 @@ class BISSubscribeRequest(BaseModel):
     product_title: str = ""
     product_handle: str = ""
 
+# ══════════════════════ PRODUCT VIEW TRACKING ══════════════════════
+
+@app.post("/api/views/{product_id}")
+async def track_view(product_id: str, request: Request):
+    """Track a product page view. Returns current count (rolling 24h window)."""
+    rc = get_redis()
+    if not rc:
+        return {"count": 0, "error": "redis_unavailable"}
+    key = f"pv:{product_id}"
+    now = int(time.time())
+    pipe = rc.pipeline()
+    # Add this view with timestamp as score
+    pipe.zadd(key, {f"{now}:{uuid.uuid4().hex[:8]}": now})
+    # Remove entries older than 24h
+    pipe.zremrangebyscore(key, 0, now - 86400)
+    # Count remaining
+    pipe.zcard(key)
+    # Set TTL to auto-cleanup
+    pipe.expire(key, 90000)
+    results = pipe.execute()
+    count = results[2]
+    return {"count": count, "product_id": product_id}
+
+@app.get("/api/views/{product_id}")
+async def get_views(product_id: str):
+    """Get current view count for a product (rolling 24h)."""
+    rc = get_redis()
+    if not rc:
+        return {"count": 0}
+    key = f"pv:{product_id}"
+    now = int(time.time())
+    # Clean old entries
+    rc.zremrangebyscore(key, 0, now - 86400)
+    count = rc.zcard(key)
+    return {"count": count, "product_id": product_id}
+
+# ══════════════════════ BACK IN STOCK ══════════════════════
+
 @app.post("/api/bis/subscribe")
 async def bis_subscribe(req: BISSubscribeRequest):
     """Public endpoint: subscribe email for back-in-stock notification."""
