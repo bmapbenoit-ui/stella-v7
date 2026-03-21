@@ -34,6 +34,7 @@ SHOPIFY_V8_CLIENT_ID = os.getenv("SHOPIFY_V8_CLIENT_ID", "")
 SHOPIFY_V8_CLIENT_SECRET = os.getenv("SHOPIFY_V8_CLIENT_SECRET", "")
 HOST_URL = os.getenv("HOST_URL", "")
 CONTEXT_ENGINE_URL = os.getenv("CONTEXT_ENGINE_URL", "https://context-engine-production-e525.up.railway.app")
+EMBEDDING_SERVICE_URL = os.getenv("EMBEDDING_SERVICE_URL", "http://embedding-service.railway.internal:8080")
 DEV_MODE = os.getenv("DEV_MODE", "false").lower() == "true"
 PORT = int(os.getenv("PORT", "8080"))
 REDIS_URL = os.getenv("REDIS_URL", "")
@@ -917,9 +918,8 @@ async def create_memory(mem: MemoryCreate, request: Request):
             (mem.memory_type, mem.category, mem.importance, mem.title, mem.content, json.dumps(mem.tags)))
         mid = cur.fetchone()[0]
         db.commit(); cur.close(); db.close()
-        # Also vectorize important memories to Qdrant
-        if mem.importance >= 7:
-            await save_to_qdrant(f"[{mem.category}] {mem.title}: {mem.content}", source=f"claude_memory_{mid}")
+        # Always vectorize to Qdrant for semantic search
+        await save_to_qdrant(f"[{mem.category}] {mem.title}: {mem.content}", source=f"claude_memory_{mid}")
         return {"status": "ok", "id": mid}
     except Exception as e:
         try: db.close()
@@ -929,23 +929,69 @@ async def create_memory(mem: MemoryCreate, request: Request):
 @app.post("/memory/search")
 async def search_memories(search: MemorySearch, request: Request):
     verify_claude_key(request)
-    db = get_db()
-    if not db: return {"results": []}
+    # Hybrid search: Qdrant semantic + PostgreSQL fallback
+    results = []
+    # 1) Qdrant semantic search via Embedding Service
     try:
-        cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        q = f"%{search.query}%"
-        if search.category:
-            cur.execute("SELECT * FROM claude_memories WHERE category=%s AND (title ILIKE %s OR content ILIKE %s) ORDER BY importance DESC LIMIT %s",
-                (search.category, q, q, search.limit))
-        else:
-            cur.execute("SELECT * FROM claude_memories WHERE title ILIKE %s OR content ILIKE %s ORDER BY importance DESC LIMIT %s",
-                (q, q, search.limit))
-        rows = cur.fetchall(); cur.close(); db.close()
-        return {"results": [{**r, "created_at": r["created_at"].isoformat() if r["created_at"] else None} for r in rows]}
+        async with httpx.AsyncClient(timeout=15) as c:
+            resp = await c.post(f"{EMBEDDING_SERVICE_URL}/search", json={
+                "query": search.query,
+                "collection": "knowledge",
+                "top_k": search.limit * 2,
+                "rerank_top": search.limit
+            })
+            if resp.status_code == 200:
+                qdrant_results = resp.json().get("results", [])
+                for r in qdrant_results:
+                    results.append({
+                        "id": None,
+                        "title": r.get("source", ""),
+                        "content": r.get("text", ""),
+                        "category": "qdrant",
+                        "importance": round(r.get("score", 0) * 10),
+                        "score": r.get("score", 0),
+                        "created_at": None
+                    })
     except Exception as e:
-        try: db.close()
-        except: pass
-        return {"results": [], "error": str(e)}
+        logger.warning(f"Qdrant search failed: {e}")
+    # 2) PostgreSQL text search as complement
+    db = get_db()
+    if db:
+        try:
+            cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            # Split query into individual words for OR matching
+            words = [w.strip() for w in search.query.split() if len(w.strip()) > 2]
+            if words:
+                conditions = " OR ".join(["(title ILIKE %s OR content ILIKE %s)"] * len(words))
+                params = []
+                for w in words:
+                    params.extend([f"%{w}%", f"%{w}%"])
+                if search.category:
+                    sql = f"SELECT * FROM claude_memories WHERE category=%s AND ({conditions}) ORDER BY importance DESC LIMIT %s"
+                    params = [search.category] + params + [search.limit]
+                else:
+                    sql = f"SELECT * FROM claude_memories WHERE ({conditions}) ORDER BY importance DESC LIMIT %s"
+                    params.append(search.limit)
+                cur.execute(sql, params)
+            else:
+                q = f"%{search.query}%"
+                cur.execute("SELECT * FROM claude_memories WHERE title ILIKE %s OR content ILIKE %s ORDER BY importance DESC LIMIT %s",
+                    (q, q, search.limit))
+            pg_rows = cur.fetchall(); cur.close(); db.close()
+            # Merge PG results (avoid duplicates by content)
+            existing_texts = {r["content"][:100] for r in results}
+            for r in pg_rows:
+                snippet = (r.get("content") or "")[:100]
+                if snippet not in existing_texts:
+                    results.append({**r, "created_at": r["created_at"].isoformat() if r.get("created_at") else None})
+                    existing_texts.add(snippet)
+        except Exception as e:
+            try: db.close()
+            except: pass
+            logger.warning(f"PG search failed: {e}")
+    # Sort by importance/score desc, limit
+    results.sort(key=lambda x: x.get("importance", 0) or 0, reverse=True)
+    return {"results": results[:search.limit]}
 
 @app.post("/session/snapshot")
 async def create_snapshot(snap: SnapshotCreate, request: Request):
