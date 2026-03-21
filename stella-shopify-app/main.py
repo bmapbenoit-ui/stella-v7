@@ -1002,50 +1002,153 @@ class BISSubscribeRequest(BaseModel):
     product_title: str = ""
     product_handle: str = ""
 
-# ══════════════════════ CRON: NOUVEAUTÉS AUTO-TAG ══════════════════════
+# ══════════════════════ CRON: AUTO-TAG SYNC ══════════════════════
 
-@app.post("/api/cron/nouveautes")
-async def cron_nouveautes(request: Request):
-    """Daily cron: tag products < 30 days with 'Nouveauté', untag older ones."""
+FAMILLE_MAP = {
+    "oriental": "Oriental", "ambré": "Oriental", "oriental ambré": "Oriental",
+    "oriental boisé": "Oriental", "oriental floral": "Oriental", "oriental fougère": "Oriental",
+    "oriental fruité": "Oriental", "oriental gourmand": "Oriental", "oriental vanillé": "Oriental",
+    "oriental épicé": "Oriental", "orientale ambrée": "Oriental",
+    "floral": "Floral", "floral ambré": "Floral", "floral fruité": "Floral",
+    "floral fruité gourmand": "Floral", "floral vert": "Floral", "florale ambrée": "Floral",
+    "florale": "Floral", "florale fruitée": "Floral",
+    "boisé": "Boisé", "boisé aromatique": "Boisé", "boisé aquatique": "Boisé",
+    "boisé cuiré": "Boisé", "boisé épicé": "Boisé", "boisée": "Boisé", "boisée chyprée": "Boisé",
+    "gourmand": "Gourmand", "gourmande": "Gourmand", "gourmande boisée": "Gourmand", "gourmande fruitée": "Gourmand",
+    "fruité": "Fruité", "fruité aromatique": "Fruité", "fruité gourmand": "Fruité",
+    "fruité aquatique": "Fruité", "fruitée gourmande": "Fruité",
+    "hespéridé": "Hespéridé", "hespéridé aromatique": "Hespéridé",
+    "hespéridée gourmande": "Hespéridé", "hespéridé fruité": "Hespéridé", "hespéridé épicé": "Hespéridé",
+    "cuir": "Cuiré", "cuiré": "Cuiré",
+    "chypré": "Chypré", "chyprée": "Chypré", "chyprée florale ambrée": "Chypré",
+    "aquatique": "Aquatique", "marin": "Aquatique", "marin ambré épicé": "Aquatique",
+    "aromatique": "Aromatique", "aromatique fruité": "Aromatique", "aromatique épicée": "Aromatique",
+    "fougère": "Aromatique", "aldéhydé": "Aldéhydé", "aldéhydée": "Aldéhydé",
+    "musqué": "Musqué", "poudré": "Gourmand",
+}
+
+TOP_OCCASIONS = {"Quotidien", "Soirée", "Bureau", "Rendez-vous", "Occasion spéciale",
+                  "Vacances", "Plein air", "Cocooning", "Soirée élégante", "Casual"}
+
+def compute_auto_tags(product_data, cutoff_iso):
+    """Compute all auto-tags from metafields + creation date."""
+    new_tags = set()
+
+    # Famille
+    fam = product_data.get("famille")
+    if fam and fam.get("value"):
+        val = fam["value"]
+        if val.startswith("["):
+            try: val = json.loads(val)[0]
+            except: pass
+        mapped = FAMILLE_MAP.get(val.strip().lower())
+        if not mapped:
+            for k, v in FAMILLE_MAP.items():
+                if k in val.strip().lower(): mapped = v; break
+        if mapped: new_tags.add(f"Famille:{mapped}")
+
+    # Saison
+    sai = product_data.get("saison")
+    if sai and sai.get("value"):
+        val = sai["value"]
+        items = json.loads(val) if val.startswith("[") else [val]
+        for s in items:
+            for part in s.split("/"):
+                part = part.strip()
+                if part in ("Printemps", "Été", "Automne", "Hiver"):
+                    new_tags.add(f"Saison:{part}")
+
+    # Genre
+    gen = product_data.get("genre")
+    if gen and gen.get("value"):
+        val = gen["value"].strip()
+        if val in ("Mixte", "Unisexe"): new_tags.add("Genre:Mixte")
+        elif val == "Féminin": new_tags.add("Genre:Féminin")
+        elif val == "Masculin": new_tags.add("Genre:Masculin")
+
+    # Concentration
+    conc = product_data.get("concentration")
+    if conc and conc.get("value"):
+        val = conc["value"].strip().lower()
+        if "extrait" in val: new_tags.add("Concentration:Extrait")
+        elif "intense" in val: new_tags.add("Concentration:EDP Intense")
+        elif "parfum" in val and "eau" in val: new_tags.add("Concentration:EDP")
+        elif "toilette" in val: new_tags.add("Concentration:EDT")
+
+    # Occasions
+    occ = product_data.get("occasions")
+    if occ and occ.get("value"):
+        val = occ["value"]
+        items = json.loads(val) if val.startswith("[") else [x.strip() for x in val.split(",")]
+        for o in items:
+            if o.strip() in TOP_OCCASIONS: new_tags.add(f"Occasion:{o.strip()}")
+
+    # Nouveauté (< 30 days)
+    if product_data.get("createdAt", "") > cutoff_iso:
+        new_tags.add("Nouveauté")
+
+    return new_tags
+
+
+@app.post("/api/cron/sync-tags")
+async def cron_sync_tags(request: Request):
+    """Daily cron: sync ALL auto-tags (famille, saison, genre, occasion, concentration, nouveauté)."""
     api_key = request.headers.get("X-API-Key", "")
     if api_key != "stella-mem-2026-planetebeauty":
         raise HTTPException(403, "Unauthorized")
 
     from datetime import timezone, timedelta
     cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
-    shop_token = SHOPIFY_ACCESS_TOKEN
-    shop_domain = SHOPIFY_STORE_DOMAIN
-    gql_url = f"https://{shop_domain}/admin/api/{SHOPIFY_API_VERSION}/graphql.json"
-    headers = {"X-Shopify-Access-Token": shop_token, "Content-Type": "application/json"}
+    gql_url = f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/{SHOPIFY_API_VERSION}/graphql.json"
+    headers = {"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"}
 
-    tagged, untagged = 0, 0
+    # Auto-tag prefixes we manage
+    AUTO_PREFIXES = ("Famille:", "Saison:", "Genre:", "Concentration:", "Occasion:", "Nouveauté")
+
+    updated, skipped = 0, 0
     cursor = None
-    while True:
-        after = f', after: "{cursor}"' if cursor else ''
-        async with httpx.AsyncClient(timeout=30) as client:
-            r = await client.post(gql_url, json={"query": f'{{ products(first: 50{after}) {{ edges {{ cursor node {{ id tags createdAt }} }} pageInfo {{ hasNextPage }} }} }}'}, headers=headers)
-        data = r.json().get("data", {}).get("products", {})
-        for edge in data.get("edges", []):
-            p = edge["node"]
-            cursor = edge["cursor"]
-            tags = set(p.get("tags", []))
-            is_new = p["createdAt"] > cutoff
-            has_tag = "Nouveauté" in tags
-            if is_new and not has_tag:
-                tags.add("Nouveauté")
-                async with httpx.AsyncClient(timeout=30) as client:
-                    await client.post(gql_url, json={"query": f'mutation {{ productUpdate(input: {{id: "{p["id"]}", tags: {json.dumps(list(tags))}}}) {{ product {{ id }} }} }}'}, headers=headers)
-                tagged += 1
-            elif not is_new and has_tag:
-                tags.discard("Nouveauté")
-                async with httpx.AsyncClient(timeout=30) as client:
-                    await client.post(gql_url, json={"query": f'mutation {{ productUpdate(input: {{id: "{p["id"]}", tags: {json.dumps(list(tags))}}}) {{ product {{ id }} }} }}'}, headers=headers)
-                untagged += 1
-        if not data.get("pageInfo", {}).get("hasNextPage"):
-            break
+    async with httpx.AsyncClient(timeout=30) as client:
+        while True:
+            after = f', after: "{cursor}"' if cursor else ''
+            r = await client.post(gql_url, json={"query": f"""{{ products(first: 50{after}) {{ edges {{ cursor node {{
+                id tags createdAt
+                famille: metafield(namespace: "parfum", key: "famille_olfactive") {{ value }}
+                saison: metafield(namespace: "parfum", key: "saison") {{ value }}
+                genre: metafield(namespace: "parfum", key: "genre") {{ value }}
+                concentration: metafield(namespace: "parfum", key: "concentration") {{ value }}
+                occasions: metafield(namespace: "parfum", key: "occasions") {{ value }}
+            }} }} pageInfo {{ hasNextPage }} }} }}"""}, headers=headers)
+            data = r.json().get("data", {}).get("products", {})
+            for edge in data.get("edges", []):
+                p = edge["node"]
+                cursor = edge["cursor"]
+                existing = set(p.get("tags", []))
 
-    logger.info(f"Cron nouveautes: +{tagged} tagged, -{untagged} untagged")
-    return {"tagged": tagged, "untagged": untagged, "cutoff": cutoff}
+                # Remove old auto-tags
+                manual_tags = {t for t in existing if not any(t.startswith(px) or t == px for px in AUTO_PREFIXES)}
+                # Compute new auto-tags
+                auto_tags = compute_auto_tags(p, cutoff)
+                # Merge
+                final_tags = manual_tags | auto_tags
+
+                if final_tags != existing:
+                    await client.post(gql_url, json={"query": f'mutation {{ productUpdate(input: {{id: "{p["id"]}", tags: {json.dumps(sorted(list(final_tags)))}}}) {{ product {{ id }} userErrors {{ message }} }} }}'}, headers=headers)
+                    updated += 1
+                else:
+                    skipped += 1
+
+            if not data.get("pageInfo", {}).get("hasNextPage"):
+                break
+
+    logger.info(f"Cron sync-tags: {updated} updated, {skipped} unchanged")
+    return {"updated": updated, "skipped": skipped, "cutoff": cutoff}
+
+
+# Keep old endpoint as alias
+@app.post("/api/cron/nouveautes")
+async def cron_nouveautes(request: Request):
+    """Alias for sync-tags."""
+    return await cron_sync_tags(request)
 
 
 # ══════════════════════ PRODUCT VIEW TRACKING ══════════════════════
