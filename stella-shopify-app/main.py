@@ -1231,6 +1231,259 @@ async def cron_nouveautes(request: Request):
     return await cron_sync_tags(request)
 
 
+# ══════════════════════ CRON: AUDIT QUALITÉ ══════════════════════
+
+@app.post("/api/cron/audit-qualite")
+async def cron_audit_qualite(request: Request):
+    """Weekly audit: find products with missing SEO or key metafields."""
+    api_key = request.headers.get("X-API-Key", "")
+    if api_key != "stella-mem-2026-planetebeauty":
+        raise HTTPException(403, "Unauthorized")
+
+    gql_url = f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/{SHOPIFY_API_VERSION}/graphql.json"
+    headers = {"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"}
+
+    issues = []
+    cursor = None
+    async with httpx.AsyncClient(timeout=30) as client:
+        while True:
+            after = f', after: "{cursor}"' if cursor else ''
+            r = await client.post(gql_url, json={"query": f"""{{ products(first: 50{after}) {{ edges {{ cursor node {{
+                id title handle vendor status
+                seo {{ title description }}
+                parfumeur: metafield(namespace: "parfum", key: "parfumeur") {{ value }}
+                famille: metafield(namespace: "parfum", key: "famille_olfactive") {{ value }}
+                accord: metafield(namespace: "parfum", key: "accord_principal") {{ value }}
+            }} }} pageInfo {{ hasNextPage }} }} }}"""}, headers=headers)
+            data = r.json().get("data", {}).get("products", {})
+            for edge in data.get("edges", []):
+                p = edge["node"]
+                cursor = edge["cursor"]
+                if p.get("status") != "ACTIVE":
+                    continue
+                product_issues = []
+                seo = p.get("seo") or {}
+                if not seo.get("title"):
+                    product_issues.append("SEO title manquant")
+                if not seo.get("description"):
+                    product_issues.append("SEO description manquante")
+                if not p.get("parfumeur", {}) or not (p.get("parfumeur") or {}).get("value"):
+                    product_issues.append("Parfumeur vide")
+                if not p.get("famille", {}) or not (p.get("famille") or {}).get("value"):
+                    product_issues.append("Famille olfactive vide")
+                if not p.get("accord", {}) or not (p.get("accord") or {}).get("value"):
+                    product_issues.append("Accord principal vide")
+                if product_issues:
+                    issues.append({
+                        "title": p.get("title", ""),
+                        "handle": p.get("handle", ""),
+                        "vendor": p.get("vendor", ""),
+                        "issues": product_issues
+                    })
+            if not data.get("pageInfo", {}).get("hasNextPage"):
+                break
+
+    # Save result to DB for dashboard display
+    db = get_db()
+    if db:
+        try:
+            cur = db.cursor()
+            cur.execute("""CREATE TABLE IF NOT EXISTS cron_results (
+                id SERIAL PRIMARY KEY, cron_name TEXT, result_data JSONB,
+                executed_at TIMESTAMP DEFAULT NOW())""")
+            cur.execute("INSERT INTO cron_results (cron_name, result_data) VALUES (%s, %s)",
+                ("audit-qualite", json.dumps({"issues": issues, "total_issues": len(issues)})))
+            db.commit(); cur.close(); db.close()
+        except Exception as e:
+            try: db.close()
+            except: pass
+            logger.error(f"Audit save: {e}")
+
+    # Send email report if issues found
+    if issues and SMTP_HOST:
+        rows_html = ""
+        for p in issues[:50]:
+            rows_html += f"<tr><td>{p['vendor']}</td><td>{p['title']}</td><td>{'<br>'.join(p['issues'])}</td></tr>"
+        body = f"""<h2>Audit Qualité PlanèteBeauty</h2>
+        <p><strong>{len(issues)} produit(s)</strong> avec des données manquantes.</p>
+        <table border='1' cellpadding='8' cellspacing='0' style='border-collapse:collapse;font-family:sans-serif;font-size:13px'>
+        <tr style='background:#f5f2ed'><th>Marque</th><th>Produit</th><th>Problèmes</th></tr>
+        {rows_html}</table>"""
+        try:
+            msg = MIMEMultipart("alternative")
+            msg["From"] = f"{SMTP_FROM_NAME} <{SMTP_FROM_EMAIL}>"
+            msg["To"] = "info@planetebeauty.com"
+            msg["Subject"] = f"[STELLA] Audit Qualité — {len(issues)} produits à corriger"
+            msg.attach(MIMEText(body, "html"))
+            await aiosmtplib.send(msg, hostname=SMTP_HOST, port=int(SMTP_PORT or 587),
+                username=SMTP_USER, password=SMTP_PASS, use_tls=True)
+        except Exception as e:
+            logger.error(f"Audit email: {e}")
+
+    logger.info(f"Audit qualité: {len(issues)} issues found")
+    return {"status": "ok", "issues_count": len(issues), "issues": issues[:20]}
+
+
+# ══════════════════════ CRON: NOUVEAUTÉS AUTO-EXPIRE ══════════════════════
+
+@app.post("/api/cron/nouveautes-expire")
+async def cron_nouveautes_expire(request: Request):
+    """Daily: remove 'Nouveauté' tag from products created more than 30 days ago."""
+    api_key = request.headers.get("X-API-Key", "")
+    if api_key != "stella-mem-2026-planetebeauty":
+        raise HTTPException(403, "Unauthorized")
+
+    from datetime import timezone, timedelta
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    gql_url = f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/{SHOPIFY_API_VERSION}/graphql.json"
+    headers = {"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"}
+
+    expired = []
+    still_new = []
+    cursor = None
+    async with httpx.AsyncClient(timeout=30) as client:
+        while True:
+            after = f', after: "{cursor}"' if cursor else ''
+            r = await client.post(gql_url, json={"query": f"""{{ products(first: 50, query: "tag:Nouveauté"{after}) {{ edges {{ cursor node {{
+                id title handle createdAt tags
+            }} }} pageInfo {{ hasNextPage }} }} }}"""}, headers=headers)
+            data = r.json().get("data", {}).get("products", {})
+            for edge in data.get("edges", []):
+                p = edge["node"]
+                cursor = edge["cursor"]
+                if p.get("createdAt", "") < cutoff:
+                    # Remove Nouveauté tag
+                    new_tags = [t for t in p.get("tags", []) if t != "Nouveauté"]
+                    await client.post(gql_url, json={"query": f'mutation {{ productUpdate(input: {{id: "{p["id"]}", tags: {json.dumps(new_tags)}}}) {{ product {{ id }} userErrors {{ message }} }} }}'}, headers=headers)
+                    expired.append({"title": p["title"], "created": p["createdAt"][:10]})
+                else:
+                    days_left = 30 - (datetime.now(timezone.utc) - datetime.fromisoformat(p["createdAt"].replace("Z", "+00:00"))).days
+                    still_new.append({"title": p["title"], "created": p["createdAt"][:10], "days_left": max(0, days_left)})
+            if not data.get("pageInfo", {}).get("hasNextPage"):
+                break
+
+    # Save result
+    db = get_db()
+    if db:
+        try:
+            cur = db.cursor()
+            cur.execute("""CREATE TABLE IF NOT EXISTS cron_results (
+                id SERIAL PRIMARY KEY, cron_name TEXT, result_data JSONB,
+                executed_at TIMESTAMP DEFAULT NOW())""")
+            cur.execute("INSERT INTO cron_results (cron_name, result_data) VALUES (%s, %s)",
+                ("nouveautes-expire", json.dumps({"expired": expired, "still_new": still_new})))
+            db.commit(); cur.close(); db.close()
+        except Exception as e:
+            try: db.close()
+            except: pass
+
+    logger.info(f"Nouveautés expire: {len(expired)} expired, {len(still_new)} still new")
+    return {"status": "ok", "expired": len(expired), "still_new": len(still_new), "details": {"expired": expired, "still_new": still_new}}
+
+
+# ══════════════════════ CRON: STOCK CHECK ══════════════════════
+
+@app.post("/api/cron/stock-check")
+async def cron_stock_check(request: Request):
+    """Hourly: check for out-of-stock products, email alert for new ones."""
+    api_key = request.headers.get("X-API-Key", "")
+    if api_key != "stella-mem-2026-planetebeauty":
+        raise HTTPException(403, "Unauthorized")
+
+    gql_url = f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/{SHOPIFY_API_VERSION}/graphql.json"
+    headers = {"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"}
+
+    oos_products = []
+    cursor = None
+    async with httpx.AsyncClient(timeout=30) as client:
+        while True:
+            after = f', after: "{cursor}"' if cursor else ''
+            r = await client.post(gql_url, json={"query": f"""{{ products(first: 50, query: "status:active"{after}) {{ edges {{ cursor node {{
+                id title handle vendor totalInventory
+                variants(first: 5) {{ edges {{ node {{ inventoryQuantity title }} }} }}
+            }} }} pageInfo {{ hasNextPage }} }} }}"""}, headers=headers)
+            data = r.json().get("data", {}).get("products", {})
+            for edge in data.get("edges", []):
+                p = edge["node"]
+                cursor = edge["cursor"]
+                total_inv = p.get("totalInventory", 0)
+                if total_inv is not None and total_inv <= 0:
+                    # Check BIS subscribers count
+                    bis_count = 0
+                    db = get_db()
+                    if db:
+                        try:
+                            cur = db.cursor()
+                            cur.execute("SELECT COUNT(*) FROM bis_subscriptions WHERE product_handle=%s AND status='active'",
+                                (p.get("handle", ""),))
+                            bis_count = cur.fetchone()[0]
+                            cur.close(); db.close()
+                        except:
+                            try: db.close()
+                            except: pass
+                    oos_products.append({
+                        "title": p["title"],
+                        "handle": p.get("handle", ""),
+                        "vendor": p.get("vendor", ""),
+                        "total_inventory": total_inv or 0,
+                        "bis_subscribers": bis_count
+                    })
+            if not data.get("pageInfo", {}).get("hasNextPage"):
+                break
+
+    # Get previous OOS list to detect NEW ruptures
+    db = get_db()
+    prev_oos_handles = set()
+    if db:
+        try:
+            cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cur.execute("""CREATE TABLE IF NOT EXISTS cron_results (
+                id SERIAL PRIMARY KEY, cron_name TEXT, result_data JSONB,
+                executed_at TIMESTAMP DEFAULT NOW())""")
+            cur.execute("SELECT result_data FROM cron_results WHERE cron_name='stock-check' ORDER BY executed_at DESC LIMIT 1")
+            prev = cur.fetchone()
+            if prev and prev.get("result_data"):
+                prev_data = prev["result_data"] if isinstance(prev["result_data"], dict) else json.loads(prev["result_data"])
+                prev_oos_handles = {p["handle"] for p in prev_data.get("oos_products", [])}
+            cur.execute("INSERT INTO cron_results (cron_name, result_data) VALUES (%s, %s)",
+                ("stock-check", json.dumps({"oos_products": oos_products})))
+            db.commit(); cur.close(); db.close()
+        except Exception as e:
+            try: db.close()
+            except: pass
+            logger.error(f"Stock check DB: {e}")
+
+    # Detect NEW out-of-stock (not in previous run)
+    current_handles = {p["handle"] for p in oos_products}
+    new_oos = [p for p in oos_products if p["handle"] not in prev_oos_handles]
+
+    # Email alert for new OOS
+    if new_oos and SMTP_HOST:
+        rows = ""
+        for p in new_oos:
+            bis_badge = f' ({p["bis_subscribers"]} en attente)' if p["bis_subscribers"] > 0 else ""
+            rows += f"<tr><td>{p['vendor']}</td><td>{p['title']}</td><td style='color:red;font-weight:bold'>0{bis_badge}</td></tr>"
+        body = f"""<h2>🚨 Alerte Stock — PlanèteBeauty</h2>
+        <p><strong>{len(new_oos)} nouveau(x) produit(s) en rupture !</strong></p>
+        <table border='1' cellpadding='8' cellspacing='0' style='border-collapse:collapse;font-family:sans-serif;font-size:13px'>
+        <tr style='background:#f5f2ed'><th>Marque</th><th>Produit</th><th>Stock</th></tr>
+        {rows}</table>
+        <p style='color:#888;font-size:12px;margin-top:20px'>Total produits en rupture : {len(oos_products)}</p>"""
+        try:
+            msg = MIMEMultipart("alternative")
+            msg["From"] = f"{SMTP_FROM_NAME} <{SMTP_FROM_EMAIL}>"
+            msg["To"] = "info@planetebeauty.com"
+            msg["Subject"] = f"[STELLA] 🚨 {len(new_oos)} nouveau(x) produit(s) en rupture"
+            msg.attach(MIMEText(body, "html"))
+            await aiosmtplib.send(msg, hostname=SMTP_HOST, port=int(SMTP_PORT or 587),
+                username=SMTP_USER, password=SMTP_PASS, use_tls=True)
+        except Exception as e:
+            logger.error(f"Stock alert email: {e}")
+
+    logger.info(f"Stock check: {len(oos_products)} OOS, {len(new_oos)} new")
+    return {"status": "ok", "total_oos": len(oos_products), "new_oos": len(new_oos), "oos_products": oos_products[:30]}
+
+
 # ══════════════════════ PRODUCT VIEW TRACKING ══════════════════════
 
 @app.post("/api/views/{product_id}")
@@ -1849,6 +2102,69 @@ async def index(request: Request):
             except: pass
             logger.error(f"App home BIS: {e}")
 
+    # Fetch cron results for dashboard tabs
+    audit_data = {"issues": []}
+    nouveautes_data = {"expired": [], "still_new": []}
+    stock_data = {"oos_products": []}
+    audit_last = nouveautes_last = stock_last = "Jamais"
+    db2 = get_db()
+    if db2:
+        try:
+            cur2 = db2.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cur2.execute("""CREATE TABLE IF NOT EXISTS cron_results (
+                id SERIAL PRIMARY KEY, cron_name TEXT, result_data JSONB,
+                executed_at TIMESTAMP DEFAULT NOW())""")
+            cur2.execute("SELECT result_data, executed_at FROM cron_results WHERE cron_name='audit-qualite' ORDER BY executed_at DESC LIMIT 1")
+            row = cur2.fetchone()
+            if row:
+                audit_data = row["result_data"] if isinstance(row["result_data"], dict) else json.loads(row["result_data"])
+                audit_last = row["executed_at"].strftime('%d/%m %H:%M') if row["executed_at"] else "?"
+            cur2.execute("SELECT result_data, executed_at FROM cron_results WHERE cron_name='nouveautes-expire' ORDER BY executed_at DESC LIMIT 1")
+            row = cur2.fetchone()
+            if row:
+                nouveautes_data = row["result_data"] if isinstance(row["result_data"], dict) else json.loads(row["result_data"])
+                nouveautes_last = row["executed_at"].strftime('%d/%m %H:%M') if row["executed_at"] else "?"
+            cur2.execute("SELECT result_data, executed_at FROM cron_results WHERE cron_name='stock-check' ORDER BY executed_at DESC LIMIT 1")
+            row = cur2.fetchone()
+            if row:
+                stock_data = row["result_data"] if isinstance(row["result_data"], dict) else json.loads(row["result_data"])
+                stock_last = row["executed_at"].strftime('%d/%m %H:%M') if row["executed_at"] else "?"
+            cur2.close(); db2.close()
+        except Exception as e:
+            try: db2.close()
+            except: pass
+            logger.warning(f"Cron results fetch: {e}")
+
+    audit_issues = audit_data.get("issues", [])
+    still_new = nouveautes_data.get("still_new", [])
+    oos_products_list = stock_data.get("oos_products", [])
+
+    # Pre-build HTML rows for cron tabs (f-strings can't have backslashes)
+    audit_rows_html = ""
+    for ai in audit_issues[:30]:
+        issues_text = "<br>".join(ai.get("issues", []))
+        audit_rows_html += f'<tr><td>{ai.get("vendor","")}</td><td>{ai.get("title","")}</td><td style="color:#e53935;font-size:12px">{issues_text}</td></tr>'
+    if not audit_rows_html:
+        audit_rows_html = '<tr><td colspan="3" class="empty">Aucun probl&egrave;me d&eacute;tect&eacute; &#127881;</td></tr>'
+
+    nouveautes_rows_html = ""
+    for sn in still_new:
+        dl = sn.get("days_left", 0)
+        color = "#e53935" if dl <= 5 else "#4CAF50"
+        nouveautes_rows_html += f'<tr><td>{sn.get("title","")}</td><td>{sn.get("created","")}</td><td style="color:{color};font-weight:bold">{dl}j</td></tr>'
+    if not nouveautes_rows_html:
+        nouveautes_rows_html = '<tr><td colspan="3" class="empty">Aucune nouveaut&eacute; en cours</td></tr>'
+
+    stock_rows_html = ""
+    for sp in oos_products_list[:30]:
+        bis_n = sp.get("bis_subscribers", 0)
+        stock_rows_html += f'<tr><td>{sp.get("vendor","")}</td><td>{sp.get("title","")}</td><td style="color:#e53935;font-weight:bold">0</td><td>{bis_n} en attente</td></tr>'
+    if not stock_rows_html:
+        stock_rows_html = '<tr><td colspan="4" class="empty">Tout est en stock &#127881;</td></tr>'
+
+    oos_border_color = "#e53935" if len(oos_products_list) > 0 else "#4CAF50"
+    oos_badge_bg = "#e53935" if len(oos_products_list) > 0 else "#4CAF50"
+
     ab_products = [p for p in products if "AB Signature" in (p.get("product_title") or "")]
     ab_total = sum(p["sub_count"] for p in ab_products)
 
@@ -1970,14 +2286,17 @@ async def index(request: Request):
       <span class="tab-icon">&#128276;</span> Liste d'attente
       <span class="tab-badge">{total}</span>
     </div>
-    <div class="tab" data-tab="analytics">
-      <span class="tab-icon">&#128200;</span> Analytics
+    <div class="tab" data-tab="audit">
+      <span class="tab-icon">&#9989;</span> Audit Qualit&eacute;
+      <span class="tab-badge">{len(audit_issues)}</span>
     </div>
-    <div class="tab" data-tab="enrichissement">
-      <span class="tab-icon">&#9997;&#65039;</span> Enrichissement
+    <div class="tab" data-tab="nouveautes">
+      <span class="tab-icon">&#127381;</span> Nouveaut&eacute;s
+      <span class="tab-badge">{len(still_new)}</span>
     </div>
-    <div class="tab" data-tab="quiz">
-      <span class="tab-icon">&#128161;</span> Quiz Olfactif
+    <div class="tab" data-tab="stock">
+      <span class="tab-icon">&#128230;</span> Stock
+      <span class="tab-badge" style="background:{oos_badge_bg}">{len(oos_products_list)}</span>
     </div>
     <div class="tab coming" data-tab="images">
       <span class="tab-icon">&#127912;</span> Images
@@ -2024,36 +2343,51 @@ async def index(request: Request):
 </div>
 </div>
 
-<!-- ═══ TAB: ANALYTICS ═══ -->
-<div class="tab-content" id="tab-analytics">
+<!-- ═══ TAB: AUDIT QUALITÉ ═══ -->
+<div class="tab-content" id="tab-audit">
 <div class="container">
-  <div class="coming-soon">
-    <div class="cs-icon">&#128200;</div>
-    <h2>Analytics</h2>
-    <p>Chiffre d'affaires, visiteurs, conversions, top produits — bient&ocirc;t disponible.</p>
+  <div class="cards">
+    <div class="card"><div class="num">{len(audit_issues)}</div><div class="label">Produits avec probl&egrave;mes</div></div>
+    <div class="card"><div class="num" style="font-size:14px;color:#888">{audit_last}</div><div class="label">Dernier audit</div></div>
   </div>
+  <div class="section-title"><span class="icon">&#9989;</span> Produits &agrave; corriger</div>
+  <table>
+    <tr><th>Marque</th><th>Produit</th><th>Probl&egrave;mes</th></tr>
+    {audit_rows_html}
+  </table>
+  <p style="text-align:center;margin-top:16px;color:#888;font-size:12px">Audit automatique chaque lundi &agrave; 8h</p>
 </div>
 </div>
 
-<!-- ═══ TAB: ENRICHISSEMENT ═══ -->
-<div class="tab-content" id="tab-enrichissement">
+<!-- ═══ TAB: NOUVEAUTÉS ═══ -->
+<div class="tab-content" id="tab-nouveautes">
 <div class="container">
-  <div class="coming-soon">
-    <div class="cs-icon">&#9997;&#65039;</div>
-    <h2>Enrichissement Catalogue</h2>
-    <p>Suivi de l'enrichissement produits par marque, progression metafields et SEO — bient&ocirc;t disponible.</p>
+  <div class="cards">
+    <div class="card"><div class="num">{len(still_new)}</div><div class="label">Nouveaut&eacute;s actives</div></div>
+    <div class="card"><div class="num" style="font-size:14px;color:#888">{nouveautes_last}</div><div class="label">Derni&egrave;re v&eacute;rification</div></div>
   </div>
+  <div class="section-title"><span class="icon">&#127381;</span> Produits en collection Nouveaut&eacute;s</div>
+  <table>
+    <tr><th>Produit</th><th>Date cr&eacute;ation</th><th>Jours restants</th></tr>
+    {nouveautes_rows_html}
+  </table>
+  <p style="text-align:center;margin-top:16px;color:#888;font-size:12px">Les produits sont retir&eacute;s automatiquement apr&egrave;s 30 jours</p>
 </div>
 </div>
 
-<!-- ═══ TAB: QUIZ ═══ -->
-<div class="tab-content" id="tab-quiz">
+<!-- ═══ TAB: STOCK ═══ -->
+<div class="tab-content" id="tab-stock">
 <div class="container">
-  <div class="coming-soon">
-    <div class="cs-icon">&#128161;</div>
-    <h2>Quiz Olfactif</h2>
-    <p>Configuration du quiz, statistiques de matching et recommandations — bient&ocirc;t disponible.</p>
+  <div class="cards">
+    <div class="card" style="border:2px solid {oos_border_color}"><div class="num" style="color:{oos_border_color}">{len(oos_products_list)}</div><div class="label">Produits en rupture</div></div>
+    <div class="card"><div class="num" style="font-size:14px;color:#888">{stock_last}</div><div class="label">Derni&egrave;re v&eacute;rification</div></div>
   </div>
+  <div class="section-title"><span class="icon">&#128230;</span> Produits en rupture de stock</div>
+  <table>
+    <tr><th>Marque</th><th>Produit</th><th>Stock</th><th>BIS</th></tr>
+    {stock_rows_html}
+  </table>
+  <p style="text-align:center;margin-top:16px;color:#888;font-size:12px">V&eacute;rification automatique toutes les heures &middot; Email si nouveau produit en rupture</p>
 </div>
 </div>
 
