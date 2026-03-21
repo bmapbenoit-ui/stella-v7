@@ -993,6 +993,40 @@ async def search_memories(search: MemorySearch, request: Request):
     results.sort(key=lambda x: x.get("importance", 0) or 0, reverse=True)
     return {"results": results[:search.limit]}
 
+@app.delete("/memory/cleanup")
+async def cleanup_memories(request: Request):
+    """Delete spam 'Session terminee' entries from PostgreSQL."""
+    verify_claude_key(request)
+    db = get_db()
+    if not db: return {"status": "error", "message": "DB unavailable"}
+    try:
+        cur = db.cursor()
+        cur.execute("DELETE FROM claude_memories WHERE title LIKE 'Session terminee%'")
+        deleted = cur.rowcount
+        db.commit(); cur.close(); db.close()
+        return {"status": "ok", "deleted": deleted}
+    except Exception as e:
+        try: db.close()
+        except: pass
+        return {"status": "error", "message": str(e)}
+
+@app.delete("/memory/{memory_id}")
+async def delete_memory(memory_id: int, request: Request):
+    """Delete a specific memory by ID."""
+    verify_claude_key(request)
+    db = get_db()
+    if not db: return {"status": "error", "message": "DB unavailable"}
+    try:
+        cur = db.cursor()
+        cur.execute("DELETE FROM claude_memories WHERE id = %s", (memory_id,))
+        deleted = cur.rowcount
+        db.commit(); cur.close(); db.close()
+        return {"status": "ok", "deleted": deleted}
+    except Exception as e:
+        try: db.close()
+        except: pass
+        return {"status": "error", "message": str(e)}
+
 @app.post("/session/snapshot")
 async def create_snapshot(snap: SnapshotCreate, request: Request):
     verify_claude_key(request)
