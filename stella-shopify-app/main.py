@@ -1585,8 +1585,162 @@ async def health():
 # ══════════════════════ FRONTEND ══════════════════════
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
-    # Note: id_token from URL is NOT suitable for Token Exchange (invalid_subject_token_type)
-    # Token exchange is handled client-side via App Bridge shopify.idToken() -> POST /auth/token-exchange
+    """App home — BIS Dashboard embedded in Shopify Admin via App Bridge."""
+    api_key = SHOPIFY_V8_CLIENT_ID or SHOPIFY_API_KEY
+    host_param = request.query_params.get("host", "")
+
+    # Fetch BIS data
+    total = 0
+    products = []
+    recent = []
+    db = get_db()
+    if db:
+        try:
+            cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cur.execute("SELECT COUNT(*) as total FROM bis_subscriptions WHERE status='active'")
+            total = cur.fetchone()["total"]
+            cur.execute("""
+                SELECT product_id, product_title, product_handle, COUNT(*) as sub_count,
+                       MAX(subscribed_at) as last_sub
+                FROM bis_subscriptions WHERE status='active'
+                GROUP BY product_id, product_title, product_handle
+                ORDER BY sub_count DESC
+            """)
+            products = cur.fetchall()
+            cur.execute("""
+                SELECT email, product_title, product_handle, subscribed_at, status
+                FROM bis_subscriptions
+                ORDER BY subscribed_at DESC LIMIT 50
+            """)
+            recent = cur.fetchall()
+            cur.close()
+            db.close()
+        except Exception as e:
+            try: db.close()
+            except: pass
+            logger.error(f"App home BIS: {e}")
+
+    ab_products = [p for p in products if "AB Signature" in (p.get("product_title") or "")]
+    ab_total = sum(p["sub_count"] for p in ab_products)
+
+    product_rows = ""
+    for p in products:
+        is_ab = "AB Signature" in (p.get("product_title") or "")
+        badge = ' <span class="badge-ab">AB Signature</span>' if is_ab else ""
+        last = str(p.get("last_sub", ""))[:16].replace("T", " ")
+        handle = p.get("product_handle", "")
+        product_rows += f"""<tr>
+            <td class="td-product"><a href="https://planetebeauty.com/products/{handle}" target="_top">{p['product_title']}</a>{badge}</td>
+            <td class="td-count">{p['sub_count']}</td>
+            <td class="td-date">{last}</td>
+        </tr>"""
+
+    recent_rows = ""
+    for r in recent:
+        dt = str(r.get("subscribed_at", ""))[:16].replace("T", " ")
+        status = r.get("status", "active")
+        st_color = "#4CAF50" if status == "active" else "#FF9800" if status == "notified" else "#999"
+        st_label = "En attente" if status == "active" else "Notifi\u00e9" if status == "notified" else status
+        recent_rows += f"""<tr>
+            <td class="td-email">{r.get('email','')}</td>
+            <td class="td-product">{r.get('product_title','')}</td>
+            <td class="td-date">{dt}</td>
+            <td><span class="status-badge" style="background:{st_color}">{st_label}</span></td>
+        </tr>"""
+
+    now_str = datetime.utcnow().strftime('%d/%m/%Y %H:%M')
+
+    html = f"""<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>STELLA V8 — PlanèteBeauty</title>
+<script src="https://cdn.shopify.com/shopifycloud/app-bridge.js?apiKey={api_key}"></script>
+<style>
+  *{{margin:0;padding:0;box-sizing:border-box}}
+  body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#F9F7F4;color:#1A1A1A;padding:0}}
+  .app-header{{background:#1A1A1A;padding:20px 32px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px}}
+  .app-header h1{{color:#D4AF37;font-size:20px;letter-spacing:2px;font-weight:800}}
+  .app-header .subtitle{{color:#888;font-size:13px}}
+  .app-header .refresh-btn{{background:#D4AF37;color:#fff;border:none;padding:8px 20px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;transition:.2s}}
+  .app-header .refresh-btn:hover{{background:#b8862e}}
+  .container{{max-width:1100px;margin:0 auto;padding:24px 20px}}
+  .cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px;margin-bottom:28px}}
+  .card{{background:#fff;border-radius:14px;padding:24px 20px;box-shadow:0 2px 12px rgba(0,0,0,.04);text-align:center;transition:.2s}}
+  .card:hover{{box-shadow:0 4px 20px rgba(0,0,0,.08)}}
+  .card .num{{font-size:40px;font-weight:800;color:#D4AF37;line-height:1}}
+  .card .label{{font-size:13px;color:#888;margin-top:8px;font-weight:500}}
+  .card.ab{{border:2px solid #D4AF37;background:linear-gradient(135deg,#FFFDF7,#FFF8E7)}}
+  .section-title{{font-size:15px;font-weight:700;margin:24px 0 10px;padding-left:4px;display:flex;align-items:center;gap:8px}}
+  .section-title .icon{{font-size:18px}}
+  table{{width:100%;background:#fff;border-radius:14px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,.04);border-collapse:collapse}}
+  th{{background:#F9F7F4;padding:12px 16px;text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:1px;color:#888;font-weight:700}}
+  td{{padding:12px 16px;border-bottom:1px solid #f5f2ed;font-size:14px}}
+  .td-count{{text-align:center;font-weight:800;font-size:22px;color:#D4AF37}}
+  .td-date{{color:#888;font-size:13px}}
+  .td-email{{font-size:13px;color:#555}}
+  .td-product a{{color:#1A1A1A;text-decoration:none;font-weight:500}}
+  .td-product a:hover{{color:#D4AF37}}
+  .badge-ab{{background:linear-gradient(135deg,#D4AF37,#B8862E);color:#fff;font-size:10px;padding:3px 8px;border-radius:6px;margin-left:8px;font-weight:700;letter-spacing:.5px;vertical-align:middle}}
+  .status-badge{{color:#fff;font-size:11px;padding:4px 12px;border-radius:12px;font-weight:600}}
+  .empty{{padding:24px;text-align:center;color:#aaa;font-size:14px}}
+  .footer{{text-align:center;padding:20px;color:#bbb;font-size:12px}}
+  @media(max-width:600px){{
+    .cards{{grid-template-columns:1fr 1fr}}
+    .card .num{{font-size:32px}}
+    td,th{{padding:8px 10px;font-size:12px}}
+    .td-count{{font-size:18px}}
+  }}
+</style>
+</head>
+<body>
+<div class="app-header">
+  <div>
+    <h1>STELLA V8</h1>
+    <span class="subtitle">Liste d'attente &amp; notifications — {now_str} UTC</span>
+  </div>
+  <button class="refresh-btn" onclick="location.reload()">Rafra&icirc;chir</button>
+</div>
+<div class="container">
+  <div class="cards">
+    <div class="card">
+      <div class="num">{total}</div>
+      <div class="label">Inscriptions actives</div>
+    </div>
+    <div class="card ab">
+      <div class="num">{ab_total}</div>
+      <div class="label">AB Signature Paris</div>
+    </div>
+    <div class="card">
+      <div class="num">{len(products)}</div>
+      <div class="label">Produits en attente</div>
+    </div>
+    <div class="card">
+      <div class="num">{len(recent)}</div>
+      <div class="label">Total inscriptions</div>
+    </div>
+  </div>
+
+  <div class="section-title"><span class="icon">&#128230;</span> Par produit</div>
+  <table>
+    <tr><th>Produit</th><th style="text-align:center">Inscrits</th><th>Derni&egrave;re inscription</th></tr>
+    {product_rows if product_rows else '<tr><td colspan="3" class="empty">Aucune inscription pour le moment</td></tr>'}
+  </table>
+
+  <div class="section-title"><span class="icon">&#128236;</span> Inscriptions r&eacute;centes</div>
+  <table>
+    <tr><th>Email</th><th>Produit</th><th>Date</th><th>Statut</th></tr>
+    {recent_rows if recent_rows else '<tr><td colspan="4" class="empty">Aucune inscription</td></tr>'}
+  </table>
+</div>
+<div class="footer">STELLA V8 &middot; Plan&egrave;teBeauty &middot; Powered by Railway</div>
+</body>
+</html>"""
+    return HTMLResponse(html)
+
+@app.get("/chat", response_class=HTMLResponse)
+async def chat_page(request: Request):
+    """Legacy chat interface — moved from / to /chat."""
     html_path = os.path.join(os.path.dirname(__file__), "static", "index.html")
     with open(html_path) as f: html = f.read()
     html = html.replace("__SHOPIFY_API_KEY__", SHOPIFY_V8_CLIENT_ID or SHOPIFY_API_KEY)
