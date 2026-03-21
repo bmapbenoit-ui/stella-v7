@@ -1185,6 +1185,141 @@ async def bis_dashboard(request: Request):
         return {"total_active": 0, "products": [], "recent": [], "error": str(e)}
 
 
+# ══════════════════════ BIS DASHBOARD WEB ══════════════════════
+
+BIS_DASHBOARD_TOKEN = os.getenv("BIS_DASHBOARD_TOKEN", "pb-bis-2026")
+
+@app.get("/bis", response_class=HTMLResponse)
+async def bis_dashboard_web(request: Request, token: str = ""):
+    """Visual BIS dashboard — accessible via /bis?token=pb-bis-2026"""
+    if token != BIS_DASHBOARD_TOKEN:
+        return HTMLResponse("<h2 style='font-family:sans-serif;padding:40px'>Accès refusé — ajoutez ?token=pb-bis-2026</h2>", status_code=403)
+
+    db = get_db()
+    total = 0
+    products = []
+    recent = []
+    if db:
+        try:
+            cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cur.execute("SELECT COUNT(*) as total FROM bis_subscriptions WHERE status='active'")
+            total = cur.fetchone()["total"]
+            cur.execute("""
+                SELECT product_id, product_title, product_handle, COUNT(*) as sub_count,
+                       MAX(subscribed_at) as last_sub
+                FROM bis_subscriptions WHERE status='active'
+                GROUP BY product_id, product_title, product_handle
+                ORDER BY sub_count DESC
+            """)
+            products = cur.fetchall()
+            cur.execute("""
+                SELECT email, product_title, product_handle, subscribed_at, status
+                FROM bis_subscriptions
+                ORDER BY subscribed_at DESC LIMIT 50
+            """)
+            recent = cur.fetchall()
+            cur.close()
+            db.close()
+        except Exception as e:
+            try: db.close()
+            except: pass
+            logger.error(f"BIS dashboard web: {e}")
+
+    # Count AB Signature specifically
+    ab_products = [p for p in products if "AB Signature" in (p.get("product_title") or "")]
+    ab_total = sum(p["sub_count"] for p in ab_products)
+
+    # Build product rows
+    product_rows = ""
+    for p in products:
+        is_ab = "AB Signature" in (p.get("product_title") or "")
+        badge = ' <span style="background:#D4AF37;color:#fff;font-size:11px;padding:2px 8px;border-radius:4px;margin-left:6px">AB Signature</span>' if is_ab else ""
+        last = str(p.get("last_sub", ""))[:16].replace("T", " ")
+        product_rows += f"""<tr>
+            <td style="padding:12px 16px;border-bottom:1px solid #f0ede8">{p['product_title']}{badge}</td>
+            <td style="padding:12px 16px;border-bottom:1px solid #f0ede8;text-align:center;font-weight:700;font-size:20px;color:#D4AF37">{p['sub_count']}</td>
+            <td style="padding:12px 16px;border-bottom:1px solid #f0ede8;color:#888;font-size:13px">{last}</td>
+        </tr>"""
+
+    # Build recent rows
+    recent_rows = ""
+    for r in recent:
+        dt = str(r.get("subscribed_at", ""))[:16].replace("T", " ")
+        status = r.get("status", "active")
+        st_color = "#4CAF50" if status == "active" else "#FF9800" if status == "notified" else "#999"
+        st_label = "En attente" if status == "active" else "Notifié" if status == "notified" else status
+        recent_rows += f"""<tr>
+            <td style="padding:10px 16px;border-bottom:1px solid #f0ede8;font-size:14px">{r.get('email','')}</td>
+            <td style="padding:10px 16px;border-bottom:1px solid #f0ede8;font-size:14px">{r.get('product_title','')}</td>
+            <td style="padding:10px 16px;border-bottom:1px solid #f0ede8;font-size:13px;color:#888">{dt}</td>
+            <td style="padding:10px 16px;border-bottom:1px solid #f0ede8"><span style="background:{st_color};color:#fff;font-size:11px;padding:3px 10px;border-radius:12px">{st_label}</span></td>
+        </tr>"""
+
+    html = f"""<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>PlanèteBeauty — Liste d'attente</title>
+<style>
+  *{{margin:0;padding:0;box-sizing:border-box}}
+  body{{font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;background:#F9F7F4;color:#1A1A1A}}
+  .header{{background:#1A1A1A;padding:24px 40px;display:flex;align-items:center;justify-content:space-between}}
+  .header h1{{color:#D4AF37;font-size:18px;letter-spacing:2px;font-weight:700}}
+  .header span{{color:#888;font-size:13px}}
+  .container{{max-width:1000px;margin:0 auto;padding:30px 20px}}
+  .cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;margin-bottom:30px}}
+  .card{{background:#fff;border-radius:12px;padding:24px;box-shadow:0 2px 12px rgba(0,0,0,.04);text-align:center}}
+  .card .num{{font-size:36px;font-weight:800;color:#D4AF37;line-height:1}}
+  .card .label{{font-size:13px;color:#888;margin-top:6px}}
+  .card.ab{{border:2px solid #D4AF37}}
+  .section-title{{font-size:16px;font-weight:700;margin:28px 0 12px;padding-left:4px}}
+  table{{width:100%;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,.04);border-collapse:collapse}}
+  th{{background:#F9F7F4;padding:12px 16px;text-align:left;font-size:12px;text-transform:uppercase;letter-spacing:1px;color:#888;font-weight:600}}
+  th:nth-child(2){{text-align:center}}
+  .refresh{{display:inline-block;margin-top:20px;color:#D4AF37;font-size:13px;text-decoration:none}}
+  .refresh:hover{{text-decoration:underline}}
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>PLANÈTE BEAUTY — LISTE D'ATTENTE</h1>
+  <span>Mis à jour : {datetime.utcnow().strftime('%d/%m/%Y %H:%M')} UTC</span>
+</div>
+<div class="container">
+  <div class="cards">
+    <div class="card">
+      <div class="num">{total}</div>
+      <div class="label">Inscriptions actives</div>
+    </div>
+    <div class="card ab">
+      <div class="num">{ab_total}</div>
+      <div class="label">AB Signature Paris</div>
+    </div>
+    <div class="card">
+      <div class="num">{len(products)}</div>
+      <div class="label">Produits en attente</div>
+    </div>
+  </div>
+
+  <div class="section-title">Par produit</div>
+  <table>
+    <tr><th>Produit</th><th>Inscrits</th><th>Dernière inscription</th></tr>
+    {product_rows if product_rows else '<tr><td colspan="3" style="padding:20px;text-align:center;color:#888">Aucune inscription pour le moment</td></tr>'}
+  </table>
+
+  <div class="section-title">Inscriptions récentes</div>
+  <table>
+    <tr><th>Email</th><th>Produit</th><th>Date</th><th>Statut</th></tr>
+    {recent_rows if recent_rows else '<tr><td colspan="4" style="padding:20px;text-align:center;color:#888">Aucune inscription</td></tr>'}
+  </table>
+
+  <a href="/bis?token={BIS_DASHBOARD_TOKEN}" class="refresh">↻ Rafraîchir</a>
+</div>
+</body>
+</html>"""
+    return HTMLResponse(html)
+
+
 # ══════════════════════ BIS EMAIL ══════════════════════
 
 def bis_email_html(product_title: str, product_handle: str) -> str:
