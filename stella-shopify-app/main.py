@@ -1002,6 +1002,52 @@ class BISSubscribeRequest(BaseModel):
     product_title: str = ""
     product_handle: str = ""
 
+# ══════════════════════ CRON: NOUVEAUTÉS AUTO-TAG ══════════════════════
+
+@app.post("/api/cron/nouveautes")
+async def cron_nouveautes(request: Request):
+    """Daily cron: tag products < 30 days with 'Nouveauté', untag older ones."""
+    api_key = request.headers.get("X-API-Key", "")
+    if api_key != "stella-mem-2026-planetebeauty":
+        raise HTTPException(403, "Unauthorized")
+
+    from datetime import timezone, timedelta
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    shop_token = SHOPIFY_ACCESS_TOKEN
+    shop_domain = SHOPIFY_STORE_DOMAIN
+    gql_url = f"https://{shop_domain}/admin/api/{SHOPIFY_API_VERSION}/graphql.json"
+    headers = {"X-Shopify-Access-Token": shop_token, "Content-Type": "application/json"}
+
+    tagged, untagged = 0, 0
+    cursor = None
+    while True:
+        after = f', after: "{cursor}"' if cursor else ''
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.post(gql_url, json={"query": f'{{ products(first: 50{after}) {{ edges {{ cursor node {{ id tags createdAt }} }} pageInfo {{ hasNextPage }} }} }}'}, headers=headers)
+        data = r.json().get("data", {}).get("products", {})
+        for edge in data.get("edges", []):
+            p = edge["node"]
+            cursor = edge["cursor"]
+            tags = set(p.get("tags", []))
+            is_new = p["createdAt"] > cutoff
+            has_tag = "Nouveauté" in tags
+            if is_new and not has_tag:
+                tags.add("Nouveauté")
+                async with httpx.AsyncClient(timeout=30) as client:
+                    await client.post(gql_url, json={"query": f'mutation {{ productUpdate(input: {{id: "{p["id"]}", tags: {json.dumps(list(tags))}}}) {{ product {{ id }} }} }}'}, headers=headers)
+                tagged += 1
+            elif not is_new and has_tag:
+                tags.discard("Nouveauté")
+                async with httpx.AsyncClient(timeout=30) as client:
+                    await client.post(gql_url, json={"query": f'mutation {{ productUpdate(input: {{id: "{p["id"]}", tags: {json.dumps(list(tags))}}}) {{ product {{ id }} }} }}'}, headers=headers)
+                untagged += 1
+        if not data.get("pageInfo", {}).get("hasNextPage"):
+            break
+
+    logger.info(f"Cron nouveautes: +{tagged} tagged, -{untagged} untagged")
+    return {"tagged": tagged, "untagged": untagged, "cutoff": cutoff}
+
+
 # ══════════════════════ PRODUCT VIEW TRACKING ══════════════════════
 
 @app.post("/api/views/{product_id}")
