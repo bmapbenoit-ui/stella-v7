@@ -1136,6 +1136,135 @@ async def bis_dashboard(request: Request):
         return {"total_active": 0, "products": [], "recent": [], "error": str(e)}
 
 
+@app.post("/api/bis/webhook/inventory")
+async def bis_webhook_inventory(request: Request):
+    """Shopify webhook: inventory_levels/update — notify subscribers when back in stock."""
+    body = await request.body()
+    try:
+        payload = json.loads(body)
+    except:
+        raise HTTPException(400, "Invalid JSON")
+
+    available = payload.get("available")
+    inventory_item_id = payload.get("inventory_item_id")
+
+    logger.info(f"BIS webhook: inventory_item_id={inventory_item_id}, available={available}")
+
+    # Only process if item is now available (stock > 0)
+    if not available or available <= 0:
+        return {"ok": True, "action": "skipped", "reason": "still_out_of_stock"}
+
+    if not SHOPIFY_ACCESS_TOKEN:
+        return {"ok": False, "reason": "no_shopify_token"}
+
+    try:
+        # 1. Find variant by inventory_item_id
+        async with httpx.AsyncClient(timeout=15) as client:
+            query = json.dumps({"query": """
+                query($id: ID!) {
+                    inventoryItem(id: $id) {
+                        variant {
+                            id
+                            legacyResourceId
+                            product {
+                                id
+                                legacyResourceId
+                                title
+                                handle
+                            }
+                        }
+                    }
+                }
+            """, "variables": {"id": f"gid://shopify/InventoryItem/{inventory_item_id}"}})
+
+            r = await client.post(
+                SHOPIFY_GRAPHQL_URL,
+                headers={"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"},
+                content=query
+            )
+            gql_data = r.json()
+
+        inv_item = gql_data.get("data", {}).get("inventoryItem")
+        if not inv_item or not inv_item.get("variant"):
+            return {"ok": True, "action": "skipped", "reason": "no_variant_found"}
+
+        variant = inv_item["variant"]
+        product = variant.get("product", {})
+        variant_id = int(variant.get("legacyResourceId", 0))
+        product_id = int(product.get("legacyResourceId", 0))
+        product_handle = product.get("handle", "")
+        product_title = product.get("title", "")
+
+        logger.info(f"BIS webhook: product={product_title} (handle={product_handle}), variant_id={variant_id}, available={available}")
+
+        # 2. Find active subscribers for this product
+        db = get_db()
+        if not db:
+            return {"ok": False, "reason": "db_unavailable"}
+
+        cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("""
+            SELECT id, email FROM bis_subscriptions
+            WHERE product_id = %s AND status = 'active'
+        """, (product_id,))
+        subscribers = cur.fetchall()
+
+        if not subscribers:
+            cur.close(); db.close()
+            return {"ok": True, "action": "skipped", "reason": "no_subscribers", "product": product_title}
+
+        # 3. Mark as notified
+        sub_ids = [s["id"] for s in subscribers]
+        cur.execute("""
+            UPDATE bis_subscriptions SET status = 'notified', notified_at = NOW()
+            WHERE id = ANY(%s)
+        """, (sub_ids,))
+        db.commit()
+        cur.close(); db.close()
+
+        # 4. Remove bis-{handle} tag from Shopify customers
+        tag_to_remove = f"bis-{product_handle}"
+        notified_emails = [s["email"] for s in subscribers]
+        async with httpx.AsyncClient(timeout=15) as client:
+            for email in notified_emails:
+                try:
+                    search_q = json.dumps({"query": f'{{ customers(first:1, query:"email:{email}") {{ edges {{ node {{ id tags }} }} }} }}'})
+                    sr = await client.post(
+                        SHOPIFY_GRAPHQL_URL,
+                        headers={"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"},
+                        content=search_q
+                    )
+                    edges = sr.json().get("data", {}).get("customers", {}).get("edges", [])
+                    if edges:
+                        cust_id = edges[0]["node"]["id"]
+                        tags = [t for t in edges[0]["node"].get("tags", []) if t != tag_to_remove]
+                        if "bis-notify" in tags and not any(t.startswith("bis-") and t != "bis-notify" for t in tags):
+                            tags = [t for t in tags if t != "bis-notify"]
+                        tags_json = json.dumps(tags)
+                        mut = json.dumps({"query": f'mutation {{ customerUpdate(input: {{id: "{cust_id}", tags: {tags_json}}}) {{ customer {{ id }} }} }}'})
+                        await client.post(
+                            SHOPIFY_GRAPHQL_URL,
+                            headers={"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"},
+                            content=mut
+                        )
+                except Exception as e:
+                    logger.warning(f"BIS remove tag for {email}: {e}")
+
+        logger.info(f"BIS webhook: notified {len(subscribers)} subscribers for {product_title}, tags removed")
+
+        return {
+            "ok": True,
+            "action": "notified",
+            "product": product_title,
+            "subscribers_notified": len(subscribers),
+            "emails": notified_emails
+        }
+
+    except Exception as e:
+        logger.error(f"BIS webhook error: {e}")
+        return {"ok": False, "error": str(e)}
+
+
 @app.get("/health")
 async def health():
     redis_ok = False
