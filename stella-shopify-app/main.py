@@ -2695,7 +2695,6 @@ function switchTab(tab) {{
         setTimeout(function() {{ btn.textContent = '🔄 Régénérer'; btn.disabled = false; }}, 3000);
       }});
   }};
-}})();
 </script>
 </body>
 </html>"""
