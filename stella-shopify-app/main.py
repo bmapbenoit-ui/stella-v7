@@ -153,6 +153,30 @@ CREATE TABLE IF NOT EXISTS bis_subscriptions (
 );
 CREATE INDEX IF NOT EXISTS idx_bis_product ON bis_subscriptions(product_id, status);
 CREATE INDEX IF NOT EXISTS idx_bis_email ON bis_subscriptions(email, status);
+
+CREATE TABLE IF NOT EXISTS tryme_purchases (
+    id SERIAL PRIMARY KEY,
+    customer_email VARCHAR(255) NOT NULL,
+    customer_id VARCHAR(255),
+    product_id VARCHAR(255) NOT NULL,
+    product_handle VARCHAR(255) NOT NULL,
+    product_title VARCHAR(500),
+    variant_id VARCHAR(255) NOT NULL,
+    order_id VARCHAR(255) NOT NULL,
+    order_name VARCHAR(50),
+    tryme_price NUMERIC(10,2) DEFAULT 9.00,
+    discount_code VARCHAR(50),
+    discount_code_gid VARCHAR(255),
+    discount_used BOOLEAN DEFAULT FALSE,
+    full_size_order_id VARCHAR(255),
+    purchased_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    discount_expires_at TIMESTAMP WITH TIME ZONE,
+    discount_used_at TIMESTAMP WITH TIME ZONE,
+    status VARCHAR(20) DEFAULT 'pending'
+);
+CREATE INDEX IF NOT EXISTS idx_tryme_customer ON tryme_purchases(customer_email, product_id);
+CREATE INDEX IF NOT EXISTS idx_tryme_code ON tryme_purchases(discount_code);
+CREATE INDEX IF NOT EXISTS idx_tryme_status ON tryme_purchases(status, discount_expires_at);
 """
 
 def load_shopify_token_from_db():
@@ -1072,6 +1096,371 @@ async def debug_shopify():
         return {"version": APP_VERSION, "orders_raw": orders[:1000], "refunds_raw": refunds[:1000]}
     except Exception as e:
         return {"version": APP_VERSION, "error": str(e)}
+
+# ══════════════════════ TRY ME — TRY & BUY ══════════════════════
+
+TRYME_PRICE = 9.00
+TRYME_EXPIRY_DAYS = 30
+TRYME_SKU_PREFIX = "TRYME-"
+TRYME_VARIANT_TITLE = "2 ml"
+
+def is_tryme_item(line_item):
+    """Check if a line item is a Try Me product."""
+    sku = (line_item.get("sku") or "").upper()
+    title = (line_item.get("variant_title") or "").lower()
+    name = (line_item.get("name") or "").lower()
+    if sku.startswith(TRYME_SKU_PREFIX.upper()):
+        return True
+    if title == "2 ml" or "try me" in name or "try me" in title:
+        return True
+    return False
+
+@app.post("/api/webhook/tryme-order")
+async def webhook_tryme_order(request: Request):
+    """Webhook ORDERS_PAID: detect Try Me purchases, create discount codes, send emails."""
+    try:
+        body = await request.body()
+        payload = json.loads(body)
+    except Exception:
+        raise HTTPException(400, "Invalid payload")
+
+    order_id = str(payload.get("id", ""))
+    order_name = payload.get("name", "")
+    customer = payload.get("customer", {})
+    customer_email = (customer.get("email") or payload.get("email", "")).strip().lower()
+    customer_id = str(customer.get("id", ""))
+    line_items = payload.get("line_items", [])
+
+    if not customer_email:
+        return {"ok": True, "skipped": True, "reason": "no_email"}
+
+    tryme_items = [li for li in line_items if is_tryme_item(li)]
+    if not tryme_items:
+        return {"ok": True, "skipped": True, "reason": "no_tryme_items"}
+
+    results = []
+    for item in tryme_items:
+        product_id = str(item.get("product_id", ""))
+        product_handle = item.get("handle", "") or ""
+        product_title = item.get("title", "")
+        variant_id = str(item.get("variant_id", ""))
+        item_price = float(item.get("price", TRYME_PRICE))
+
+        # Generate unique discount code
+        code = f"TRYME-{uuid.uuid4().hex[:6].upper()}"
+        now = datetime.utcnow()
+        expires = now + __import__('datetime').timedelta(days=TRYME_EXPIRY_DAYS)
+
+        # Create discount code via Shopify Admin API
+        discount_gid = None
+        try:
+            gql_mutation = """mutation discountCodeBasicCreate($basicCodeDiscount: DiscountCodeBasicInput!) {
+              discountCodeBasicCreate(basicCodeDiscount: $basicCodeDiscount) {
+                codeDiscountNode { id codeDiscount { ... on DiscountCodeBasic { codes(first:1) { edges { node { code } } } } } }
+                userErrors { field message }
+              }
+            }"""
+            variables = {
+                "basicCodeDiscount": {
+                    "title": f"Try Me -{item_price:.0f}€ — {product_title}",
+                    "code": code,
+                    "startsAt": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "endsAt": expires.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "usageLimit": 1,
+                    "appliesOncePerCustomer": True,
+                    "customerSelection": {
+                        "customers": {
+                            "add": [f"gid://shopify/Customer/{customer_id}"]
+                        }
+                    } if customer_id else {"all": True},
+                    "customerGets": {
+                        "items": {
+                            "products": {
+                                "productsToAdd": [f"gid://shopify/Product/{product_id}"]
+                            }
+                        },
+                        "value": {
+                            "discountAmount": {
+                                "amount": str(item_price),
+                                "appliesOnEachItem": False
+                            }
+                        }
+                    },
+                    "combinesWith": {
+                        "shippingDiscounts": True,
+                        "productDiscounts": False,
+                        "orderDiscounts": True
+                    }
+                }
+            }
+
+            headers_gql = {
+                "Content-Type": "application/json",
+                "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN
+            }
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.post(SHOPIFY_GRAPHQL_URL, json={"query": gql_mutation, "variables": variables}, headers=headers_gql)
+                gql_data = resp.json()
+
+            errors = gql_data.get("data", {}).get("discountCodeBasicCreate", {}).get("userErrors", [])
+            if errors:
+                logger.error(f"Try Me discount creation error: {errors}")
+            else:
+                discount_gid = gql_data.get("data", {}).get("discountCodeBasicCreate", {}).get("codeDiscountNode", {}).get("id", "")
+                logger.info(f"Try Me discount created: {code} for {customer_email} on {product_title}")
+
+        except Exception as e:
+            logger.error(f"Try Me discount API error: {e}")
+
+        # Save to PostgreSQL
+        db = get_db()
+        if db:
+            try:
+                cur = db.cursor()
+                cur.execute("""INSERT INTO tryme_purchases
+                    (customer_email, customer_id, product_id, product_handle, product_title, variant_id,
+                     order_id, order_name, tryme_price, discount_code, discount_code_gid, discount_expires_at, status)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending')""",
+                    (customer_email, customer_id, product_id, product_handle, product_title, variant_id,
+                     order_id, order_name, item_price, code, discount_gid,
+                     expires.strftime("%Y-%m-%d %H:%M:%S")))
+                db.commit()
+                cur.close(); db.close()
+            except Exception as e:
+                logger.error(f"Try Me DB save: {e}")
+                try: db.close()
+                except: pass
+
+        # Send email with discount code
+        if SMTP_HOST and customer_email:
+            try:
+                html_body = f"""<div style="font-family:Georgia,serif;max-width:600px;margin:0 auto;padding:40px 20px">
+                <h2 style="color:#1a1a1a;font-weight:300">Merci pour votre essai !</h2>
+                <p style="color:#666;line-height:1.6">Vous avez choisi de découvrir <strong>{product_title}</strong> avec notre format Try Me.</p>
+                <p style="color:#666;line-height:1.6">Si ce parfum vous séduit, utilisez le code ci-dessous pour déduire {item_price:.0f}€ de votre achat du format standard :</p>
+                <div style="text-align:center;margin:30px 0;padding:20px;background:#FDFBF7;border-radius:12px;border:1px solid #E8E0D6">
+                    <div style="font-size:28px;font-weight:700;letter-spacing:3px;color:#C4956A">{code}</div>
+                    <div style="font-size:13px;color:#888;margin-top:8px">Valable 30 jours · Usage unique · Sur {product_title}</div>
+                </div>
+                <a href="https://planetebeauty.com/products/{product_handle}" style="display:block;text-align:center;padding:14px 28px;background:#1a1a1a;color:#fff;text-decoration:none;border-radius:8px;font-size:15px;margin:20px auto;max-width:280px">Découvrir le format complet</a>
+                <p style="color:#aaa;font-size:12px;text-align:center;margin-top:30px">PlanèteBeauty · Parfumerie de niche</p>
+                </div>"""
+
+                msg = MIMEMultipart("alternative")
+                msg["From"] = f"{SMTP_FROM_NAME} <{SMTP_FROM_EMAIL}>"
+                msg["To"] = customer_email
+                msg["Subject"] = f"Votre code Try Me -{item_price:.0f}€ — {product_title}"
+                msg.attach(MIMEText(html_body, "html"))
+
+                await aiosmtplib.send(msg, hostname=SMTP_HOST, port=SMTP_PORT,
+                                      username=SMTP_USER, password=SMTP_PASS, use_tls=False, start_tls=True)
+                logger.info(f"Try Me email sent to {customer_email}: {code}")
+            except Exception as e:
+                logger.error(f"Try Me email error: {e}")
+
+        results.append({"product": product_title, "code": code, "email": customer_email, "discount_gid": discount_gid})
+
+    return {"ok": True, "tryme_count": len(results), "results": results}
+
+
+@app.post("/api/tryme/create-variants")
+async def tryme_create_variants(request: Request):
+    """Batch: add Try Me 2ml variant to all active perfume products."""
+    api_key = request.headers.get("X-API-Key", "")
+    if api_key != "stella-mem-2026-planetebeauty":
+        raise HTTPException(403, "Unauthorized")
+
+    headers_gql = {"Content-Type": "application/json", "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN}
+    created = []
+    skipped = []
+    errors_list = []
+    cursor = None
+
+    for page in range(20):
+        after = f', after: "{cursor}"' if cursor else ''
+        query = f"""{{ products(first: 50{after}, query: "status:ACTIVE AND (product_type:'Extrait de Parfum' OR product_type:'Eau de Parfum' OR product_type:'Eau de Parfum Intense' OR product_type:'Eau de Toilette')") {{
+            edges {{ node {{ id handle title variants(first: 10) {{ edges {{ node {{ title sku }} }} }} }} }}
+            pageInfo {{ hasNextPage endCursor }}
+        }} }}"""
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(SHOPIFY_GRAPHQL_URL, json={"query": query}, headers=headers_gql)
+            data = resp.json()
+
+        products = data.get("data", {}).get("products", {}).get("edges", [])
+        pi = data.get("data", {}).get("products", {}).get("pageInfo", {})
+
+        for edge in products:
+            p = edge["node"]
+            existing_variants = [v["node"]["title"] for v in p.get("variants", {}).get("edges", [])]
+            existing_skus = [v["node"].get("sku", "") for v in p.get("variants", {}).get("edges", [])]
+
+            # Skip if already has Try Me variant
+            if TRYME_VARIANT_TITLE in existing_variants or any(s and s.startswith(TRYME_SKU_PREFIX) for s in existing_skus):
+                skipped.append(p["handle"])
+                continue
+
+            # Create Try Me variant
+            sku = f"{TRYME_SKU_PREFIX}{p['handle'][:30]}"
+            mutation = """mutation productVariantsBulkCreate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+              productVariantsBulkCreate(productId: $productId, variants: $variants) {
+                productVariants { id title }
+                userErrors { field message }
+              }
+            }"""
+            variables = {
+                "productId": p["id"],
+                "variants": [{
+                    "optionValues": [{"optionName": "Taille", "name": TRYME_VARIANT_TITLE}],
+                    "price": str(TRYME_PRICE),
+                    "sku": sku,
+                    "inventoryQuantities": [{"availableQuantity": 10, "locationId": "gid://shopify/Location/56855527557"}],
+                    "taxable": True
+                }]
+            }
+
+            try:
+                async with httpx.AsyncClient(timeout=15) as client:
+                    resp = await client.post(SHOPIFY_GRAPHQL_URL, json={"query": mutation, "variables": variables}, headers=headers_gql)
+                    result = resp.json()
+                errs = result.get("data", {}).get("productVariantsBulkCreate", {}).get("userErrors", [])
+                if errs:
+                    errors_list.append({"handle": p["handle"], "errors": errs})
+                else:
+                    created.append(p["handle"])
+            except Exception as e:
+                errors_list.append({"handle": p["handle"], "error": str(e)})
+
+        if not pi.get("hasNextPage"):
+            break
+        cursor = pi.get("endCursor")
+
+    logger.info(f"Try Me variants: {len(created)} created, {len(skipped)} skipped, {len(errors_list)} errors")
+    return {"created": len(created), "skipped": len(skipped), "errors": len(errors_list),
+            "created_handles": created[:20], "error_details": errors_list[:10]}
+
+
+@app.post("/api/tryme/remove-variants")
+async def tryme_remove_variants(request: Request):
+    """Rollback: remove all Try Me 2ml variants."""
+    api_key = request.headers.get("X-API-Key", "")
+    if api_key != "stella-mem-2026-planetebeauty":
+        raise HTTPException(403, "Unauthorized")
+
+    headers_gql = {"Content-Type": "application/json", "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN}
+    removed = 0
+    cursor = None
+
+    for page in range(20):
+        after = f', after: "{cursor}"' if cursor else ''
+        query = f"""{{ productVariants(first: 50{after}, query: "sku:{TRYME_SKU_PREFIX}*") {{
+            edges {{ node {{ id title sku product {{ id handle }} }} }}
+            pageInfo {{ hasNextPage endCursor }}
+        }} }}"""
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(SHOPIFY_GRAPHQL_URL, json={"query": query}, headers=headers_gql)
+            data = resp.json()
+
+        variants = data.get("data", {}).get("productVariants", {}).get("edges", [])
+        pi = data.get("data", {}).get("productVariants", {}).get("pageInfo", {})
+
+        for edge in variants:
+            v = edge["node"]
+            product_id = v.get("product", {}).get("id", "")
+            mutation = """mutation productVariantsBulkDelete($productId: ID!, $variantsIds: [ID!]!) {
+              productVariantsBulkDelete(productId: $productId, variantsIds: $variantsIds) { userErrors { message } }
+            }"""
+            try:
+                async with httpx.AsyncClient(timeout=15) as client:
+                    await client.post(SHOPIFY_GRAPHQL_URL, json={"query": mutation, "variables": {"productId": product_id, "variantsIds": [v["id"]]}}, headers=headers_gql)
+                removed += 1
+            except:
+                pass
+
+        if not pi.get("hasNextPage"):
+            break
+        cursor = pi.get("endCursor")
+
+    return {"removed": removed}
+
+
+@app.post("/api/cron/tryme-expire")
+async def cron_tryme_expire():
+    """Clean up expired Try Me discount codes."""
+    db = get_db()
+    if not db:
+        return {"expired": 0}
+
+    try:
+        cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("""SELECT id, discount_code, discount_code_gid FROM tryme_purchases
+                       WHERE status='pending' AND discount_expires_at < NOW()""")
+        expired = cur.fetchall()
+
+        headers_gql = {"Content-Type": "application/json", "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN}
+
+        for row in expired:
+            # Delete discount from Shopify
+            if row.get("discount_code_gid"):
+                try:
+                    mutation = """mutation discountCodeDelete($id: ID!) {
+                      discountCodeDelete(id: $id) { userErrors { message } }
+                    }"""
+                    async with httpx.AsyncClient(timeout=10) as client:
+                        await client.post(SHOPIFY_GRAPHQL_URL, json={"query": mutation, "variables": {"id": row["discount_code_gid"]}}, headers=headers_gql)
+                except:
+                    pass
+
+            cur.execute("UPDATE tryme_purchases SET status='expired' WHERE id=%s", (row["id"],))
+
+        db.commit()
+        cur.close(); db.close()
+        logger.info(f"Try Me expire: {len(expired)} codes expired")
+        return {"expired": len(expired)}
+    except Exception as e:
+        try: db.close()
+        except: pass
+        logger.error(f"Try Me expire error: {e}")
+        return {"error": str(e)}
+
+
+@app.get("/api/tryme/dashboard")
+async def tryme_dashboard(request: Request):
+    """Dashboard data for Try Me tab."""
+    db = get_db()
+    if not db:
+        return {"total": 0, "pending": 0, "used": 0, "expired": 0, "recent": []}
+
+    try:
+        cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("SELECT COUNT(*) as c FROM tryme_purchases")
+        total = cur.fetchone()["c"]
+        cur.execute("SELECT COUNT(*) as c FROM tryme_purchases WHERE status='pending'")
+        pending = cur.fetchone()["c"]
+        cur.execute("SELECT COUNT(*) as c FROM tryme_purchases WHERE discount_used=true")
+        used = cur.fetchone()["c"]
+        cur.execute("SELECT COUNT(*) as c FROM tryme_purchases WHERE status='expired'")
+        expired = cur.fetchone()["c"]
+
+        cur.execute("""SELECT customer_email, product_title, discount_code, status,
+                       purchased_at, discount_expires_at, discount_used
+                       FROM tryme_purchases ORDER BY purchased_at DESC LIMIT 20""")
+        recent = cur.fetchall()
+        for r in recent:
+            if r.get("purchased_at"): r["purchased_at"] = r["purchased_at"].isoformat()
+            if r.get("discount_expires_at"): r["discount_expires_at"] = r["discount_expires_at"].isoformat()
+
+        conv_rate = round(used / total * 100, 1) if total > 0 else 0
+
+        cur.close(); db.close()
+        return {"total": total, "pending": pending, "used": used, "expired": expired,
+                "conversion_rate": conv_rate, "recent": recent}
+    except Exception as e:
+        try: db.close()
+        except: pass
+        return {"total": 0, "error": str(e)}
+
 
 # ══════════════════════ BACK IN STOCK (BIS) ══════════════════════
 
@@ -2371,6 +2760,41 @@ async def index(request: Request):
 
     now_str = datetime.utcnow().strftime('%d/%m/%Y %H:%M')
 
+    # Try Me data from PostgreSQL
+    tryme_total = 0
+    tryme_pending = 0
+    tryme_used = 0
+    tryme_conv_rate = 0
+    tryme_rows_html = ""
+    db_tryme = get_db()
+    if db_tryme:
+        try:
+            cur_t = db_tryme.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cur_t.execute("SELECT COUNT(*) as c FROM tryme_purchases")
+            tryme_total = cur_t.fetchone()["c"]
+            cur_t.execute("SELECT COUNT(*) as c FROM tryme_purchases WHERE status='pending'")
+            tryme_pending = cur_t.fetchone()["c"]
+            cur_t.execute("SELECT COUNT(*) as c FROM tryme_purchases WHERE discount_used=true")
+            tryme_used = cur_t.fetchone()["c"]
+            tryme_conv_rate = round(tryme_used / tryme_total * 100, 1) if tryme_total > 0 else 0
+            cur_t.execute("""SELECT customer_email, product_title, discount_code, status, purchased_at
+                            FROM tryme_purchases ORDER BY purchased_at DESC LIMIT 15""")
+            for r in cur_t.fetchall():
+                dt = str(r.get("purchased_at", ""))[:16].replace("T", " ")
+                st = r.get("status", "pending")
+                st_color = "#4CAF50" if st == "pending" else "#C4956A" if st == "used" else "#999"
+                st_label = "En attente" if st == "pending" else "Utilis\u00e9" if st == "used" else "Expir\u00e9"
+                tryme_rows_html += f'<tr><td>{r.get("customer_email","")}</td><td>{r.get("product_title","")[:40]}</td><td><code>{r.get("discount_code","")}</code></td><td><span class="status-badge" style="background:{st_color}">{st_label}</span></td></tr>'
+            if not tryme_rows_html:
+                tryme_rows_html = '<tr><td colspan="4" class="empty">Aucun Try Me encore — lancement pr&eacute;vu dans 2 semaines</td></tr>'
+            cur_t.close(); db_tryme.close()
+        except Exception as e:
+            try: db_tryme.close()
+            except: pass
+            logger.warning(f"Try Me dashboard: {e}")
+            if not tryme_rows_html:
+                tryme_rows_html = '<tr><td colspan="4" class="empty">Aucun Try Me encore</td></tr>'
+
     # Quiz analytics from Redis
     quiz_views_24h = 0
     quiz_completes_24h = 0
@@ -2520,6 +2944,10 @@ async def index(request: Request):
       <span class="tab-icon">&#127919;</span> Quiz
       <span class="tab-badge" style="background:#C4956A">{quiz_views_24h}</span>
     </div>
+    <div class="tab" data-tab="tryme" onclick="switchTab(this)">
+      <span class="tab-icon">&#129514;</span> Try Me
+      <span class="tab-badge" style="background:#C4956A">{tryme_total}</span>
+    </div>
     <div class="tab coming" data-tab="images">
       <span class="tab-icon">&#127912;</span> Images
       <span class="tab-badge">Bient&ocirc;t</span>
@@ -2610,6 +3038,26 @@ async def index(request: Request):
     {stock_rows_html}
   </table>
   <p style="text-align:center;margin-top:16px;color:#888;font-size:12px">V&eacute;rification automatique toutes les heures &middot; Email si nouveau produit en rupture</p>
+</div>
+</div>
+
+<!-- ═══ TAB: TRY ME ═══ -->
+<div class="tab-content" id="tab-tryme">
+<div class="container">
+  <div class="cards">
+    <div class="card"><div class="num" style="color:#C4956A">{tryme_total}</div><div class="label">Total Try Me</div></div>
+    <div class="card" style="border-color:#C4956A"><div class="num" style="color:#4CAF50">{tryme_pending}</div><div class="label">Codes en attente</div></div>
+    <div class="card"><div class="num" style="color:#C4956A">{tryme_used}</div><div class="label">Codes utilis&eacute;s</div></div>
+    <div class="card"><div class="num">{tryme_conv_rate}%</div><div class="label">Taux conversion</div></div>
+  </div>
+  <div class="section-title">&#128203; Codes r&eacute;cents</div>
+  <table class="data-table">
+    <tr><th>Email</th><th>Produit</th><th>Code</th><th>Statut</th></tr>
+    {tryme_rows_html}
+  </table>
+  <div style="margin-top:16px;display:flex;gap:12px">
+    <button onclick="fetch('/api/cron/tryme-expire',{{method:'POST'}}).then(function(){{location.reload()}})" style="padding:8px 16px;background:#1a1a1a;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:13px">&#128465; Nettoyer codes expir&eacute;s</button>
+  </div>
 </div>
 </div>
 
