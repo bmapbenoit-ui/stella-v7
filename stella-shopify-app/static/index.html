@@ -118,6 +118,34 @@ html, body { height: 100%; overflow: hidden; font-family: -apple-system, BlinkMa
 .memory-dot.on { background: var(--success); }
 .memory-dot.off { background: var(--danger); }
 
+/* ═══ SIDEBAR NAV ═══ */
+.sidebar-nav { padding: 8px; border-top: 1px solid #333; display: flex; flex-direction: column; gap: 2px; }
+.sidebar-nav-item { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 8px; cursor: pointer; font-size: 13px; color: #999; border: none; background: none; text-align: left; transition: 0.15s; width: 100%; }
+.sidebar-nav-item:hover { background: #2A2A2A; color: #FFF; }
+.sidebar-nav-item.active { background: var(--gold-dark); color: #FFF; }
+.sidebar-nav-item .nav-icon { font-size: 16px; width: 20px; text-align: center; }
+.sidebar-nav-item .nav-badge { margin-left: auto; background: var(--gold); color: #FFF; font-size: 10px; padding: 1px 6px; border-radius: 10px; font-weight: 700; }
+
+/* ═══ QUIZ PANEL ═══ */
+.quiz-panel { display: none; flex: 1; flex-direction: column; overflow-y: auto; padding: 24px; background: var(--bg-secondary); }
+.quiz-panel.active { display: flex; }
+.quiz-panel h2 { font-size: 20px; font-weight: 700; margin-bottom: 20px; }
+.quiz-stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 24px; }
+.quiz-stat-card { background: #FFF; border-radius: 12px; padding: 20px; border: 1px solid var(--border); }
+.quiz-stat-card .label { font-size: 12px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
+.quiz-stat-card .value { font-size: 28px; font-weight: 700; color: var(--text); }
+.quiz-stat-card .sub { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
+.quiz-stat-card .value.gold { color: var(--gold); }
+.quiz-daily-table { width: 100%; background: #FFF; border-radius: 12px; border: 1px solid var(--border); overflow: hidden; }
+.quiz-daily-table th { background: var(--bg-secondary); padding: 10px 16px; text-align: left; font-size: 12px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.05em; }
+.quiz-daily-table td { padding: 10px 16px; font-size: 14px; border-top: 1px solid var(--border-light); }
+.quiz-actions { margin-top: 20px; display: flex; gap: 12px; flex-wrap: wrap; }
+.quiz-action-btn { padding: 10px 20px; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer; border: 1px solid var(--border); background: #FFF; color: var(--text); transition: 0.2s; }
+.quiz-action-btn:hover { border-color: var(--gold); color: var(--gold); }
+.quiz-action-btn.primary { background: var(--gold); color: #FFF; border-color: var(--gold); }
+.quiz-action-btn.primary:hover { background: var(--gold-dark); }
+.quiz-action-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
 /* ═══ MAIN ═══ */
 .main {
   flex: 1;
@@ -392,6 +420,10 @@ html, body { height: 100%; overflow: hidden; font-family: -apple-system, BlinkMa
     </div>
     <button class="new-chat-btn" onclick="newConversation()">＋ Nouvelle conversation</button>
     <div class="conv-list" id="convList"></div>
+    <nav class="sidebar-nav">
+      <button class="sidebar-nav-item active" onclick="switchPanel('chat')" id="nav-chat"><span class="nav-icon">💬</span> Chat</button>
+      <button class="sidebar-nav-item" onclick="switchPanel('quiz')" id="nav-quiz"><span class="nav-icon">🎯</span> Quiz Olfactif <span class="nav-badge" id="quizBadge">–</span></button>
+    </nav>
     <div class="sidebar-footer">
       <div class="memory-indicator"><span class="memory-dot on" id="dotRedis"></span> Redis</div>
       <div class="memory-indicator"><span class="memory-dot on" id="dotPg"></span> PostgreSQL</div>
@@ -422,6 +454,28 @@ html, body { height: 100%; overflow: hidden; font-family: -apple-system, BlinkMa
           <button class="quick-btn" onclick="quickSend('Résumé de l\'activité récente')">📊 Résumé activité</button>
           <button class="quick-btn" onclick="quickSend('Quelles sont les marques du catalogue ?')">🏷️ Liste des marques</button>
         </div>
+      </div>
+    </div>
+
+    <!-- QUIZ PANEL -->
+    <div class="quiz-panel" id="quizPanel">
+      <h2>🎯 Quiz Olfactif — Analytics</h2>
+      <div class="quiz-stats-grid" id="quizStatsGrid">
+        <div class="quiz-stat-card"><div class="label">Vues aujourd'hui</div><div class="value" id="qViewsToday">–</div></div>
+        <div class="quiz-stat-card"><div class="label">Quiz terminés</div><div class="value gold" id="qCompletesToday">–</div></div>
+        <div class="quiz-stat-card"><div class="label">Ajouts panier</div><div class="value" id="qAtcToday">–</div></div>
+        <div class="quiz-stat-card"><div class="label">Taux conversion</div><div class="value gold" id="qConvRate">–</div><div class="sub">vues → quiz terminé</div></div>
+      </div>
+      <h3 style="margin-bottom:12px">Totaux (rolling 24h)</h3>
+      <div class="quiz-stats-grid">
+        <div class="quiz-stat-card"><div class="label">Total vues</div><div class="value" id="qViewsTotal">–</div></div>
+        <div class="quiz-stat-card"><div class="label">Total terminés</div><div class="value" id="qCompletesTotal">–</div></div>
+        <div class="quiz-stat-card"><div class="label">Total ATC</div><div class="value" id="qAtcTotal">–</div></div>
+      </div>
+      <div class="quiz-actions">
+        <button class="quiz-action-btn primary" onclick="regenerateQuizData()" id="regenBtn">🔄 Régénérer quiz-data.json</button>
+        <a href="https://planetebeauty.com/pages/trouvez-votre-parfum" target="_blank" class="quiz-action-btn">🔗 Voir le quiz live</a>
+        <button class="quiz-action-btn" onclick="loadQuizStats()">📊 Rafraîchir les stats</button>
       </div>
     </div>
 
@@ -465,7 +519,84 @@ let conversations = [];
   setupDragDrop();
   setupVoice();
   setupFileInput();
+  loadQuizStats();
 })();
+
+// ═══ PANEL SWITCHING ═══
+function switchPanel(panel) {
+  const chatArea = document.getElementById('chatArea');
+  const inputArea = document.querySelector('.input-area');
+  const quizPanel = document.getElementById('quizPanel');
+  const navChat = document.getElementById('nav-chat');
+  const navQuiz = document.getElementById('nav-quiz');
+
+  if (panel === 'quiz') {
+    chatArea.style.display = 'none';
+    inputArea.style.display = 'none';
+    quizPanel.classList.add('active');
+    navChat.classList.remove('active');
+    navQuiz.classList.add('active');
+    loadQuizStats();
+  } else {
+    chatArea.style.display = '';
+    inputArea.style.display = '';
+    quizPanel.classList.remove('active');
+    navChat.classList.add('active');
+    navQuiz.classList.remove('active');
+  }
+}
+
+// ═══ QUIZ STATS ═══
+async function loadQuizStats() {
+  try {
+    const [views, completes, atc] = await Promise.all([
+      fetch(API + '/api/views/quiz-views').then(r => r.json()),
+      fetch(API + '/api/views/quiz-completes').then(r => r.json()),
+      fetch(API + '/api/views/quiz-atc').then(r => r.json())
+    ]);
+
+    const v = views.count || 0;
+    const c = completes.count || 0;
+    const a = atc.count || 0;
+    const rate = v > 0 ? Math.round(c / v * 100) : 0;
+
+    document.getElementById('qViewsToday').textContent = v;
+    document.getElementById('qCompletesToday').textContent = c;
+    document.getElementById('qAtcToday').textContent = a;
+    document.getElementById('qConvRate').textContent = rate + '%';
+    document.getElementById('qViewsTotal').textContent = v;
+    document.getElementById('qCompletesTotal').textContent = c;
+    document.getElementById('qAtcTotal').textContent = a;
+
+    // Update badge
+    const badge = document.getElementById('quizBadge');
+    if (badge) badge.textContent = c > 0 ? c : '–';
+  } catch(e) {
+    console.error('Quiz stats error:', e);
+  }
+}
+
+// ═══ QUIZ DATA REGENERATION ═══
+async function regenerateQuizData() {
+  const btn = document.getElementById('regenBtn');
+  btn.disabled = true;
+  btn.textContent = '⏳ Régénération en cours...';
+
+  try {
+    const resp = await fetch(API + '/api/quiz/regenerate', { method: 'POST' });
+    const data = await resp.json();
+    if (data.success) {
+      btn.textContent = '✅ ' + data.count + ' produits indexés !';
+      setTimeout(() => { btn.textContent = '🔄 Régénérer quiz-data.json'; btn.disabled = false; }, 3000);
+    } else {
+      btn.textContent = '❌ Erreur: ' + (data.error || 'inconnue');
+      setTimeout(() => { btn.textContent = '🔄 Régénérer quiz-data.json'; btn.disabled = false; }, 3000);
+    }
+  } catch(e) {
+    btn.textContent = '❌ Erreur réseau';
+    setTimeout(() => { btn.textContent = '🔄 Régénérer quiz-data.json'; btn.disabled = false; }, 3000);
+  }
+}
 
 // ═══ HEALTH ═══
 async function checkHealth() {

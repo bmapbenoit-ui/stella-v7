@@ -1584,6 +1584,101 @@ async def quiz_stats():
         "daily": daily
     }
 
+@app.post("/api/quiz/regenerate")
+async def quiz_regenerate():
+    """Regenerate quiz-data.json from Shopify products and upload to theme."""
+    if not SHOPIFY_ACCESS_TOKEN:
+        return {"success": False, "error": "No Shopify token"}
+    try:
+        all_products = []
+        cursor = None
+        headers_gql = {
+            "Content-Type": "application/json",
+            "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN
+        }
+        for page in range(10):
+            after = f', after: "{cursor}"' if cursor else ''
+            query = '''{
+              products(first: 50%s, query: "product_type:'Extrait de Parfum' OR product_type:'Eau de Parfum' OR product_type:'Eau de Parfum Intense' OR product_type:'Eau de Toilette'") {
+                edges { node {
+                  handle title vendor productType
+                  priceRangeV2 { minVariantPrice { amount } }
+                  metafields(first: 20, keys: ["parfum.genre","parfum.famille_olfactive","parfum.accord_principal","parfum.accords_secondaires","parfum.saison","parfum.occasions","parfum.moment","parfum.intensite","parfum.sillage_level","parfum.note_tete_principale","parfum.note_coeur_principale","parfum.note_fond_principale","parfum.notes_cles","parfum.concentration","parfum.contenance_ml"]) {
+                    edges { node { key value } }
+                  }
+                  featuredImage { url }
+                  variants(first: 3) { edges { node { id title price availableForSale } } }
+                } }
+                pageInfo { hasNextPage endCursor }
+              }
+            }''' % after
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(SHOPIFY_GRAPHQL_URL, json={"query": query}, headers=headers_gql)
+                data = resp.json()
+            products = data.get("data", {}).get("products", {})
+            edges = products.get("edges", [])
+            for edge in edges:
+                p = edge["node"]
+                mf = {}
+                for mf_edge in p.get("metafields", {}).get("edges", []):
+                    node = mf_edge["node"]
+                    key = node["key"].replace("parfum.", "")
+                    mf[key] = node["value"]
+                price = float(p["priceRangeV2"]["minVariantPrice"]["amount"])
+                img = p.get("featuredImage", {})
+                img_url = (img.get("url", "").split("?")[0] + "?width=400") if img.get("url") else ""
+                def parse_list(val):
+                    if not val: return []
+                    try:
+                        parsed = json.loads(val)
+                        if isinstance(parsed, list): return parsed
+                    except: pass
+                    return [val]
+                variants = []
+                for v in p.get("variants", {}).get("edges", []):
+                    vn = v["node"]
+                    variants.append({"id": vn["id"].split("/")[-1], "ml": vn["title"], "pr": float(vn["price"]), "av": vn["availableForSale"]})
+                all_products.append({
+                    "h": p["handle"], "t": p["title"], "v": p["vendor"], "p": price, "img": img_url,
+                    "g": mf.get("genre", ""), "fam": parse_list(mf.get("famille_olfactive", "")),
+                    "acc": mf.get("accord_principal", ""), "acc2": parse_list(mf.get("accords_secondaires", "")),
+                    "sai": parse_list(mf.get("saison", "")), "occ": parse_list(mf.get("occasions", "")),
+                    "int": int(mf.get("intensite", "3")), "sil": int(mf.get("sillage_level", "2")),
+                    "nt": mf.get("note_tete_principale", ""), "nc": mf.get("note_coeur_principale", ""),
+                    "nf": mf.get("note_fond_principale", ""), "nk": parse_list(mf.get("notes_cles", "")),
+                    "conc": mf.get("concentration", p["productType"]), "var": variants
+                })
+            pi = products.get("pageInfo", {})
+            if not pi.get("hasNextPage"): break
+            cursor = pi.get("endCursor")
+
+        # Upload to theme
+        quiz_json = json.dumps(all_products, ensure_ascii=False, separators=(",", ":"))
+        # Get active theme
+        async with httpx.AsyncClient(timeout=30) as client:
+            themes_resp = await client.get(
+                f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/{SHOPIFY_API_VERSION}/themes.json",
+                headers={"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN}
+            )
+            themes = themes_resp.json().get("themes", [])
+            main_theme = next((t for t in themes if t["role"] == "main"), None)
+            if not main_theme:
+                return {"success": False, "error": "No main theme found"}
+            # Upload asset
+            asset_resp = await client.put(
+                f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/{SHOPIFY_API_VERSION}/themes/{main_theme['id']}/assets.json",
+                json={"asset": {"key": "assets/quiz-data.json", "value": quiz_json}},
+                headers={"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN}
+            )
+            if asset_resp.status_code != 200:
+                return {"success": False, "error": f"Upload failed: {asset_resp.status_code}"}
+
+        logger.info(f"Quiz data regenerated: {len(all_products)} products")
+        return {"success": True, "count": len(all_products), "size_kb": round(len(quiz_json) / 1024, 1)}
+    except Exception as e:
+        logger.error(f"Quiz regenerate error: {e}")
+        return {"success": False, "error": str(e)}
+
 # ══════════════════════ BACK IN STOCK ══════════════════════
 
 @app.post("/api/bis/subscribe")
