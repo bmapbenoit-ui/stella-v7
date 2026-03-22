@@ -1679,6 +1679,23 @@ async def quiz_regenerate():
         logger.error(f"Quiz regenerate error: {e}")
         return {"success": False, "error": str(e)}
 
+@app.post("/api/webhook/product-change")
+async def webhook_product_change(request: Request):
+    """Shopify webhook: product created/updated/deleted → regenerate quiz data.
+    Debounced: only regenerates if no other call in last 60 seconds."""
+    rc = get_redis()
+    if rc:
+        last = rc.get("quiz:regen:last")
+        now = int(time.time())
+        if last and now - int(last) < 60:
+            return {"ok": True, "skipped": True, "reason": "debounced"}
+        rc.set("quiz:regen:last", now, ex=120)
+    # Trigger regeneration in background
+    import asyncio
+    asyncio.create_task(quiz_regenerate())
+    logger.info("Quiz data regeneration triggered by product webhook")
+    return {"ok": True, "regenerating": True}
+
 # ══════════════════════ BACK IN STOCK ══════════════════════
 
 @app.post("/api/bis/subscribe")
