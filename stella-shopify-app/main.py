@@ -1146,6 +1146,26 @@ async def webhook_tryme_order(request: Request):
         variant_id = str(item.get("variant_id", ""))
         item_price = float(item.get("price", TRYME_PRICE))
 
+        # Check if customer already has an active code for this product
+        db_check = get_db()
+        already_has_code = False
+        if db_check:
+            try:
+                cur_c = db_check.cursor()
+                cur_c.execute("""SELECT COUNT(*) FROM tryme_purchases
+                    WHERE customer_email=%s AND product_id=%s AND status='pending'""",
+                    (customer_email, product_id))
+                already_has_code = cur_c.fetchone()[0] > 0
+                cur_c.close(); db_check.close()
+            except:
+                try: db_check.close()
+                except: pass
+
+        if already_has_code:
+            logger.info(f"Try Me: {customer_email} already has active code for product {product_id} — skipping")
+            results.append({"product": product_title, "skipped": True, "reason": "duplicate"})
+            continue
+
         # Generate unique discount code
         code = f"TRYME-{uuid.uuid4().hex[:6].upper()}"
         now = datetime.utcnow()
