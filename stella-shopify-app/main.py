@@ -2500,23 +2500,23 @@ async def index(request: Request):
     <button class="refresh-btn" onclick="location.reload()">Rafra&icirc;chir</button>
   </div>
   <nav class="tabs">
-    <div class="tab active" data-tab="bis">
+    <div class="tab active" data-tab="bis" onclick="switchTab(this)">
       <span class="tab-icon">&#128276;</span> Liste d'attente
       <span class="tab-badge">{total}</span>
     </div>
-    <div class="tab" data-tab="audit">
+    <div class="tab" data-tab="audit" onclick="switchTab(this)">
       <span class="tab-icon">&#9989;</span> Audit Qualit&eacute;
       <span class="tab-badge">{len(audit_issues)}</span>
     </div>
-    <div class="tab" data-tab="nouveautes">
+    <div class="tab" data-tab="nouveautes" onclick="switchTab(this)">
       <span class="tab-icon">&#127381;</span> Nouveaut&eacute;s
       <span class="tab-badge">{len(still_new)}</span>
     </div>
-    <div class="tab" data-tab="stock">
+    <div class="tab" data-tab="stock" onclick="switchTab(this)">
       <span class="tab-icon">&#128230;</span> Stock
       <span class="tab-badge" style="background:{oos_badge_bg}">{len(oos_products_list)}</span>
     </div>
-    <div class="tab" data-tab="quiz">
+    <div class="tab" data-tab="quiz" onclick="switchTab(this)">
       <span class="tab-icon">&#127919;</span> Quiz
       <span class="tab-badge" style="background:#C4956A">{quiz_views_24h}</span>
     </div>
@@ -2665,20 +2665,14 @@ async def index(request: Request):
 <div class="footer">STELLA V8 &middot; Plan&egrave;teBeauty &middot; Powered by Railway</div>
 
 <script>
-(function() {{
-  var tabs = document.querySelectorAll('.tab');
-  var contents = document.querySelectorAll('.tab-content');
-  tabs.forEach(function(tab) {{
-    tab.addEventListener('click', function() {{
-      if (tab.classList.contains('coming')) return;
-      tabs.forEach(function(t) {{ t.classList.remove('active'); }});
-      contents.forEach(function(c) {{ c.classList.remove('active'); }});
-      tab.classList.add('active');
-      var target = document.getElementById('tab-' + tab.getAttribute('data-tab'));
-      if (target) target.classList.add('active');
-    }});
-  }});
-}})();
+function switchTab(tab) {{
+  if (tab.classList.contains('coming')) return;
+  document.querySelectorAll('.tab').forEach(function(t) {{ t.classList.remove('active'); }});
+  document.querySelectorAll('.tab-content').forEach(function(c) {{ c.classList.remove('active'); }});
+  tab.classList.add('active');
+  var target = document.getElementById('tab-' + tab.getAttribute('data-tab'));
+  if (target) target.classList.add('active');
+}}
 
   // Quiz regeneration
   window.regenQuiz = function() {{
