@@ -1520,6 +1520,70 @@ async def get_views(product_id: str):
     count = rc.zcard(key)
     return {"count": count, "product_id": product_id}
 
+# ══════════════════════ QUIZ OLFACTIF ANALYTICS ══════════════════════
+
+@app.post("/api/quiz/track")
+async def quiz_track(request: Request):
+    """Track quiz events (view, start, complete, atc). Stored in Redis."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    event = body.get("event", "unknown")
+    rc = get_redis()
+    if not rc:
+        return {"ok": True, "stored": False}
+    now = int(time.time())
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    # Increment daily counter per event type
+    key = f"quiz:{event}:{today}"
+    pipe = rc.pipeline()
+    pipe.incr(key)
+    pipe.expire(key, 90 * 86400)  # Keep 90 days
+    # Also increment total counter
+    pipe.incr(f"quiz:{event}:total")
+    results = pipe.execute()
+    return {"ok": True, "event": event, "count_today": results[0]}
+
+@app.get("/api/quiz/stats")
+async def quiz_stats():
+    """Get quiz analytics: views, completions, conversion rate."""
+    rc = get_redis()
+    if not rc:
+        return {"error": "redis_unavailable"}
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    # Get today's stats
+    views_today = int(rc.get(f"quiz:quiz_view:{today}") or 0)
+    starts_today = int(rc.get(f"quiz:quiz_start:{today}") or 0)
+    completes_today = int(rc.get(f"quiz:quiz_complete:{today}") or 0)
+    atc_today = int(rc.get(f"quiz:quiz_atc:{today}") or 0)
+    # Get totals
+    views_total = int(rc.get("quiz:quiz_view:total") or 0)
+    starts_total = int(rc.get("quiz:quiz_start:total") or 0)
+    completes_total = int(rc.get("quiz:quiz_complete:total") or 0)
+    atc_total = int(rc.get("quiz:quiz_atc:total") or 0)
+    # Conversion rates
+    conv_rate = round(completes_total / views_total * 100, 1) if views_total > 0 else 0
+    atc_rate = round(atc_total / completes_total * 100, 1) if completes_total > 0 else 0
+    # Last 7 days
+    daily = []
+    for i in range(7):
+        from datetime import timedelta
+        d = (datetime.utcnow() - timedelta(days=i)).strftime("%Y-%m-%d")
+        daily.append({
+            "date": d,
+            "views": int(rc.get(f"quiz:quiz_view:{d}") or 0),
+            "completes": int(rc.get(f"quiz:quiz_complete:{d}") or 0),
+            "atc": int(rc.get(f"quiz:quiz_atc:{d}") or 0)
+        })
+    return {
+        "today": {"views": views_today, "starts": starts_today, "completes": completes_today, "atc": atc_today},
+        "total": {"views": views_total, "starts": starts_total, "completes": completes_total, "atc": atc_total},
+        "conversion_rate": conv_rate,
+        "atc_rate": atc_rate,
+        "daily": daily
+    }
+
 # ══════════════════════ BACK IN STOCK ══════════════════════
 
 @app.post("/api/bis/subscribe")
