@@ -20,6 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import psycopg2, psycopg2.extras
 import redis as redis_lib
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("stella-shopify")
@@ -197,6 +198,18 @@ def load_shopify_token_from_db():
         try: db.close()
         except: pass
 
+scheduler = AsyncIOScheduler()
+
+async def _run_cron(name, endpoint):
+    """Internal: call our own cron endpoint."""
+    try:
+        async with httpx.AsyncClient(timeout=120) as client:
+            r = await client.post(f"http://localhost:{os.getenv('PORT', '8000')}{endpoint}",
+                                  headers={"X-Cron-Key": os.getenv("RAILWAY_CRON_KEY", "stella-internal")})
+            logger.info(f"Scheduler {name}: {r.status_code}")
+    except Exception as e:
+        logger.error(f"Scheduler {name} error: {e}")
+
 @app.on_event("startup")
 async def startup():
     db = get_db()
@@ -210,6 +223,20 @@ async def startup():
             except: pass
     get_redis()
     load_shopify_token_from_db()
+
+    # ══════ SCHEDULER 24/7 (tourne meme si le Mac est eteint) ══════
+    scheduler.add_job(_run_cron, 'interval', hours=1, id='stock_check',
+                      args=["stock-check", "/api/cron/stock-check"])
+    scheduler.add_job(_run_cron, 'cron', hour=3, minute=15, id='sync_tags',
+                      args=["sync-tags", "/api/cron/sync-tags"])
+    scheduler.add_job(_run_cron, 'cron', hour=3, minute=45, id='nouveautes_expire',
+                      args=["nouveautes-expire", "/api/cron/nouveautes-expire"])
+    scheduler.add_job(_run_cron, 'cron', day_of_week='mon', hour=7, minute=0, id='audit_qualite',
+                      args=["audit-qualite", "/api/cron/audit-qualite"])
+    scheduler.add_job(_run_cron, 'cron', hour=4, minute=30, id='tryme_expire',
+                      args=["tryme-expire", "/api/cron/tryme-expire"])
+    scheduler.start()
+    logger.info("Scheduler started: stock(1h), tags(3h15), nouveautes(3h45), audit(lun 7h), tryme(4h30)")
 
 # ══════════════════════ 3-LAYER MEMORY ══════════════════════
 def save_to_redis(conv_id, role, content):
