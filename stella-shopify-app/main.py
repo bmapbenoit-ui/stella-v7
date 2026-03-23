@@ -263,9 +263,10 @@ def save_to_postgres(conv_id, role, content, metadata=None):
         except: pass
 
 async def save_to_qdrant(content, source="chat"):
+    """Save to Qdrant via Embedding-Service directly (Context-Engine removed)."""
     try:
         async with httpx.AsyncClient(timeout=15) as c:
-            await c.post(f"{CONTEXT_ENGINE_URL}/learn", json={"text": content, "project": "CHAT_HISTORY", "collection": "knowledge", "source": source})
+            await c.post(f"{EMBEDDING_SERVICE_URL}/learn", json={"text": content, "project": "CHAT_HISTORY", "collection": "knowledge", "source": source})
     except Exception as e: logger.warning(f"Qdrant save: {e}")
 
 def should_vectorize(msg, answer):
@@ -766,13 +767,8 @@ REGLE 5: Tutoie Benoit. Sois concis comme un collegue competent.
     if shopify_ctx:
         task_ctx += f"\n=== DONNEES SHOPIFY TEMPS REEL (lues maintenant depuis l'API) ===\n{shopify_ctx}\n=== FIN DONNEES SHOPIFY ===\n"
 
-    # Call Context Engine (NO system_override - let CE build context with our task_context + RAG + memory)
-    async with httpx.AsyncClient(timeout=120) as c:
-        try:
-            r = await c.post(f"{CONTEXT_ENGINE_URL}/chat", json={"message": req.message, "project": req.project, "task_context": task_ctx})
-            result = r.json()
-        except Exception as e:
-            result = {"answer": f"Erreur connexion: {e}"}
+    # Chat endpoint deprecated — use Claude Code instead
+    result = {"answer": "Le chat web STELLA est désactivé. Utilisez Claude Code pour interagir avec STELLA."}
 
     answer = result.get("answer", "Pas de réponse")
 
@@ -2671,10 +2667,10 @@ async def health():
     qdrant_ok = False
     try:
         async with httpx.AsyncClient(timeout=5) as c:
-            r = await c.get(f"{CONTEXT_ENGINE_URL}/health")
-            qdrant_ok = r.json().get("status") == "ok"
+            r = await c.get(f"{EMBEDDING_SERVICE_URL}/health")
+            qdrant_ok = r.status_code == 200
     except: pass
-    return {"status": "ok" if (redis_ok or db_ok) else "degraded", "version": APP_VERSION, "redis": redis_ok, "database": db_ok, "qdrant": qdrant_ok, "shopify_api": "connected" if SHOPIFY_ACCESS_TOKEN else "no_token", "dev_mode": DEV_MODE, "llm": "mistral_api" if qdrant_ok else "unknown"}
+    return {"status": "ok" if (redis_ok or db_ok) else "degraded", "version": APP_VERSION, "redis": redis_ok, "database": db_ok, "qdrant": qdrant_ok, "shopify_api": "connected" if SHOPIFY_ACCESS_TOKEN else "no_token", "dev_mode": DEV_MODE}
 
 # ══════════════════════ FRONTEND ══════════════════════
 @app.get("/", response_class=HTMLResponse)
