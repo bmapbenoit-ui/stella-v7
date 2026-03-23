@@ -2283,6 +2283,177 @@ async def webhook_product_change(request: Request):
     logger.info("Quiz data regeneration triggered by product webhook")
     return {"ok": True, "regenerating": True}
 
+# ══════════════════════ CASHBACK FIDÉLITÉ 5% ══════════════════════
+
+CASHBACK_RATE = 0.05
+CASHBACK_CODE_PREFIX = "CB"
+CASHBACK_EXPIRY_DAYS = 60
+
+@app.post("/api/webhook/order-paid")
+async def webhook_order_paid(request: Request):
+    """Shopify webhook: order paid → calculate 5% cashback → create unique code → update customer metafield."""
+    try:
+        body = await request.json()
+    except Exception:
+        return {"ok": False, "error": "Invalid JSON"}
+
+    order_id = body.get("id")
+    order_name = body.get("name", "")
+    customer = body.get("customer")
+    total = float(body.get("total_price", "0"))
+    tags = body.get("tags", "")
+
+    if not customer or not customer.get("id") or total <= 0:
+        return {"ok": True, "skipped": True, "reason": "no customer or zero total"}
+
+    # Skip Try Me orders (tagged tryme)
+    if "tryme" in tags.lower():
+        return {"ok": True, "skipped": True, "reason": "tryme order"}
+
+    customer_id = customer["id"]
+    customer_gid = f"gid://shopify/Customer/{customer_id}"
+    cashback_amount = round(total * CASHBACK_RATE, 2)
+
+    if cashback_amount < 0.50:
+        return {"ok": True, "skipped": True, "reason": "cashback < 0.50"}
+
+    # Generate unique code
+    code_suffix = f"{customer_id}-{order_id}"[-8:]
+    code = f"{CASHBACK_CODE_PREFIX}{int(cashback_amount)}-{code_suffix}".upper()
+
+    # Calculate expiry date
+    from datetime import timedelta
+    expires_at = (datetime.utcnow() + timedelta(days=CASHBACK_EXPIRY_DAYS)).strftime("%Y-%m-%dT23:59:59Z")
+
+    # 1. Create discount code in Shopify
+    gql_url = SHOPIFY_GRAPHQL_URL
+    create_mutation = """mutation($code: String!, $amount: Float!, $expires: DateTime!) {
+      discountCodeBasicCreate(basicCodeDiscount: {
+        title: $code
+        code: $code
+        startsAt: "2026-01-01T00:00:00Z"
+        endsAt: $expires
+        usageLimit: 1
+        customerGets: {
+          value: { discountAmount: { amount: $amount, appliesOnEachItem: false } }
+          items: { all: true }
+        }
+        customerSelection: { all: true }
+        combinesWith: { orderDiscounts: true, productDiscounts: true, shippingDiscounts: true }
+      }) {
+        codeDiscountNode { id codeDiscount { ... on DiscountCodeBasic { codes(first:1) { edges { node { code } } } } } }
+        userErrors { field message }
+      }
+    }"""
+    discount_created = False
+    try:
+        async with httpx.AsyncClient(timeout=15) as c:
+            r = await c.post(gql_url, json={
+                "query": create_mutation,
+                "variables": {"code": code, "amount": cashback_amount, "expires": expires_at}
+            }, headers={"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"})
+            resp = r.json()
+            errors = resp.get("data", {}).get("discountCodeBasicCreate", {}).get("userErrors", [])
+            if not errors:
+                discount_created = True
+            else:
+                logger.error(f"Cashback discount create error: {errors}")
+    except Exception as e:
+        logger.error(f"Cashback discount create: {e}")
+
+    if not discount_created:
+        return {"ok": False, "error": "Failed to create discount code"}
+
+    # 2. Read current cashback balance from customer metafield
+    current_balance = 0.0
+    current_history = []
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.post(gql_url, json={
+                "query": """{customer(id: "%s") { metafield(namespace: "planete-beaute", key: "cashback_data") { value } }}""" % customer_gid
+            }, headers={"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"})
+            mf = r.json().get("data", {}).get("customer", {}).get("metafield")
+            if mf and mf.get("value"):
+                data = json.loads(mf["value"])
+                current_balance = data.get("balance", 0.0)
+                current_history = data.get("history", [])
+    except Exception as e:
+        logger.warning(f"Cashback read metafield: {e}")
+
+    # 3. Update customer metafield with new cashback
+    new_balance = round(current_balance + cashback_amount, 2)
+    current_history.insert(0, {
+        "date": datetime.utcnow().strftime("%Y-%m-%d"),
+        "orderId": order_name,
+        "amount": cashback_amount,
+        "code": code,
+        "expiresAt": expires_at.split("T")[0],
+        "status": "active"
+    })
+    # Keep last 20 entries
+    current_history = current_history[:20]
+
+    cashback_data = json.dumps({"balance": new_balance, "history": current_history, "lastCode": code, "lastAmount": cashback_amount})
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.post(gql_url, json={
+                "query": """mutation($mf: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $mf) { metafields { id } userErrors { field message } } }""",
+                "variables": {"mf": [{"ownerId": customer_gid, "namespace": "planete-beaute", "key": "cashback_data", "type": "json", "value": cashback_data}]}
+            }, headers={"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"})
+    except Exception as e:
+        logger.error(f"Cashback update metafield: {e}")
+
+    # 4. Log to PostgreSQL
+    db = get_db()
+    if db:
+        try:
+            cur = db.cursor()
+            cur.execute("""CREATE TABLE IF NOT EXISTS cashback_rewards (
+                id SERIAL PRIMARY KEY, customer_id BIGINT, customer_email TEXT,
+                order_id BIGINT, order_name TEXT, order_total DECIMAL(10,2),
+                cashback_amount DECIMAL(10,2), discount_code TEXT,
+                expires_at TIMESTAMP, created_at TIMESTAMP DEFAULT NOW(), status TEXT DEFAULT 'active')""")
+            cur.execute("""INSERT INTO cashback_rewards (customer_id, customer_email, order_id, order_name,
+                order_total, cashback_amount, discount_code, expires_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+                (customer_id, customer.get("email", ""), order_id, order_name,
+                 total, cashback_amount, code, expires_at))
+            db.commit()
+            cur.close(); db.close()
+        except Exception as e:
+            try: db.close()
+            except: pass
+            logger.error(f"Cashback DB insert: {e}")
+
+    logger.info(f"Cashback {cashback_amount}EUR code {code} for customer {customer_id} order {order_name}")
+    return {"ok": True, "cashback": cashback_amount, "code": code, "newBalance": new_balance}
+
+
+@app.get("/api/cashback/dashboard")
+async def cashback_dashboard():
+    """Dashboard data for cashback tab in STELLA V8."""
+    db = get_db()
+    stats = {"total_rewarded": 0, "total_amount": 0, "total_used": 0, "recent": []}
+    if db:
+        try:
+            cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cur.execute("SELECT COUNT(*) as c, COALESCE(SUM(cashback_amount),0) as total FROM cashback_rewards")
+            row = cur.fetchone()
+            stats["total_rewarded"] = row["c"]
+            stats["total_amount"] = float(row["total"])
+            cur.execute("SELECT COUNT(*) as c FROM cashback_rewards WHERE status='used'")
+            stats["total_used"] = cur.fetchone()["c"]
+            cur.execute("""SELECT customer_email, order_name, cashback_amount, discount_code, status, created_at
+                          FROM cashback_rewards ORDER BY created_at DESC LIMIT 20""")
+            stats["recent"] = [dict(r) for r in cur.fetchall()]
+            cur.close(); db.close()
+        except Exception as e:
+            try: db.close()
+            except: pass
+            logger.warning(f"Cashback dashboard: {e}")
+    return stats
+
+
 # ══════════════════════ BACK IN STOCK ══════════════════════
 
 @app.post("/api/bis/subscribe")
@@ -3150,6 +3321,10 @@ async def index(request: Request):
       <span class="tab-icon">&#127915;</span> Codes Promo
       <span class="tab-badge" style="background:#C4956A" id="promosBadge">...</span>
     </div>
+    <div class="tab" data-tab="cashback" onclick="switchTab(this)">
+      <span class="tab-icon">&#128176;</span> Cashback
+      <span class="tab-badge" style="background:#4CAF50" id="cashbackBadge">...</span>
+    </div>
     <div class="tab coming" data-tab="images">
       <span class="tab-icon">&#127912;</span> Images
       <span class="tab-badge">Bient&ocirc;t</span>
@@ -3340,6 +3515,31 @@ async def index(request: Request):
 </div>
 </div>
 
+<!-- ═══ TAB: CASHBACK ═══ -->
+<div class="tab-content" id="tab-cashback">
+<div class="container">
+  <div class="section-title">&#128176; Cashback Fid&eacute;lit&eacute; 5%</div>
+  <p style="color:#999;font-size:13px;margin-bottom:16px">Chaque commande g&eacute;n&egrave;re 5% de cashback sous forme de code promo unique. Codes cumulables, usage unique, expire 60 jours.</p>
+
+  <div id="cashback-stats" style="margin-bottom:20px">
+    <div class="cards">
+      <div class="card"><div class="num" id="cb-total-rewarded">-</div><div class="label">Codes g&eacute;n&eacute;r&eacute;s</div></div>
+      <div class="card" style="border-color:#4CAF50"><div class="num" style="color:#4CAF50" id="cb-total-amount">-</div><div class="label">Total cashback (&euro;)</div></div>
+      <div class="card"><div class="num" id="cb-total-used">-</div><div class="label">Codes utilis&eacute;s</div></div>
+      <div class="card"><div class="num" style="color:#C4956A" id="cb-conv-rate">-</div><div class="label">Taux utilisation</div></div>
+    </div>
+  </div>
+
+  <div class="section-title">&#128203; Derniers cashbacks</div>
+  <table class="data-table">
+    <tr><th>Client</th><th>Commande</th><th>Cashback</th><th>Code</th><th>Statut</th></tr>
+    <tbody id="cashback-rows">
+      <tr><td colspan="5" class="empty">Chargement...</td></tr>
+    </tbody>
+  </table>
+</div>
+</div>
+
 <!-- ═══ TAB: SETTINGS ═══ -->
 <div class="tab-content" id="tab-settings">
 <div class="container">
@@ -3467,7 +3667,35 @@ function switchTab(tab) {{
     var target = document.getElementById('tab-' + tab.getAttribute('data-tab'));
     if (target) target.classList.add('active');
     if (tab.getAttribute('data-tab') === 'promos' && !promoState.discountId) loadPromoCodes();
+    if (tab.getAttribute('data-tab') === 'cashback') loadCashbackDashboard();
   }};
+
+  var cashbackLoaded = false;
+  function loadCashbackDashboard() {{
+    if (cashbackLoaded) return;
+    fetch('/api/cashback/dashboard').then(function(r){{ return r.json(); }}).then(function(d){{
+      cashbackLoaded = true;
+      document.getElementById('cb-total-rewarded').textContent = d.total_rewarded || 0;
+      document.getElementById('cb-total-amount').textContent = (d.total_amount || 0).toFixed(2);
+      document.getElementById('cb-total-used').textContent = d.total_used || 0;
+      var rate = d.total_rewarded > 0 ? Math.round(d.total_used / d.total_rewarded * 100) : 0;
+      document.getElementById('cb-conv-rate').textContent = rate + '%';
+      var badge = document.getElementById('cashbackBadge');
+      if (badge) badge.textContent = d.total_rewarded || 0;
+      var rows = '';
+      (d.recent || []).forEach(function(r){{
+        var dt = (r.created_at || '').substring(0, 16).replace('T', ' ');
+        var stColor = r.status === 'used' ? '#C4956A' : '#4CAF50';
+        var stLabel = r.status === 'used' ? 'Utilis&eacute;' : 'Actif';
+        rows += '<tr><td>' + (r.customer_email || '') + '</td><td>' + (r.order_name || '') + '</td>';
+        rows += '<td style="font-weight:bold">' + (r.cashback_amount || 0) + '&euro;</td>';
+        rows += '<td><code>' + (r.discount_code || '') + '</code></td>';
+        rows += '<td><span class="status-badge" style="background:' + stColor + '">' + stLabel + '</span></td></tr>';
+      }});
+      if (!rows) rows = '<tr><td colspan="5" class="empty">Aucun cashback encore — le syst&egrave;me se d&eacute;clenche &agrave; chaque commande pay&eacute;e</td></tr>';
+      document.getElementById('cashback-rows').innerHTML = rows;
+    }}).catch(function(){{ document.getElementById('cashback-rows').innerHTML = '<tr><td colspan="5" class="empty" style="color:#e53935">Erreur de chargement</td></tr>'; }})
+  }}
 
   // Quiz regeneration
   window.regenQuiz = function() {{
