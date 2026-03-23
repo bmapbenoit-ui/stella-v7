@@ -2145,6 +2145,59 @@ async def active_discounts():
         except: pass
     return result
 
+@app.get("/api/validate-discount/{code}")
+async def validate_discount(code: str):
+    """Validate a discount code and return its rules for client-side calculation."""
+    rc = get_redis()
+    cache_key = f"stella:discount:{code.upper()}"
+    if rc:
+        cached = rc.get(cache_key)
+        if cached:
+            return json.loads(cached)
+    gql_url = f"https://{SHOPIFY_SHOP}/admin/api/{API_VERSION}/graphql.json"
+    query = """{ codeDiscountNodes(first: 5, query: "code:%s") { edges { node { codeDiscount {
+      ... on DiscountCodeBasic {
+        title status
+        codes(first:1){edges{node{code}}}
+        customerGets { value { ... on DiscountPercentage { percentage } ... on DiscountAmount { amount { amount } } } }
+        minimumRequirement { ... on DiscountMinimumSubtotal { greaterThanOrEqualToSubtotal { amount } } }
+      }
+    } } } } }""" % code.upper()
+    result = {"valid": False, "code": code.upper()}
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.post(gql_url, json={"query": query},
+                           headers={"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"})
+            data = r.json().get("data", {})
+            for edge in data.get("codeDiscountNodes", {}).get("edges", []):
+                cd = edge["node"]["codeDiscount"]
+                if cd.get("status") != "ACTIVE": continue
+                codes = cd.get("codes", {}).get("edges", [])
+                if not codes: continue
+                if codes[0]["node"]["code"].upper() != code.upper(): continue
+                value = cd.get("customerGets", {}).get("value", {})
+                pct = value.get("percentage")
+                fixed = value.get("amount", {}).get("amount") if "amount" in value else None
+                min_req = cd.get("minimumRequirement", {})
+                min_amount = None
+                if "greaterThanOrEqualToSubtotal" in min_req:
+                    min_amount = float(min_req["greaterThanOrEqualToSubtotal"]["amount"])
+                result = {
+                    "valid": True,
+                    "code": code.upper(),
+                    "type": "percentage" if pct else "fixed",
+                    "percentage": pct * 100 if pct else None,
+                    "fixedAmount": float(fixed) if fixed else None,
+                    "minimumAmount": min_amount
+                }
+                break
+    except Exception as e:
+        logger.error(f"Validate discount: {e}")
+    if rc and result.get("valid"):
+        try: rc.setex(cache_key, 300, json.dumps(result))
+        except: pass
+    return result
+
 @app.post("/api/webhook/product-change")
 async def webhook_product_change(request: Request):
     """Shopify webhook: product created/updated/deleted → regenerate quiz data.
