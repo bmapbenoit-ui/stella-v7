@@ -2283,15 +2283,16 @@ async def webhook_product_change(request: Request):
     logger.info("Quiz data regeneration triggered by product webhook")
     return {"ok": True, "regenerating": True}
 
-# ══════════════════════ CASHBACK FIDÉLITÉ 5% ══════════════════════
+# ══════════════════════ CASHBACK FIDÉLITÉ 5% (Crédit Magasin) ══════════════════════
 
 CASHBACK_RATE = 0.05
-CASHBACK_CODE_PREFIX = "CB"
 CASHBACK_EXPIRY_DAYS = 60
+CASHBACK_MIN_USE = 70.0  # Crédit utilisable seulement à partir de 70€
 
 @app.post("/api/webhook/order-paid")
 async def webhook_order_paid(request: Request):
-    """Shopify webhook: order paid → calculate 5% cashback → create unique code → update customer metafield."""
+    """Shopify webhook: order paid → calculate 5% cashback → add store credit to customer.
+    Calcul: 5% du sous-total produits (hors frais de port, après remises, hors crédit magasin utilisé)."""
     try:
         body = await request.json()
     except Exception:
@@ -2300,124 +2301,141 @@ async def webhook_order_paid(request: Request):
     order_id = body.get("id")
     order_name = body.get("name", "")
     customer = body.get("customer")
-    total = float(body.get("total_price", "0"))
     tags = body.get("tags", "")
 
-    if not customer or not customer.get("id") or total <= 0:
-        return {"ok": True, "skipped": True, "reason": "no customer or zero total"}
+    if not customer or not customer.get("id"):
+        return {"ok": True, "skipped": True, "reason": "no customer"}
 
-    # Skip Try Me orders (tagged tryme)
+    # Skip Try Me orders
     if "tryme" in tags.lower():
         return {"ok": True, "skipped": True, "reason": "tryme order"}
 
+    # Calculate cashback base:
+    # subtotal_price = produits après remises (hors port, hors taxes)
+    # On soustrait le crédit magasin utilisé (store credit used in payment)
+    subtotal = float(body.get("subtotal_price", "0"))  # Produits après remises, hors port
+    total_discounts = float(body.get("total_discounts", "0"))  # Remises déjà soustraites du subtotal
+
+    # Detect store credit used in this order (payment gateway = "gift_card" or "store_credit")
+    store_credit_used = 0.0
+    for txn in body.get("payment_gateway_names", []):
+        if "gift_card" in txn.lower() or "store_credit" in txn.lower():
+            # Look in transactions for the store credit amount
+            break
+    # More precise: check refunds/transactions for store credit
+    for line in body.get("payment_terms", {}).get("payment_schedules", []) or []:
+        pass  # Fallback
+    # Safest method: check total_price vs subtotal + shipping - discounts
+    shipping_total = sum(float(s.get("price", "0")) for s in body.get("shipping_lines", []))
+    # If customer paid with partial store credit, the difference shows in transactions
+    # For now, use the order's current_subtotal_price which is after ALL adjustments
+    current_subtotal = float(body.get("current_subtotal_price", subtotal))
+
+    # Base for cashback = subtotal after discounts, minus any store credit portion
+    # Shopify webhook includes total_outstanding (what customer actually paid out of pocket)
+    # total_outstanding = 0 means fully paid. We need the non-credit portion.
+    # Best approach: fetch order details via Admin API for precise credit detection
+    cashback_base = current_subtotal  # Subtotal after discounts, before shipping, before tax
     customer_id = customer["id"]
     customer_gid = f"gid://shopify/Customer/{customer_id}"
-    cashback_amount = round(total * CASHBACK_RATE, 2)
+    gql_url = SHOPIFY_GRAPHQL_URL
+
+    # Fetch precise store credit usage from Admin API
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.post(gql_url, json={
+                "query": """{order(id: "gid://shopify/Order/%s") {
+                    currentSubtotalPriceSet { shopMoney { amount } }
+                    totalReceivedSet { shopMoney { amount } }
+                    transactions(first: 20) { edges { node { gateway amountSet { shopMoney { amount } } kind status } } }
+                }}""" % order_id
+            }, headers={"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"})
+            order_data = r.json().get("data", {}).get("order", {})
+            if order_data:
+                cashback_base = float(order_data.get("currentSubtotalPriceSet", {}).get("shopMoney", {}).get("amount", cashback_base))
+                # Check transactions for store credit / gift card usage
+                for edge in order_data.get("transactions", {}).get("edges", []):
+                    txn = edge["node"]
+                    if txn.get("kind") == "SALE" and txn.get("status") == "SUCCESS":
+                        gw = (txn.get("gateway") or "").lower()
+                        if "gift_card" in gw or "store_credit" in gw or "credit" in gw:
+                            store_credit_used += float(txn.get("amountSet", {}).get("shopMoney", {}).get("amount", "0"))
+    except Exception as e:
+        logger.warning(f"Cashback order fetch: {e}")
+
+    # Cashback = 5% of (subtotal after discounts MINUS store credit used)
+    cashback_base = max(0, cashback_base - store_credit_used)
+    cashback_amount = round(cashback_base * CASHBACK_RATE, 2)
 
     if cashback_amount < 0.50:
-        return {"ok": True, "skipped": True, "reason": "cashback < 0.50"}
+        return {"ok": True, "skipped": True, "reason": f"cashback {cashback_amount} < 0.50"}
 
-    # Generate unique code
-    code_suffix = f"{customer_id}-{order_id}"[-8:]
-    code = f"{CASHBACK_CODE_PREFIX}{int(cashback_amount)}-{code_suffix}".upper()
-
-    # Calculate expiry date
     from datetime import timedelta
     expires_at = (datetime.utcnow() + timedelta(days=CASHBACK_EXPIRY_DAYS)).strftime("%Y-%m-%dT23:59:59Z")
 
-    # 1. Create discount code in Shopify
-    gql_url = SHOPIFY_GRAPHQL_URL
-    create_mutation = """mutation($code: String!, $amount: Float!, $expires: DateTime!) {
-      discountCodeBasicCreate(basicCodeDiscount: {
-        title: $code
-        code: $code
-        startsAt: "2026-01-01T00:00:00Z"
-        endsAt: $expires
-        usageLimit: 1
-        customerGets: {
-          value: { discountAmount: { amount: $amount, appliesOnEachItem: false } }
-          items: { all: true }
-        }
-        customerSelection: { all: true }
-        combinesWith: { orderDiscounts: true, productDiscounts: true, shippingDiscounts: true }
-      }) {
-        codeDiscountNode { id codeDiscount { ... on DiscountCodeBasic { codes(first:1) { edges { node { code } } } } } }
-        userErrors { field message }
-      }
-    }"""
-    discount_created = False
+    # 1. Get or detect store credit account for customer
+    credit_account_id = None
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.post(gql_url, json={
+                "query": """{customer(id: "%s") { storeCreditAccounts(first:1) { edges { node { id balance { amount } } } } }}""" % customer_gid
+            }, headers={"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"})
+            edges = r.json().get("data", {}).get("customer", {}).get("storeCreditAccounts", {}).get("edges", [])
+            if edges:
+                credit_account_id = edges[0]["node"]["id"]
+    except Exception as e:
+        logger.warning(f"Cashback get credit account: {e}")
+
+    # 2. Add store credit to customer
+    credit_added = False
     try:
         async with httpx.AsyncClient(timeout=15) as c:
+            mutation = """mutation($id: ID!, $creditInput: StoreCreditAccountCreditInput!) {
+              storeCreditAccountCredit(id: $id, creditInput: $creditInput) {
+                storeCreditAccountTransaction { id amount { amount currencyCode } }
+                userErrors { field message }
+              }
+            }"""
+            # If no credit account exists, use customer GID and Shopify creates one
+            target_id = credit_account_id or customer_gid
             r = await c.post(gql_url, json={
-                "query": create_mutation,
-                "variables": {"code": code, "amount": cashback_amount, "expires": expires_at}
+                "query": mutation,
+                "variables": {
+                    "id": target_id,
+                    "creditInput": {
+                        "creditAmount": {"amount": str(cashback_amount), "currencyCode": "EUR"},
+                        "expiresAt": expires_at
+                    }
+                }
             }, headers={"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"})
             resp = r.json()
-            errors = resp.get("data", {}).get("discountCodeBasicCreate", {}).get("userErrors", [])
-            if not errors:
-                discount_created = True
+            errors = resp.get("data", {}).get("storeCreditAccountCredit", {}).get("userErrors", [])
+            if not errors and resp.get("data", {}).get("storeCreditAccountCredit", {}).get("storeCreditAccountTransaction"):
+                credit_added = True
             else:
-                logger.error(f"Cashback discount create error: {errors}")
+                logger.error(f"Cashback store credit error: {errors} / {resp}")
     except Exception as e:
-        logger.error(f"Cashback discount create: {e}")
+        logger.error(f"Cashback store credit: {e}")
 
-    if not discount_created:
-        return {"ok": False, "error": "Failed to create discount code"}
+    if not credit_added:
+        return {"ok": False, "error": "Failed to add store credit"}
 
-    # 2. Read current cashback balance from customer metafield
-    current_balance = 0.0
-    current_history = []
-    try:
-        async with httpx.AsyncClient(timeout=10) as c:
-            r = await c.post(gql_url, json={
-                "query": """{customer(id: "%s") { metafield(namespace: "planete-beaute", key: "cashback_data") { value } }}""" % customer_gid
-            }, headers={"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"})
-            mf = r.json().get("data", {}).get("customer", {}).get("metafield")
-            if mf and mf.get("value"):
-                data = json.loads(mf["value"])
-                current_balance = data.get("balance", 0.0)
-                current_history = data.get("history", [])
-    except Exception as e:
-        logger.warning(f"Cashback read metafield: {e}")
-
-    # 3. Update customer metafield with new cashback
-    new_balance = round(current_balance + cashback_amount, 2)
-    current_history.insert(0, {
-        "date": datetime.utcnow().strftime("%Y-%m-%d"),
-        "orderId": order_name,
-        "amount": cashback_amount,
-        "code": code,
-        "expiresAt": expires_at.split("T")[0],
-        "status": "active"
-    })
-    # Keep last 20 entries
-    current_history = current_history[:20]
-
-    cashback_data = json.dumps({"balance": new_balance, "history": current_history, "lastCode": code, "lastAmount": cashback_amount})
-    try:
-        async with httpx.AsyncClient(timeout=10) as c:
-            r = await c.post(gql_url, json={
-                "query": """mutation($mf: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $mf) { metafields { id } userErrors { field message } } }""",
-                "variables": {"mf": [{"ownerId": customer_gid, "namespace": "planete-beaute", "key": "cashback_data", "type": "json", "value": cashback_data}]}
-            }, headers={"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"})
-    except Exception as e:
-        logger.error(f"Cashback update metafield: {e}")
-
-    # 4. Log to PostgreSQL
+    # 3. Log to PostgreSQL
     db = get_db()
     if db:
         try:
             cur = db.cursor()
             cur.execute("""CREATE TABLE IF NOT EXISTS cashback_rewards (
                 id SERIAL PRIMARY KEY, customer_id BIGINT, customer_email TEXT,
-                order_id BIGINT, order_name TEXT, order_total DECIMAL(10,2),
-                cashback_amount DECIMAL(10,2), discount_code TEXT,
+                order_id BIGINT, order_name TEXT, order_subtotal DECIMAL(10,2),
+                store_credit_used DECIMAL(10,2), cashback_base DECIMAL(10,2),
+                cashback_amount DECIMAL(10,2), credit_type TEXT DEFAULT 'store_credit',
                 expires_at TIMESTAMP, created_at TIMESTAMP DEFAULT NOW(), status TEXT DEFAULT 'active')""")
             cur.execute("""INSERT INTO cashback_rewards (customer_id, customer_email, order_id, order_name,
-                order_total, cashback_amount, discount_code, expires_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+                order_subtotal, store_credit_used, cashback_base, cashback_amount, expires_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                 (customer_id, customer.get("email", ""), order_id, order_name,
-                 total, cashback_amount, code, expires_at))
+                 current_subtotal, store_credit_used, cashback_base, cashback_amount, expires_at))
             db.commit()
             cur.close(); db.close()
         except Exception as e:
@@ -2425,15 +2443,15 @@ async def webhook_order_paid(request: Request):
             except: pass
             logger.error(f"Cashback DB insert: {e}")
 
-    logger.info(f"Cashback {cashback_amount}EUR code {code} for customer {customer_id} order {order_name}")
-    return {"ok": True, "cashback": cashback_amount, "code": code, "newBalance": new_balance}
+    logger.info(f"Cashback {cashback_amount}EUR store credit for customer {customer_id} order {order_name} (base:{cashback_base}, credit_used:{store_credit_used})")
+    return {"ok": True, "cashback": cashback_amount, "base": cashback_base, "storeCreditUsed": store_credit_used}
 
 
 @app.get("/api/cashback/dashboard")
 async def cashback_dashboard():
-    """Dashboard data for cashback tab in STELLA V8."""
+    """Dashboard data for cashback tab in STELLA V8. Uses store credit (not discount codes)."""
     db = get_db()
-    stats = {"total_rewarded": 0, "total_amount": 0, "total_used": 0, "recent": []}
+    stats = {"total_rewarded": 0, "total_amount": 0, "total_used": 0, "min_use": CASHBACK_MIN_USE, "recent": []}
     if db:
         try:
             cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
@@ -3519,7 +3537,7 @@ async def index(request: Request):
 <div class="tab-content" id="tab-cashback">
 <div class="container">
   <div class="section-title">&#128176; Cashback Fid&eacute;lit&eacute; 5%</div>
-  <p style="color:#999;font-size:13px;margin-bottom:16px">Chaque commande g&eacute;n&egrave;re 5% de cashback sous forme de code promo unique. Codes cumulables, usage unique, expire 60 jours.</p>
+  <p style="color:#999;font-size:13px;margin-bottom:16px">Chaque commande g&eacute;n&egrave;re 5% de <strong>cr&eacute;dit magasin</strong> (hors frais de port, apr&egrave;s remises, hors cr&eacute;dit d&eacute;j&agrave; utilis&eacute;). Expire 60 jours. Utilisable &agrave; partir de 70&euro;.</p>
 
   <div id="cashback-stats" style="margin-bottom:20px">
     <div class="cards">
