@@ -2111,6 +2111,40 @@ async def quiz_regenerate():
         logger.error(f"Quiz regenerate error: {e}")
         return {"success": False, "error": str(e)}
 
+@app.get("/api/active-discounts")
+async def active_discounts():
+    """Return active discount codes for cart suggestions. Cached 5min in Redis."""
+    rc = get_redis()
+    cache_key = "stella:active_discounts"
+    if rc:
+        cached = rc.get(cache_key)
+        if cached:
+            return json.loads(cached)
+    gql_url = f"https://{SHOPIFY_SHOP}/admin/api/{API_VERSION}/graphql.json"
+    query = """{ codeDiscountNodes(first: 10, query: "status:active") { edges { node { codeDiscount {
+      ... on DiscountCodeBasic { title codes(first:1){edges{node{code}}} summary endsAt }
+      ... on DiscountCodeFreeShipping { title codes(first:1){edges{node{code}}} summary endsAt }
+    } } } } }"""
+    discounts = []
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.post(gql_url, json={"query": query},
+                           headers={"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"})
+            data = r.json().get("data", {})
+            for edge in data.get("codeDiscountNodes", {}).get("edges", []):
+                cd = edge["node"]["codeDiscount"]
+                codes = cd.get("codes", {}).get("edges", [])
+                code = codes[0]["node"]["code"] if codes else ""
+                if not code: continue
+                discounts.append({"code": code, "summary": cd.get("summary", ""), "endsAt": cd.get("endsAt"), "isPromo": cd.get("endsAt") is not None})
+    except Exception as e:
+        logger.error(f"Active discounts: {e}")
+    result = {"discounts": discounts}
+    if rc:
+        try: rc.setex(cache_key, 300, json.dumps(result))
+        except: pass
+    return result
+
 @app.post("/api/webhook/product-change")
 async def webhook_product_change(request: Request):
     """Shopify webhook: product created/updated/deleted → regenerate quiz data.
