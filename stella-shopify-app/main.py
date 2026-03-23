@@ -2220,7 +2220,14 @@ async def get_promo_codes():
                 mf = node.get("metafield")
                 if mf and mf.get("value"):
                     config = json.loads(mf["value"])
-                    codes = config.get("codes", [])
+                    raw_codes = config.get("codes", [])
+                    if isinstance(raw_codes, dict):
+                        for k, v in raw_codes.items():
+                            codes.append({"code": k, "percentage": v.get("percent", v.get("percentage", 0)),
+                                         "minimumAmount": v.get("minSubtotal", v.get("minimumAmount", 0)),
+                                         "expiresAt": v.get("expiresAt"), "message": v.get("message", "")})
+                    elif isinstance(raw_codes, list):
+                        codes = raw_codes
                 break
     except Exception as e:
         logger.error(f"Get promo codes: {e}")
