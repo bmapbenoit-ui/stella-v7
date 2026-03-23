@@ -2198,6 +2198,67 @@ async def validate_discount(code: str):
         except: pass
     return result
 
+@app.get("/api/promo-codes")
+async def get_promo_codes():
+    """Read promo codes config from the automatic discount metafield."""
+    gql_url = SHOPIFY_GRAPHQL_URL
+    query = """{
+      discountNodes(first: 10, query: "title:'PB Codes Promo'") {
+        edges { node { id metafield(namespace: "planete-beaute", key: "discount-codes-config") { value } } }
+      }
+    }"""
+    codes = []
+    discount_id = None
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.post(gql_url, json={"query": query},
+                           headers={"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"})
+            data = r.json().get("data", {})
+            for edge in data.get("discountNodes", {}).get("edges", []):
+                node = edge["node"]
+                discount_id = node["id"]
+                mf = node.get("metafield")
+                if mf and mf.get("value"):
+                    config = json.loads(mf["value"])
+                    codes = config.get("codes", [])
+                break
+    except Exception as e:
+        logger.error(f"Get promo codes: {e}")
+    return {"codes": codes, "discountId": discount_id}
+
+
+@app.post("/api/promo-codes")
+async def save_promo_codes(request: Request):
+    """Save promo codes config to the automatic discount metafield."""
+    body = await request.json()
+    codes = body.get("codes", [])
+    discount_id = body.get("discountId")
+    if not discount_id:
+        return {"success": False, "error": "discountId manquant"}
+    gql_url = SHOPIFY_GRAPHQL_URL
+    config_json = json.dumps({"codes": codes, "strategy": "MAXIMUM"})
+    mutation = """mutation($ownerId: ID!, $mf: [MetafieldsSetInput!]!) {
+      metafieldsSet(metafields: $mf) { metafields { id } userErrors { field message } }
+    }"""
+    variables = {
+        "ownerId": discount_id,
+        "mf": [{"ownerId": discount_id, "namespace": "planete-beaute", "key": "discount-codes-config",
+                "type": "json", "value": config_json}]
+    }
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.post(gql_url, json={"query": mutation, "variables": variables},
+                           headers={"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"})
+            resp = r.json()
+            errors = resp.get("data", {}).get("metafieldsSet", {}).get("userErrors", [])
+            if errors:
+                return {"success": False, "error": errors[0].get("message", "Erreur")}
+    except Exception as e:
+        logger.error(f"Save promo codes: {e}")
+        return {"success": False, "error": str(e)}
+    return {"success": True, "count": len(codes)}
+
+
 @app.post("/api/webhook/product-change")
 async def webhook_product_change(request: Request):
     """Shopify webhook: product created/updated/deleted → regenerate quiz data.
@@ -3078,6 +3139,10 @@ async def index(request: Request):
       <span class="tab-icon">&#129514;</span> Try Me
       <span class="tab-badge" style="background:#C4956A">{tryme_total}</span>
     </div>
+    <div class="tab" data-tab="promos" onclick="switchTab(this)">
+      <span class="tab-icon">&#127915;</span> Codes Promo
+      <span class="tab-badge" style="background:#C4956A" id="promosBadge">...</span>
+    </div>
     <div class="tab coming" data-tab="images">
       <span class="tab-icon">&#127912;</span> Images
       <span class="tab-badge">Bient&ocirc;t</span>
@@ -3229,6 +3294,45 @@ async def index(request: Request):
 </div>
 </div>
 
+<!-- ═══ TAB: CODES PROMO ═══ -->
+<div class="tab-content" id="tab-promos">
+<div class="container">
+  <div class="section-title">&#127915; Gestion des Codes Promo</div>
+  <p style="color:#999;font-size:13px;margin-bottom:16px">Les codes sont appliqu&eacute;s via la Shopify Function <strong>order-discount-codes</strong>. Les modifications sont instantan&eacute;es.</p>
+
+  <div id="promos-list" style="margin-bottom:24px">
+    <div style="text-align:center;padding:24px;color:#666">Chargement...</div>
+  </div>
+
+  <div style="background:#1E1E1E;border:1px solid #333;border-radius:12px;padding:20px;margin-bottom:16px">
+    <div class="section-title" style="margin-bottom:12px">&#10133; Ajouter / Modifier un code</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+      <div>
+        <label style="color:#999;font-size:12px;display:block;margin-bottom:4px">Code</label>
+        <input id="promo-code" type="text" placeholder="PB580" style="width:100%;padding:10px;background:#2a2a2a;border:1px solid #444;border-radius:8px;color:#fff;font-size:14px;box-sizing:border-box">
+      </div>
+      <div>
+        <label style="color:#999;font-size:12px;display:block;margin-bottom:4px">R&eacute;duction (%)</label>
+        <input id="promo-pct" type="number" placeholder="5" min="1" max="100" style="width:100%;padding:10px;background:#2a2a2a;border:1px solid #444;border-radius:8px;color:#fff;font-size:14px;box-sizing:border-box">
+      </div>
+      <div>
+        <label style="color:#999;font-size:12px;display:block;margin-bottom:4px">Minimum (&euro;)</label>
+        <input id="promo-min" type="number" placeholder="80" min="0" style="width:100%;padding:10px;background:#2a2a2a;border:1px solid #444;border-radius:8px;color:#fff;font-size:14px;box-sizing:border-box">
+      </div>
+      <div>
+        <label style="color:#999;font-size:12px;display:block;margin-bottom:4px">Expiration (vide = permanent)</label>
+        <input id="promo-expires" type="date" style="width:100%;padding:10px;background:#2a2a2a;border:1px solid #444;border-radius:8px;color:#fff;font-size:14px;box-sizing:border-box">
+      </div>
+    </div>
+    <div style="margin-top:16px;display:flex;gap:12px">
+      <button onclick="savePromoCode()" style="padding:10px 24px;background:#C4956A;color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer">&#128190; Sauvegarder</button>
+      <button onclick="clearPromoForm()" style="padding:10px 24px;background:#333;color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer">Annuler</button>
+    </div>
+    <div id="promo-msg" style="margin-top:8px;font-size:13px"></div>
+  </div>
+</div>
+</div>
+
 <!-- ═══ TAB: SETTINGS ═══ -->
 <div class="tab-content" id="tab-settings">
 <div class="container">
@@ -3251,6 +3355,112 @@ function switchTab(tab) {{
   var target = document.getElementById('tab-' + tab.getAttribute('data-tab'));
   if (target) target.classList.add('active');
 }}
+
+  // ═══ PROMO CODES MANAGEMENT ═══
+  var promoState = {{ codes: [], discountId: null }};
+
+  function loadPromoCodes() {{
+    fetch('/api/promo-codes').then(function(r){{ return r.json(); }}).then(function(d){{
+      promoState.codes = d.codes || [];
+      promoState.discountId = d.discountId || null;
+      var badge = document.getElementById('promosBadge');
+      if (badge) badge.textContent = promoState.codes.length;
+      renderPromoCodes();
+    }}).catch(function(){{ document.getElementById('promos-list').innerHTML = '<p style="color:#e53935">Erreur de chargement</p>'; }});
+  }}
+
+  function renderPromoCodes() {{
+    var el = document.getElementById('promos-list');
+    if (!promoState.codes.length) {{ el.innerHTML = '<p style="color:#666;text-align:center;padding:16px">Aucun code configur&eacute;</p>'; return; }}
+    var html = '<table class="data-table"><tr><th>Code</th><th>R&eacute;duction</th><th>Minimum</th><th>Expiration</th><th>Actions</th></tr>';
+    promoState.codes.forEach(function(c, i){{
+      var exp = c.expiresAt ? c.expiresAt.split('T')[0] : '<span style="color:#4CAF50">Permanent</span>';
+      var isExpired = c.expiresAt && new Date(c.expiresAt) < new Date();
+      var expStyle = isExpired ? 'color:#e53935;font-weight:bold' : '';
+      html += '<tr><td><strong>' + c.code + '</strong></td><td>' + c.percentage + '%</td><td>' + c.minimumAmount + '&euro;</td>';
+      html += '<td style="' + expStyle + '">' + exp + (isExpired ? ' (expir&eacute;)' : '') + '</td>';
+      html += '<td><button onclick="editPromo(' + i + ')" style="background:#333;color:#fff;border:none;padding:4px 10px;border-radius:4px;cursor:pointer;margin-right:4px">&#9998;</button>';
+      html += '<button onclick="deletePromo(' + i + ')" style="background:#e53935;color:#fff;border:none;padding:4px 10px;border-radius:4px;cursor:pointer">&#128465;</button></td></tr>';
+    }});
+    html += '</table>';
+    el.innerHTML = html;
+  }}
+
+  window.editPromo = function(idx) {{
+    var c = promoState.codes[idx];
+    document.getElementById('promo-code').value = c.code;
+    document.getElementById('promo-pct').value = c.percentage;
+    document.getElementById('promo-min').value = c.minimumAmount;
+    document.getElementById('promo-expires').value = c.expiresAt ? c.expiresAt.split('T')[0] : '';
+    document.getElementById('promo-code').dataset.editIndex = idx;
+  }};
+
+  window.deletePromo = function(idx) {{
+    if (!confirm('Supprimer le code ' + promoState.codes[idx].code + ' ?')) return;
+    promoState.codes.splice(idx, 1);
+    pushPromoCodes('Code supprim&eacute;');
+  }};
+
+  window.clearPromoForm = function() {{
+    document.getElementById('promo-code').value = '';
+    document.getElementById('promo-pct').value = '';
+    document.getElementById('promo-min').value = '';
+    document.getElementById('promo-expires').value = '';
+    delete document.getElementById('promo-code').dataset.editIndex;
+    document.getElementById('promo-msg').innerHTML = '';
+  }};
+
+  window.savePromoCode = function() {{
+    var code = document.getElementById('promo-code').value.trim().toUpperCase();
+    var pct = parseFloat(document.getElementById('promo-pct').value);
+    var min = parseFloat(document.getElementById('promo-min').value);
+    var exp = document.getElementById('promo-expires').value;
+    if (!code || !pct || isNaN(min)) {{ document.getElementById('promo-msg').innerHTML = '<span style="color:#e53935">Remplir code, % et minimum</span>'; return; }}
+    var entry = {{ code: code, percentage: pct, minimumAmount: min }};
+    if (exp) entry.expiresAt = exp + 'T23:59:59Z';
+    var editIdx = document.getElementById('promo-code').dataset.editIndex;
+    if (editIdx !== undefined) {{
+      promoState.codes[parseInt(editIdx)] = entry;
+    }} else {{
+      var exists = promoState.codes.findIndex(function(c){{ return c.code === code; }});
+      if (exists >= 0) promoState.codes[exists] = entry;
+      else promoState.codes.push(entry);
+    }}
+    pushPromoCodes('Code ' + code + ' sauvegard&eacute;');
+    clearPromoForm();
+  }};
+
+  function pushPromoCodes(successMsg) {{
+    var msg = document.getElementById('promo-msg');
+    msg.innerHTML = '<span style="color:#C4956A">Sauvegarde...</span>';
+    fetch('/api/promo-codes', {{
+      method: 'POST',
+      headers: {{ 'Content-Type': 'application/json' }},
+      body: JSON.stringify({{ codes: promoState.codes, discountId: promoState.discountId }})
+    }}).then(function(r){{ return r.json(); }}).then(function(d){{
+      if (d.success) {{
+        msg.innerHTML = '<span style="color:#4CAF50">&#10003; ' + successMsg + '</span>';
+        renderPromoCodes();
+        var badge = document.getElementById('promosBadge');
+        if (badge) badge.textContent = promoState.codes.length;
+      }} else {{
+        msg.innerHTML = '<span style="color:#e53935">&#10007; ' + (d.error || 'Erreur') + '</span>';
+      }}
+      setTimeout(function(){{ msg.innerHTML = ''; }}, 4000);
+    }}).catch(function(){{ msg.innerHTML = '<span style="color:#e53935">Erreur r&eacute;seau</span>'; }});
+  }}
+
+  // Load promo codes on tab switch
+  var origSwitchTab = switchTab;
+  switchTab = function(tab) {{
+    if (tab.classList.contains('coming')) return;
+    document.querySelectorAll('.tab').forEach(function(t) {{ t.classList.remove('active'); }});
+    document.querySelectorAll('.tab-content').forEach(function(c) {{ c.classList.remove('active'); }});
+    tab.classList.add('active');
+    var target = document.getElementById('tab-' + tab.getAttribute('data-tab'));
+    if (target) target.classList.add('active');
+    if (tab.getAttribute('data-tab') === 'promos' && !promoState.discountId) loadPromoCodes();
+  }};
 
   // Quiz regeneration
   window.regenQuiz = function() {{
