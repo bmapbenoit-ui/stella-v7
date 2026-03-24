@@ -2266,6 +2266,87 @@ async def save_promo_codes(request: Request):
     return {"success": True, "count": len(codes)}
 
 
+@app.post("/api/reviews/import")
+async def import_reviews(request: Request):
+    """Import reviews from Judge.me CSV export into PostgreSQL."""
+    api_key = request.headers.get("X-API-Key", "")
+    if api_key != "stella-mem-2026-planetebeauty":
+        raise HTTPException(403, "Unauthorized")
+    body = await request.json()
+    reviews = body.get("reviews", [])
+    if not reviews:
+        return {"imported": 0}
+    db = get_db()
+    if not db:
+        return {"imported": 0, "error": "No DB"}
+    try:
+        cur = db.cursor()
+        cur.execute("""CREATE TABLE IF NOT EXISTS product_reviews (
+            id SERIAL PRIMARY KEY,
+            title TEXT,
+            body TEXT,
+            rating INTEGER,
+            review_date TIMESTAMP,
+            source TEXT,
+            curated TEXT,
+            reviewer_name TEXT,
+            reviewer_email TEXT,
+            product_id TEXT,
+            product_handle TEXT,
+            reply TEXT,
+            reply_date TIMESTAMP,
+            picture_urls TEXT,
+            created_at TIMESTAMP DEFAULT NOW()
+        )""")
+        imported = 0
+        for r in reviews:
+            try:
+                rd = r.get("date") or None
+                rpd = r.get("reply_date") or None
+                cur.execute("""INSERT INTO product_reviews
+                    (title, body, rating, review_date, source, curated, reviewer_name, reviewer_email, product_id, product_handle, reply, reply_date, picture_urls)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    (r.get("title",""), r.get("body",""), r.get("rating",0), rd, r.get("source",""), r.get("curated",""),
+                     r.get("name",""), r.get("email",""), r.get("product_id",""), r.get("product_handle",""),
+                     r.get("reply",""), rpd if rpd else None, r.get("picture_urls","")))
+                imported += 1
+            except Exception as e:
+                logger.warning(f"Review import row error: {e}")
+        db.commit()
+        cur.close()
+        db.close()
+        return {"imported": imported}
+    except Exception as e:
+        try: db.close()
+        except: pass
+        return {"imported": 0, "error": str(e)}
+
+
+@app.get("/api/reviews/{product_handle}")
+async def get_product_reviews(product_handle: str):
+    """Get reviews for a specific product."""
+    db = get_db()
+    if not db:
+        return {"reviews": [], "count": 0, "average": 0}
+    try:
+        cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("""SELECT title, body, rating, review_date, reviewer_name, picture_urls
+            FROM product_reviews WHERE product_handle = %s AND curated = 'ok'
+            ORDER BY review_date DESC""", (product_handle,))
+        reviews = cur.fetchall()
+        for r in reviews:
+            if r.get("review_date"):
+                r["review_date"] = r["review_date"].isoformat()
+        avg = sum(r["rating"] for r in reviews) / len(reviews) if reviews else 0
+        cur.close()
+        db.close()
+        return {"reviews": reviews, "count": len(reviews), "average": round(avg, 2)}
+    except Exception as e:
+        try: db.close()
+        except: pass
+        return {"reviews": [], "count": 0, "average": 0, "error": str(e)}
+
+
 @app.get("/api/nouveautes")
 async def get_nouveautes():
     """Real-time: fetch products with tag Nouveauté from Shopify."""
