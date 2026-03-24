@@ -3621,9 +3621,17 @@ function switchTab(tab) {{
   }};
 
   window.deletePromo = function(idx) {{
-    if (!confirm('Supprimer le code ' + promoState.codes[idx].code + ' ?')) return;
-    promoState.codes.splice(idx, 1);
-    pushPromoCodes('Code supprim&eacute;');
+    var code = promoState.codes[idx].code;
+    var btn = event.target;
+    if (btn.dataset.confirmed) {{
+      promoState.codes.splice(idx, 1);
+      pushPromoCodes('Code ' + code + ' supprim&eacute;');
+      return;
+    }}
+    btn.textContent = 'Confirmer ?';
+    btn.style.background = '#b71c1c';
+    btn.dataset.confirmed = '1';
+    setTimeout(function(){{ btn.textContent = '\\ud83d\\uddd1'; btn.style.background = '#e53935'; delete btn.dataset.confirmed; }}, 3000);
   }};
 
   window.clearPromoForm = function() {{
