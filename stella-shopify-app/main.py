@@ -235,8 +235,10 @@ async def startup():
                       args=["audit-qualite", "/api/cron/audit-qualite"])
     scheduler.add_job(_run_cron, 'cron', hour=4, minute=30, id='tryme_expire',
                       args=["tryme-expire", "/api/cron/tryme-expire"])
+    scheduler.add_job(_run_cron, 'interval', hours=6, id='trustpilot_scan',
+                      args=["trustpilot-scan", "/api/cron/trustpilot-scan"])
     scheduler.start()
-    logger.info("Scheduler started: stock(1h), tags(3h15), nouveautes(3h45), audit(lun 7h), tryme(4h30)")
+    logger.info("Scheduler started: stock(1h), tags(3h15), nouveautes(3h45), audit(lun 7h), tryme(4h30), trustpilot(6h)")
 
 # ══════════════════════ 3-LAYER MEMORY ══════════════════════
 def save_to_redis(conv_id, role, content):
@@ -1811,6 +1813,170 @@ async def cron_nouveautes_expire(request: Request):
 
     logger.info(f"Nouveautés expire: {len(expired)} expired, {len(still_new)} still new")
     return {"status": "ok", "expired": len(expired), "still_new": len(still_new), "details": {"expired": expired, "still_new": still_new}}
+
+
+# ══════════════════════ CRON: TRUSTPILOT SCAN ══════════════════════
+
+@app.post("/api/cron/trustpilot-scan")
+async def cron_trustpilot_scan(request: Request):
+    """Scan Trustpilot reviews for order numbers and credit 5€ store credit."""
+    api_key = request.headers.get("X-API-Key", "")
+    if api_key != "stella-mem-2026-planetebeauty":
+        raise HTTPException(403, "Unauthorized")
+
+    import re
+    TRUSTPILOT_BIZ_ID = None  # Will be fetched dynamically
+    results = {"scanned": 0, "credited": 0, "already_credited": 0, "no_match": 0, "errors": []}
+
+    try:
+        # 1. Fetch recent Trustpilot reviews via public API
+        async with httpx.AsyncClient(timeout=15) as client:
+            # First find business unit ID
+            search_r = await client.get("https://www.trustpilot.com/api/categoriespages/planetebeauty.com")
+            if search_r.status_code != 200:
+                # Try alternative endpoint
+                search_r = await client.get(f"https://api.trustpilot.com/v1/business-units/find?name=planetebeauty.com")
+
+            # Use the public consumer API to get reviews
+            reviews_r = await client.get(
+                "https://www.trustpilot.com/_next/data/consumersitefront-consumersite-2/fr/review/planetebeauty.com.json",
+                headers={"User-Agent": "Mozilla/5.0"}
+            )
+
+            reviews = []
+            if reviews_r.status_code == 200:
+                try:
+                    data = reviews_r.json()
+                    page_data = data.get("pageProps", {})
+                    review_list = page_data.get("reviews", [])
+                    for rv in review_list:
+                        text = rv.get("text", "")
+                        title = rv.get("title", "")
+                        consumer = rv.get("consumer", {})
+                        reviews.append({
+                            "text": f"{title} {text}",
+                            "name": consumer.get("displayName", ""),
+                            "date": rv.get("createdAt", ""),
+                            "id": rv.get("id", "")
+                        })
+                except:
+                    pass
+
+            if not reviews:
+                # Fallback: scrape the HTML page
+                page_r = await client.get("https://fr.trustpilot.com/review/planetebeauty.com",
+                    headers={"User-Agent": "Mozilla/5.0"})
+                if page_r.status_code == 200:
+                    html = page_r.text
+                    # Extract review texts
+                    texts = re.findall(r'data-review-content[^>]*>(.*?)</p>', html, re.DOTALL)
+                    titles = re.findall(r'data-review-title[^>]*>(.*?)</h2>', html, re.DOTALL)
+                    for i, t in enumerate(texts):
+                        title = titles[i] if i < len(titles) else ""
+                        reviews.append({"text": f"{title} {t}", "name": "", "date": "", "id": str(i)})
+
+            results["scanned"] = len(reviews)
+
+            # 2. For each review, look for order number pattern #XXXXX
+            db = get_db()
+            if not db:
+                return {"error": "No DB", **results}
+
+            cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cur.execute("""CREATE TABLE IF NOT EXISTS trustpilot_credits (
+                id SERIAL PRIMARY KEY,
+                order_number TEXT UNIQUE,
+                review_id TEXT,
+                reviewer_name TEXT,
+                customer_id TEXT,
+                amount NUMERIC(10,2),
+                credited_at TIMESTAMP DEFAULT NOW()
+            )""")
+
+            gql_url = f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/{SHOPIFY_API_VERSION}/graphql.json"
+            headers_gql = {"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"}
+
+            for rv in reviews:
+                # Find order numbers like #20562 (# followed by 5 digits)
+                order_nums = re.findall(r'#(\d{5})', rv["text"])
+                if not order_nums:
+                    results["no_match"] += 1
+                    continue
+
+                for order_num in order_nums:
+                    order_name = f"#{order_num}"
+
+                    # Check if already credited
+                    cur.execute("SELECT id FROM trustpilot_credits WHERE order_number = %s", (order_name,))
+                    if cur.fetchone():
+                        results["already_credited"] += 1
+                        continue
+
+                    # Find order in Shopify
+                    order_q = await client.post(gql_url, json={"query": f'{{ orders(first:1, query:"name:{order_name}") {{ edges {{ node {{ id name customer {{ id email }} }} }} }} }}'}, headers=headers_gql)
+                    order_data = order_q.json().get("data", {}).get("orders", {}).get("edges", [])
+
+                    if not order_data:
+                        results["no_match"] += 1
+                        continue
+
+                    order = order_data[0]["node"]
+                    customer = order.get("customer")
+                    if not customer or not customer.get("id"):
+                        results["no_match"] += 1
+                        continue
+
+                    customer_id = customer["id"]
+
+                    # Credit 5€ store credit
+                    credit_mutation = """mutation($id: ID!, $credit: StoreCreditAccountCreditInput!) {
+                        storeCreditAccountCredit(id: $id, creditInput: $credit) {
+                            storeCreditAccountTransaction { id }
+                            userErrors { field message }
+                        }
+                    }"""
+                    credit_r = await client.post(gql_url, json={
+                        "query": credit_mutation,
+                        "variables": {
+                            "id": customer_id,
+                            "credit": {"creditAmount": {"amount": "5.00", "currencyCode": "EUR"}}
+                        }
+                    }, headers=headers_gql)
+
+                    credit_data = credit_r.json()
+                    errors = credit_data.get("data", {}).get("storeCreditAccountCredit", {}).get("userErrors", [])
+
+                    if not errors:
+                        cur.execute("INSERT INTO trustpilot_credits (order_number, review_id, reviewer_name, customer_id, amount) VALUES (%s,%s,%s,%s,%s)",
+                            (order_name, rv.get("id",""), rv.get("name",""), customer_id, 5.00))
+                        results["credited"] += 1
+                    else:
+                        results["errors"].append(f"{order_name}: {errors[0].get('message','')}")
+
+            db.commit()
+            cur.close()
+            db.close()
+
+    except Exception as e:
+        logger.error(f"Trustpilot scan error: {e}")
+        results["errors"].append(str(e))
+
+    # Save result
+    db2 = get_db()
+    if db2:
+        try:
+            cur2 = db2.cursor()
+            cur2.execute("""CREATE TABLE IF NOT EXISTS cron_results (
+                id SERIAL PRIMARY KEY, cron_name TEXT, result_data JSONB,
+                executed_at TIMESTAMP DEFAULT NOW())""")
+            cur2.execute("INSERT INTO cron_results (cron_name, result_data) VALUES (%s, %s)",
+                ("trustpilot-scan", json.dumps(results)))
+            db2.commit(); cur2.close(); db2.close()
+        except:
+            try: db2.close()
+            except: pass
+
+    return {"status": "ok", **results}
 
 
 # ══════════════════════ CRON: STOCK CHECK ══════════════════════
