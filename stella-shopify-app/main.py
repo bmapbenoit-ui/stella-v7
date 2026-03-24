@@ -1950,6 +1950,23 @@ async def cron_trustpilot_scan(request: Request):
                         cur.execute("INSERT INTO trustpilot_credits (order_number, review_id, reviewer_name, customer_id, amount) VALUES (%s,%s,%s,%s,%s)",
                             (order_name, rv.get("id",""), rv.get("name",""), customer_id, 5.00))
                         results["credited"] += 1
+
+                        # Also add review to product_reviews for each product in the order
+                        items_q = await client.post(gql_url, json={"query": f'{{ order(id: "{order["id"]}") {{ lineItems(first:10) {{ edges {{ node {{ title product {{ handle }} }} }} }} }} }}'}, headers=headers_gql)
+                        items_data = items_q.json().get("data", {}).get("order", {}).get("lineItems", {}).get("edges", [])
+                        for item in items_data:
+                            p_handle = item.get("node", {}).get("product", {}).get("handle", "")
+                            if p_handle:
+                                try:
+                                    review_title = rv.get("text", "")[:80] if rv.get("text") else "Avis Trustpilot"
+                                    review_body = rv.get("text", "")
+                                    cur.execute("""INSERT INTO product_reviews
+                                        (title, body, rating, review_date, source, curated, reviewer_name, reviewer_email, product_id, product_handle)
+                                        VALUES (%s,%s,%s,NOW(),%s,%s,%s,%s,%s,%s)""",
+                                        (review_title, review_body, 5, "trustpilot", "ok", rv.get("name","Client Trustpilot"),
+                                         customer.get("email",""), "", p_handle))
+                                except Exception as e:
+                                    logger.warning(f"Review insert for {p_handle}: {e}")
                     else:
                         results["errors"].append(f"{order_name}: {errors[0].get('message','')}")
 
