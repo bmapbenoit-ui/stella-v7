@@ -2266,6 +2266,42 @@ async def save_promo_codes(request: Request):
     return {"success": True, "count": len(codes)}
 
 
+@app.get("/api/nouveautes")
+async def get_nouveautes():
+    """Real-time: fetch products with tag Nouveauté from Shopify."""
+    from datetime import timezone, timedelta
+    gql_url = f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/{SHOPIFY_API_VERSION}/graphql.json"
+    headers = {"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"}
+    products = []
+    cursor = None
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            while True:
+                after = f', after: "{cursor}"' if cursor else ''
+                r = await client.post(gql_url, json={"query": f'{{ products(first: 50, query: "tag:Nouveauté", sortKey: CREATED_AT, reverse: true{after}) {{ edges {{ cursor node {{ id title handle createdAt status vendor featuredImage {{ url }} }} }} pageInfo {{ hasNextPage }} }} }}'}, headers=headers)
+                data = r.json().get("data", {}).get("products", {})
+                for edge in data.get("edges", []):
+                    p = edge["node"]
+                    cursor = edge["cursor"]
+                    days_since = (datetime.now(timezone.utc) - datetime.fromisoformat(p["createdAt"].replace("Z", "+00:00"))).days
+                    days_left = max(0, 30 - days_since)
+                    products.append({
+                        "title": p["title"],
+                        "vendor": p.get("vendor", ""),
+                        "handle": p.get("handle", ""),
+                        "created": p["createdAt"][:10],
+                        "days_left": days_left,
+                        "status": p.get("status", ""),
+                        "image": p.get("featuredImage", {}).get("url", "") if p.get("featuredImage") else ""
+                    })
+                if not data.get("pageInfo", {}).get("hasNextPage"):
+                    break
+    except Exception as e:
+        logger.error(f"Get nouveautes: {e}")
+        return {"products": [], "error": str(e)}
+    return {"products": products, "count": len(products)}
+
+
 @app.post("/api/webhook/product-change")
 async def webhook_product_change(request: Request):
     """Shopify webhook: product created/updated/deleted → regenerate quiz data.
@@ -3319,9 +3355,9 @@ async def index(request: Request):
       <span class="tab-icon">&#9989;</span> Audit Qualit&eacute;
       <span class="tab-badge">{len(audit_issues)}</span>
     </div>
-    <div class="tab" data-tab="nouveautes" onclick="switchTab(this)">
+    <div class="tab" data-tab="nouveautes" onclick="switchTab(this);loadNouveautes()">
       <span class="tab-icon">&#127381;</span> Nouveaut&eacute;s
-      <span class="tab-badge">{len(still_new)}</span>
+      <span class="tab-badge" id="nouveautesBadge">...</span>
     </div>
     <div class="tab" data-tab="stock" onclick="switchTab(this)">
       <span class="tab-icon">&#128230;</span> Stock
@@ -3408,14 +3444,13 @@ async def index(request: Request):
 <div class="tab-content" id="tab-nouveautes">
 <div class="container">
   <div class="cards">
-    <div class="card"><div class="num">{len(still_new)}</div><div class="label">Nouveaut&eacute;s actives</div></div>
-    <div class="card"><div class="num" style="font-size:14px;color:#888">{nouveautes_last}</div><div class="label">Derni&egrave;re v&eacute;rification</div></div>
+    <div class="card"><div class="num" id="nouveautesCount">...</div><div class="label">Nouveaut&eacute;s actives</div></div>
+    <div class="card"><div class="num" style="font-size:14px;color:#4CAF50">Temps r&eacute;el</div><div class="label">Source: Shopify API</div></div>
   </div>
   <div class="section-title"><span class="icon">&#127381;</span> Produits en collection Nouveaut&eacute;s</div>
-  <table>
-    <tr><th>Produit</th><th>Date cr&eacute;ation</th><th>Jours restants</th></tr>
-    {nouveautes_rows_html}
-  </table>
+  <div id="nouveautes-table">
+    <p style="text-align:center;color:#888">Chargement...</p>
+  </div>
   <p style="text-align:center;margin-top:16px;color:#888;font-size:12px">Les produits sont retir&eacute;s automatiquement apr&egrave;s 30 jours</p>
 </div>
 </div>
@@ -3580,6 +3615,33 @@ function switchTab(tab) {{
   var target = document.getElementById('tab-' + tab.getAttribute('data-tab'));
   if (target) target.classList.add('active');
 }}
+
+  // ═══ NOUVEAUTÉS REAL-TIME ═══
+  var nouveautesLoaded = false;
+  window.loadNouveautes = function() {{
+    if (nouveautesLoaded) return;
+    fetch('/api/nouveautes').then(function(r){{ return r.json(); }}).then(function(d){{
+      nouveautesLoaded = true;
+      var products = d.products || [];
+      var badge = document.getElementById('nouveautesBadge');
+      var count = document.getElementById('nouveautesCount');
+      if (badge) badge.textContent = products.length;
+      if (count) count.textContent = products.length;
+      var el = document.getElementById('nouveautes-table');
+      if (!products.length) {{ el.innerHTML = '<p class="empty">Aucune nouveaut&eacute; en cours</p>'; return; }}
+      var html = '<table><tr><th>Marque</th><th>Produit</th><th>Date</th><th>Jours restants</th><th>Statut</th></tr>';
+      products.forEach(function(p){{
+        var color = p.days_left <= 5 ? '#e53935' : '#4CAF50';
+        var statusColor = p.status === 'ACTIVE' ? '#4CAF50' : '#E67E22';
+        var statusText = p.status === 'ACTIVE' ? 'Actif' : 'Brouillon';
+        html += '<tr><td>' + p.vendor + '</td><td><a href="https://planetebeauty.com/products/' + p.handle + '" target="_blank" style="color:#C4956A">' + p.title + '</a></td>';
+        html += '<td>' + p.created + '</td><td style="color:' + color + ';font-weight:bold">' + p.days_left + 'j</td>';
+        html += '<td style="color:' + statusColor + '">' + statusText + '</td></tr>';
+      }});
+      html += '</table>';
+      el.innerHTML = html;
+    }}).catch(function(){{ document.getElementById('nouveautes-table').innerHTML = '<p style="color:#e53935">Erreur de chargement</p>'; }});
+  }};
 
   // ═══ PROMO CODES MANAGEMENT ═══
   var promoState = {{ codes: [], discountId: null }};
