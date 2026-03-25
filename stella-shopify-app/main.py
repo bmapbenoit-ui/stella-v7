@@ -178,6 +178,22 @@ CREATE TABLE IF NOT EXISTS tryme_purchases (
 CREATE INDEX IF NOT EXISTS idx_tryme_customer ON tryme_purchases(customer_email, product_id);
 CREATE INDEX IF NOT EXISTS idx_tryme_code ON tryme_purchases(discount_code);
 CREATE INDEX IF NOT EXISTS idx_tryme_status ON tryme_purchases(status, discount_expires_at);
+
+CREATE TABLE IF NOT EXISTS cashback_settings (
+    id SERIAL PRIMARY KEY,
+    shop VARCHAR(255) DEFAULT 'planetemode.myshopify.com',
+    cashback_rate DECIMAL(5,4) DEFAULT 0.05,
+    expiry_days INTEGER DEFAULT 60,
+    min_order_use DECIMAL(10,2) DEFAULT 70.00,
+    exclude_shipping BOOLEAN DEFAULT TRUE,
+    exclude_taxes BOOLEAN DEFAULT TRUE,
+    exclude_discounts BOOLEAN DEFAULT TRUE,
+    excluded_tags TEXT DEFAULT 'tryme,no-cashback',
+    excluded_product_ids TEXT DEFAULT '',
+    min_cashback_amount DECIMAL(10,2) DEFAULT 0.50,
+    is_active BOOLEAN DEFAULT TRUE,
+    updated_at TIMESTAMP DEFAULT NOW()
+);
 """
 
 def load_shopify_token_from_db():
@@ -215,8 +231,11 @@ async def startup():
     db = get_db()
     if db:
         try:
-            cur = db.cursor(); cur.execute(CHAT_MIGRATION); db.commit(); cur.close(); db.close()
-            logger.info("Chat tables ready")
+            cur = db.cursor(); cur.execute(CHAT_MIGRATION)
+            cur.execute("""INSERT INTO cashback_settings (shop) SELECT 'planetemode.myshopify.com'
+                           WHERE NOT EXISTS (SELECT 1 FROM cashback_settings WHERE shop = 'planetemode.myshopify.com')""")
+            db.commit(); cur.close(); db.close()
+            logger.info("Chat tables ready (cashback_settings seeded)")
         except Exception as e:
             logger.error(f"Migration: {e}")
             try: db.close()
@@ -2583,20 +2602,65 @@ async def webhook_product_change(request: Request):
     logger.info("Quiz data regeneration triggered by product webhook")
     return {"ok": True, "regenerating": True}
 
-# ══════════════════════ CASHBACK FIDÉLITÉ 5% (Crédit Magasin) ══════════════════════
+# ══════════════════════ CASHBACK FIDÉLITÉ (Crédit Magasin) ══════════════════════
 
-CASHBACK_RATE = 0.05
-CASHBACK_EXPIRY_DAYS = 60
-CASHBACK_MIN_USE = 70.0  # Crédit utilisable seulement à partir de 70€
+_CASHBACK_DEFAULTS = {
+    "cashback_rate": 0.05, "expiry_days": 60, "min_order_use": 70.0,
+    "exclude_shipping": True, "exclude_taxes": True, "exclude_discounts": True,
+    "excluded_tags": "tryme,no-cashback", "excluded_product_ids": "",
+    "min_cashback_amount": 0.50, "is_active": True
+}
+
+def get_cashback_settings() -> dict:
+    """Load cashback settings: Redis cache (5min) → PostgreSQL → defaults."""
+    rc = get_redis()
+    if rc:
+        cached = rc.get("cashback:settings")
+        if cached:
+            try: return json.loads(cached)
+            except: pass
+    db = get_db()
+    if not db: return dict(_CASHBACK_DEFAULTS)
+    try:
+        cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("SELECT * FROM cashback_settings WHERE shop = %s LIMIT 1", ("planetemode.myshopify.com",))
+        row = cur.fetchone()
+        cur.close(); db.close()
+        if row:
+            result = {
+                "cashback_rate": float(row["cashback_rate"]),
+                "expiry_days": int(row["expiry_days"]),
+                "min_order_use": float(row["min_order_use"]),
+                "exclude_shipping": bool(row["exclude_shipping"]),
+                "exclude_taxes": bool(row["exclude_taxes"]),
+                "exclude_discounts": bool(row["exclude_discounts"]),
+                "excluded_tags": row["excluded_tags"] or "",
+                "excluded_product_ids": row["excluded_product_ids"] or "",
+                "min_cashback_amount": float(row["min_cashback_amount"]),
+                "is_active": bool(row["is_active"]),
+            }
+            if rc:
+                rc.setex("cashback:settings", 300, json.dumps(result))
+            return result
+    except Exception as e:
+        logger.warning(f"Load cashback settings: {e}")
+        try: db.close()
+        except: pass
+    return dict(_CASHBACK_DEFAULTS)
 
 @app.post("/api/webhook/order-paid")
 async def webhook_order_paid(request: Request):
-    """Shopify webhook: order paid → calculate 5% cashback → add store credit to customer.
-    Calcul: 5% du sous-total produits (hors frais de port, après remises, hors crédit magasin utilisé)."""
+    """Shopify webhook: order paid → calculate cashback → add store credit to customer.
+    Settings loaded dynamically from cashback_settings table."""
     try:
         body = await request.json()
     except Exception:
         return {"ok": False, "error": "Invalid JSON"}
+
+    # Load dynamic settings
+    settings = get_cashback_settings()
+    if not settings["is_active"]:
+        return {"ok": True, "skipped": True, "reason": "cashback disabled"}
 
     order_id = body.get("id")
     order_name = body.get("name", "")
@@ -2606,9 +2670,11 @@ async def webhook_order_paid(request: Request):
     if not customer or not customer.get("id"):
         return {"ok": True, "skipped": True, "reason": "no customer"}
 
-    # Skip Try Me orders
-    if "tryme" in tags.lower():
-        return {"ok": True, "skipped": True, "reason": "tryme order"}
+    # Skip orders matching excluded tags
+    excluded_tags = [t.strip().lower() for t in settings["excluded_tags"].split(",") if t.strip()]
+    order_tags = [t.strip().lower() for t in tags.split(",") if t.strip()]
+    if any(et in order_tags for et in excluded_tags):
+        return {"ok": True, "skipped": True, "reason": f"excluded tag match"}
 
     # Calculate cashback base:
     # subtotal_price = produits après remises (hors port, hors taxes)
@@ -2665,13 +2731,13 @@ async def webhook_order_paid(request: Request):
 
     # Cashback = 5% of (subtotal after discounts MINUS store credit used)
     cashback_base = max(0, cashback_base - store_credit_used)
-    cashback_amount = round(cashback_base * CASHBACK_RATE, 2)
+    cashback_amount = round(cashback_base * settings["cashback_rate"], 2)
 
-    if cashback_amount < 0.50:
-        return {"ok": True, "skipped": True, "reason": f"cashback {cashback_amount} < 0.50"}
+    if cashback_amount < settings["min_cashback_amount"]:
+        return {"ok": True, "skipped": True, "reason": f"cashback {cashback_amount} < {settings['min_cashback_amount']}"}
 
     from datetime import timedelta
-    expires_at = (datetime.utcnow() + timedelta(days=CASHBACK_EXPIRY_DAYS)).strftime("%Y-%m-%dT23:59:59Z")
+    expires_at = (datetime.utcnow() + timedelta(days=settings["expiry_days"])).strftime("%Y-%m-%dT23:59:59Z")
 
     # 1. Get or detect store credit account for customer
     credit_account_id = None
@@ -2751,7 +2817,8 @@ async def webhook_order_paid(request: Request):
 async def cashback_dashboard():
     """Dashboard data for cashback tab in STELLA V8. Uses store credit (not discount codes)."""
     db = get_db()
-    stats = {"total_rewarded": 0, "total_amount": 0, "total_used": 0, "min_use": CASHBACK_MIN_USE, "recent": []}
+    cb_settings = get_cashback_settings()
+    stats = {"total_rewarded": 0, "total_amount": 0, "total_used": 0, "min_use": cb_settings["min_order_use"], "recent": []}
     if db:
         try:
             cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
@@ -2770,6 +2837,95 @@ async def cashback_dashboard():
             except: pass
             logger.warning(f"Cashback dashboard: {e}")
     return stats
+
+
+@app.get("/api/cashback/settings")
+async def get_cashback_settings_api():
+    """Get cashback configuration for admin panel."""
+    return get_cashback_settings()
+
+async def _sync_cashback_metafields(settings: dict) -> bool:
+    """Sync cashback settings to Shopify shop metafields for Payment Function."""
+    try:
+        # Get shop ID first
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.post(SHOPIFY_GRAPHQL_URL, json={"query": "{ shop { id } }"},
+                           headers={"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"})
+            shop_id = r.json().get("data", {}).get("shop", {}).get("id", "")
+        if not shop_id:
+            logger.error("Cashback metafield sync: could not get shop ID")
+            return False
+        config_json = json.dumps({
+            "rate": settings.get("cashback_rate", 0.05),
+            "expiry_days": settings.get("expiry_days", 60),
+            "min_order_use": settings.get("min_order_use", 70.0),
+            "exclude_shipping": settings.get("exclude_shipping", True),
+            "exclude_taxes": settings.get("exclude_taxes", True),
+            "exclude_discounts": settings.get("exclude_discounts", True),
+            "excluded_tags": settings.get("excluded_tags", ""),
+            "min_cashback_amount": settings.get("min_cashback_amount", 0.50),
+            "is_active": settings.get("is_active", True),
+        })
+        mutation = """mutation($metafields: [MetafieldsSetInput!]!) {
+          metafieldsSet(metafields: $metafields) {
+            metafields { id namespace key }
+            userErrors { field message }
+          }
+        }"""
+        variables = {"metafields": [{
+            "ownerId": shop_id,
+            "namespace": "stella_cashback",
+            "key": "config",
+            "type": "json",
+            "value": config_json,
+        }]}
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.post(SHOPIFY_GRAPHQL_URL, json={"query": mutation, "variables": variables},
+                           headers={"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"})
+            resp = r.json()
+            errors = resp.get("data", {}).get("metafieldsSet", {}).get("userErrors", [])
+            if errors:
+                logger.error(f"Cashback metafield sync errors: {errors}")
+                return False
+            return True
+    except Exception as e:
+        logger.error(f"Cashback metafield sync: {e}")
+        return False
+
+@app.post("/api/cashback/settings")
+async def save_cashback_settings_api(request: Request):
+    """Save cashback configuration + sync to Shopify metafields."""
+    body = await request.json()
+    db = get_db()
+    if not db:
+        return {"success": False, "error": "Database unavailable"}
+    try:
+        cur = db.cursor()
+        cur.execute("""UPDATE cashback_settings SET
+            cashback_rate = %s, expiry_days = %s, min_order_use = %s,
+            exclude_shipping = %s, exclude_taxes = %s, exclude_discounts = %s,
+            excluded_tags = %s, excluded_product_ids = %s,
+            min_cashback_amount = %s, is_active = %s, updated_at = NOW()
+            WHERE shop = %s""",
+            (body.get("cashback_rate", 0.05), body.get("expiry_days", 60), body.get("min_order_use", 70.0),
+             body.get("exclude_shipping", True), body.get("exclude_taxes", True), body.get("exclude_discounts", True),
+             body.get("excluded_tags", "tryme,no-cashback"), body.get("excluded_product_ids", ""),
+             body.get("min_cashback_amount", 0.50), body.get("is_active", True),
+             "planetemode.myshopify.com"))
+        db.commit(); cur.close(); db.close()
+    except Exception as e:
+        try: db.close()
+        except: pass
+        logger.error(f"Save cashback settings: {e}")
+        return {"success": False, "error": str(e)}
+    # Invalidate Redis cache
+    rc = get_redis()
+    if rc:
+        rc.delete("cashback:settings")
+    # Sync to Shopify metafields
+    sync_ok = await _sync_cashback_metafields(body)
+    logger.info(f"Cashback settings saved (metafield sync: {sync_ok})")
+    return {"success": True, "metafield_sync": sync_ok}
 
 
 # ══════════════════════ BACK IN STOCK ══════════════════════
@@ -3835,21 +3991,72 @@ async def index(request: Request):
 <!-- ═══ TAB: CASHBACK ═══ -->
 <div class="tab-content" id="tab-cashback">
 <div class="container">
-  <div class="section-title">&#128176; Cashback Fid&eacute;lit&eacute; 5%</div>
-  <p style="color:#999;font-size:13px;margin-bottom:16px">Chaque commande g&eacute;n&egrave;re 5% de <strong>cr&eacute;dit magasin</strong> (hors frais de port, apr&egrave;s remises, hors cr&eacute;dit d&eacute;j&agrave; utilis&eacute;). Expire 60 jours. Utilisable &agrave; partir de 70&euro;.</p>
+  <div class="section-title">&#128176; Cashback Fid&eacute;lit&eacute;</div>
+  <p style="color:#999;font-size:13px;margin-bottom:16px">Chaque commande g&eacute;n&egrave;re du <strong>cr&eacute;dit magasin</strong> automatiquement. Configurez le taux, les exclusions et les conditions.</p>
 
+  <!-- Settings Form -->
+  <div style="background:#1E1E1E;border:1px solid #333;border-radius:12px;padding:20px;margin-bottom:24px">
+    <div class="section-title" style="color:#D4AF37;margin-bottom:16px">&#9881; Configuration</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:16px">
+      <div>
+        <label style="color:#999;font-size:12px;display:block;margin-bottom:4px">Taux cashback (%)</label>
+        <input id="cb-rate" type="number" min="1" max="50" step="0.5" value="5"
+               style="width:100%;padding:10px;background:#2a2a2a;border:1px solid #444;border-radius:8px;color:#fff;font-size:14px;box-sizing:border-box">
+      </div>
+      <div>
+        <label style="color:#999;font-size:12px;display:block;margin-bottom:4px">Expiration (jours)</label>
+        <input id="cb-expiry" type="number" min="1" max="365" value="60"
+               style="width:100%;padding:10px;background:#2a2a2a;border:1px solid #444;border-radius:8px;color:#fff;font-size:14px;box-sizing:border-box">
+      </div>
+      <div>
+        <label style="color:#999;font-size:12px;display:block;margin-bottom:4px">Minimum utilisation (&euro;)</label>
+        <input id="cb-min-use" type="number" min="0" step="5" value="70"
+               style="width:100%;padding:10px;background:#2a2a2a;border:1px solid #444;border-radius:8px;color:#fff;font-size:14px;box-sizing:border-box">
+      </div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px">
+      <label style="display:flex;align-items:center;gap:8px;color:#ccc;font-size:13px;cursor:pointer">
+        <input id="cb-excl-shipping" type="checkbox" checked> Exclure frais de port
+      </label>
+      <label style="display:flex;align-items:center;gap:8px;color:#ccc;font-size:13px;cursor:pointer">
+        <input id="cb-excl-taxes" type="checkbox" checked> Exclure taxes
+      </label>
+      <label style="display:flex;align-items:center;gap:8px;color:#ccc;font-size:13px;cursor:pointer">
+        <input id="cb-excl-discounts" type="checkbox" checked> Exclure r&eacute;ductions
+      </label>
+    </div>
+    <div style="margin-bottom:16px">
+      <label style="color:#999;font-size:12px;display:block;margin-bottom:4px">Tags exclus (s&eacute;par&eacute;s par virgule)</label>
+      <input id="cb-excl-tags" type="text" value="tryme,no-cashback" placeholder="tryme,no-cashback,gift"
+             style="width:100%;padding:10px;background:#2a2a2a;border:1px solid #444;border-radius:8px;color:#fff;font-size:14px;box-sizing:border-box">
+    </div>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-top:16px">
+      <label style="display:flex;align-items:center;gap:8px;color:#ccc;font-size:14px;font-weight:600;cursor:pointer">
+        <input id="cb-active" type="checkbox" checked> Cashback actif
+      </label>
+      <div style="display:flex;gap:12px;align-items:center">
+        <span id="cb-save-msg" style="font-size:13px"></span>
+        <button onclick="saveCashbackSettings()"
+                style="padding:10px 24px;background:#4CAF50;color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer">
+          &#128190; Sauvegarder
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Dashboard Stats -->
   <div id="cashback-stats" style="margin-bottom:20px">
     <div class="cards">
-      <div class="card"><div class="num" id="cb-total-rewarded">-</div><div class="label">Codes g&eacute;n&eacute;r&eacute;s</div></div>
+      <div class="card"><div class="num" id="cb-total-rewarded">-</div><div class="label">Cr&eacute;dits g&eacute;n&eacute;r&eacute;s</div></div>
       <div class="card" style="border-color:#4CAF50"><div class="num" style="color:#4CAF50" id="cb-total-amount">-</div><div class="label">Total cashback (&euro;)</div></div>
-      <div class="card"><div class="num" id="cb-total-used">-</div><div class="label">Codes utilis&eacute;s</div></div>
+      <div class="card"><div class="num" id="cb-total-used">-</div><div class="label">Cr&eacute;dits utilis&eacute;s</div></div>
       <div class="card"><div class="num" style="color:#C4956A" id="cb-conv-rate">-</div><div class="label">Taux utilisation</div></div>
     </div>
   </div>
 
   <div class="section-title">&#128203; Derniers cashbacks</div>
   <table class="data-table">
-    <tr><th>Client</th><th>Commande</th><th>Cashback</th><th>Code</th><th>Statut</th></tr>
+    <tr><th>Client</th><th>Commande</th><th>Cashback</th><th>Statut</th><th>Date</th></tr>
     <tbody id="cashback-rows">
       <tr><td colspan="5" class="empty">Chargement...</td></tr>
     </tbody>
@@ -4019,8 +4226,26 @@ function switchTab(tab) {{
     var target = document.getElementById('tab-' + tab.getAttribute('data-tab'));
     if (target) target.classList.add('active');
     if (tab.getAttribute('data-tab') === 'promos' && !promoState.discountId) loadPromoCodes();
-    if (tab.getAttribute('data-tab') === 'cashback') loadCashbackDashboard();
+    if (tab.getAttribute('data-tab') === 'cashback') loadCashbackTab();
   }};
+
+  var cbSettingsLoaded = false;
+  function loadCashbackTab() {{
+    if (!cbSettingsLoaded) {{
+      fetch('/api/cashback/settings').then(function(r){{ return r.json(); }}).then(function(s){{
+        cbSettingsLoaded = true;
+        document.getElementById('cb-rate').value = (s.cashback_rate * 100).toFixed(1);
+        document.getElementById('cb-expiry').value = s.expiry_days;
+        document.getElementById('cb-min-use').value = s.min_order_use;
+        document.getElementById('cb-excl-shipping').checked = s.exclude_shipping;
+        document.getElementById('cb-excl-taxes').checked = s.exclude_taxes;
+        document.getElementById('cb-excl-discounts').checked = s.exclude_discounts;
+        document.getElementById('cb-excl-tags').value = s.excluded_tags || '';
+        document.getElementById('cb-active').checked = s.is_active;
+      }}).catch(function(e){{ console.error('Load cashback settings:', e); }});
+    }}
+    loadCashbackDashboard();
+  }}
 
   var cashbackLoaded = false;
   function loadCashbackDashboard() {{
@@ -4041,13 +4266,42 @@ function switchTab(tab) {{
         var stLabel = r.status === 'used' ? 'Utilis&eacute;' : 'Actif';
         rows += '<tr><td>' + (r.customer_email || '') + '</td><td>' + (r.order_name || '') + '</td>';
         rows += '<td style="font-weight:bold">' + (r.cashback_amount || 0) + '&euro;</td>';
-        rows += '<td><code>' + (r.discount_code || '') + '</code></td>';
-        rows += '<td><span class="status-badge" style="background:' + stColor + '">' + stLabel + '</span></td></tr>';
+        rows += '<td><span class="status-badge" style="background:' + stColor + '">' + stLabel + '</span></td>';
+        rows += '<td style="color:#888;font-size:13px">' + dt + '</td></tr>';
       }});
-      if (!rows) rows = '<tr><td colspan="5" class="empty">Aucun cashback encore — le syst&egrave;me se d&eacute;clenche &agrave; chaque commande pay&eacute;e</td></tr>';
+      if (!rows) rows = '<tr><td colspan="5" class="empty">Aucun cashback encore</td></tr>';
       document.getElementById('cashback-rows').innerHTML = rows;
     }}).catch(function(){{ document.getElementById('cashback-rows').innerHTML = '<tr><td colspan="5" class="empty" style="color:#e53935">Erreur de chargement</td></tr>'; }})
   }}
+
+  window.saveCashbackSettings = function() {{
+    var msg = document.getElementById('cb-save-msg');
+    msg.innerHTML = '<span style="color:#C4956A">Sauvegarde...</span>';
+    var payload = {{
+      cashback_rate: parseFloat(document.getElementById('cb-rate').value) / 100,
+      expiry_days: parseInt(document.getElementById('cb-expiry').value),
+      min_order_use: parseFloat(document.getElementById('cb-min-use').value),
+      exclude_shipping: document.getElementById('cb-excl-shipping').checked,
+      exclude_taxes: document.getElementById('cb-excl-taxes').checked,
+      exclude_discounts: document.getElementById('cb-excl-discounts').checked,
+      excluded_tags: document.getElementById('cb-excl-tags').value.trim(),
+      excluded_product_ids: '',
+      min_cashback_amount: 0.50,
+      is_active: document.getElementById('cb-active').checked
+    }};
+    fetch('/api/cashback/settings', {{
+      method: 'POST',
+      headers: {{ 'Content-Type': 'application/json' }},
+      body: JSON.stringify(payload)
+    }}).then(function(r){{ return r.json(); }}).then(function(d){{
+      if (d.success) {{
+        msg.innerHTML = '<span style="color:#4CAF50">&#10003; Sauvegard&eacute; + metafields sync</span>';
+      }} else {{
+        msg.innerHTML = '<span style="color:#e53935">&#10007; ' + (d.error || 'Erreur') + '</span>';
+      }}
+      setTimeout(function(){{ msg.innerHTML = ''; }}, 4000);
+    }}).catch(function(){{ msg.innerHTML = '<span style="color:#e53935">Erreur r&eacute;seau</span>'; }});
+  }};
 
   // Quiz regeneration
   window.regenQuiz = function() {{
