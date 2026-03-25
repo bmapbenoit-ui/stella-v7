@@ -209,6 +209,40 @@ CREATE TABLE IF NOT EXISTS activity_log (
 );
 CREATE INDEX IF NOT EXISTS idx_activity_ts ON activity_log(timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_activity_type ON activity_log(type, timestamp DESC);
+
+CREATE TABLE IF NOT EXISTS trustpilot_credits (
+    id SERIAL PRIMARY KEY,
+    order_number TEXT UNIQUE,
+    review_id TEXT,
+    reviewer_name TEXT,
+    customer_id TEXT,
+    customer_email TEXT,
+    amount NUMERIC(10,2),
+    credited_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS product_reviews (
+    id SERIAL PRIMARY KEY,
+    title TEXT,
+    body TEXT,
+    rating INTEGER DEFAULT 5,
+    review_date TIMESTAMP DEFAULT NOW(),
+    source VARCHAR(50) DEFAULT 'manual',
+    curated VARCHAR(10) DEFAULT 'ok',
+    reviewer_name TEXT,
+    reviewer_email TEXT,
+    product_id TEXT,
+    product_handle TEXT,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_reviews_handle ON product_reviews(product_handle);
+
+CREATE TABLE IF NOT EXISTS cron_results (
+    id SERIAL PRIMARY KEY,
+    cron_name TEXT,
+    result_data JSONB,
+    executed_at TIMESTAMP DEFAULT NOW()
+);
 """
 
 def log_activity(type: str, action: str, details: dict = None, source: str = "system",
@@ -3617,7 +3651,7 @@ async def trustpilot_dashboard_api():
         recent = cur.fetchall()
         for r in recent:
             if r.get("credited_at"): r["credited_at"] = r["credited_at"].isoformat()
-        cur.execute("SELECT result, executed_at FROM cron_results WHERE cron_name='trustpilot-scan' ORDER BY executed_at DESC LIMIT 1")
+        cur.execute("SELECT result_data as result, executed_at FROM cron_results WHERE cron_name='trustpilot-scan' ORDER BY executed_at DESC LIMIT 1")
         scan = cur.fetchone()
         if scan and scan.get("executed_at"): scan["executed_at"] = scan["executed_at"].isoformat()
         cur.close(); db.close()
@@ -3635,7 +3669,7 @@ async def catalogue_dashboard():
     if db:
         try:
             cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-            cur.execute("SELECT result, executed_at FROM cron_results WHERE cron_name='audit-qualite' ORDER BY executed_at DESC LIMIT 1")
+            cur.execute("SELECT result_data as result, executed_at FROM cron_results WHERE cron_name='audit-qualite' ORDER BY executed_at DESC LIMIT 1")
             audit = cur.fetchone()
             if audit:
                 result["last_audit"] = audit["executed_at"].isoformat() if audit.get("executed_at") else None
@@ -3686,8 +3720,8 @@ async def system_status():
     if db:
         try:
             cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-            cur.execute("""SELECT DISTINCT ON (cron_name) cron_name, result, executed_at,
-                           CASE WHEN result::text LIKE '%error%' OR result::text LIKE '%Error%' THEN 'error' ELSE 'success' END as status
+            cur.execute("""SELECT DISTINCT ON (cron_name) cron_name, result_data as result, executed_at,
+                           CASE WHEN result_data::text LIKE '%error%' OR result_data::text LIKE '%Error%' THEN 'error' ELSE 'success' END as status
                            FROM cron_results ORDER BY cron_name, executed_at DESC""")
             crons = cur.fetchall()
             for c in crons:
