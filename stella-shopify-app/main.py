@@ -2734,9 +2734,13 @@ def get_cashback_settings() -> dict:
 async def webhook_order_paid(request: Request):
     """Shopify webhook: order paid → calculate cashback → add store credit to customer.
     Settings loaded dynamically from cashback_settings table."""
+    logger.info(f"[WEBHOOK] order-paid received from {request.client.host if request.client else 'unknown'}")
     try:
-        body = await request.json()
-    except Exception:
+        raw_body = await request.body()
+        logger.info(f"[WEBHOOK] order-paid body size: {len(raw_body)} bytes")
+        body = json.loads(raw_body)
+    except Exception as e:
+        logger.error(f"[WEBHOOK] order-paid parse error: {e}")
         return {"ok": False, "error": "Invalid JSON"}
 
     # Load dynamic settings
