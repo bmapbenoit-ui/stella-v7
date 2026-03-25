@@ -2792,7 +2792,9 @@ async def _process_cashback_inner(body):
     tryme_total = 0.0
     for li in body.get("line_items", []):
         title = (li.get("title") or "").lower()
-        tags = [t.lower() for t in (li.get("tags") or li.get("properties", {}).get("_tags", "").split(",") if isinstance(li.get("tags"), list) else [])]
+        li_tags = li.get("tags") or []
+        if isinstance(li_tags, str):
+            li_tags = [t.strip() for t in li_tags.split(",") if t.strip()]
         product_type = (li.get("product_type") or "").lower()
         # Exclude Try Me, gifts, samples by title or product_type
         if any(kw in title for kw in ["try me", "tryme", "échantillon", "echantillon", "mystère", "mystere", "cadeau", "gift", "shipping", "livraison"]) or product_type in ["try me", "gift"]:
