@@ -2732,16 +2732,36 @@ def get_cashback_settings() -> dict:
 
 @app.post("/api/webhook/order-paid")
 async def webhook_order_paid(request: Request):
-    """Shopify webhook: order paid → calculate cashback → add store credit to customer.
-    Settings loaded dynamically from cashback_settings table."""
-    logger.info(f"[WEBHOOK] order-paid received from {request.client.host if request.client else 'unknown'}")
+    """Shopify webhook: order paid → respond 200 immediately, process cashback in background."""
+    import asyncio
+    logger.info(f"[WEBHOOK] order-paid received")
     try:
         raw_body = await request.body()
-        logger.info(f"[WEBHOOK] order-paid body size: {len(raw_body)} bytes")
         body = json.loads(raw_body)
     except Exception as e:
         logger.error(f"[WEBHOOK] order-paid parse error: {e}")
         return {"ok": False, "error": "Invalid JSON"}
+
+    # Respond 200 immediately — Shopify requires < 5 seconds
+    order_name = body.get("name", "?")
+    logger.info(f"[WEBHOOK] order-paid {order_name} — processing in background")
+    asyncio.create_task(_process_cashback(body))
+    return {"ok": True, "queued": order_name}
+
+
+async def _process_cashback(body):
+    """Background task: calculate and credit cashback after webhook returns 200."""
+    try:
+        await _process_cashback_inner(body)
+    except Exception as e:
+        logger.error(f"[CASHBACK] Background processing error: {e}")
+        log_activity("cashback_error", f"Erreur cashback: {e}",
+                     {"order_name": body.get("name", ""), "error": str(e)},
+                     source="webhook", order_name=body.get("name", ""))
+
+
+async def _process_cashback_inner(body):
+    """Inner cashback processing logic."""
 
     # Load dynamic settings
     settings = get_cashback_settings()
