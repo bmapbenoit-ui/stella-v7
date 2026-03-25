@@ -2868,7 +2868,23 @@ async def webhook_order_paid(request: Request):
     if not credit_added:
         return {"ok": False, "error": "Failed to add store credit"}
 
-    # 3. Log to PostgreSQL
+    # 3. Write metafield on order for invoice (Order Printer)
+    try:
+        order_gid = f"gid://shopify/Order/{order_id}"
+        formatted_amount = f"{cashback_amount:.2f}".replace(".", ",") + " €"
+        async with httpx.AsyncClient(timeout=10) as c:
+            await c.post(gql_url, json={
+                "query": """mutation($mf: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $mf) { metafields { id } userErrors { field message } } }""",
+                "variables": {"mf": [
+                    {"ownerId": order_gid, "namespace": "planete-beaute", "key": "cashback-amount", "type": "single_line_text_field", "value": formatted_amount},
+                    {"ownerId": order_gid, "namespace": "planete-beaute", "key": "cashback-amount-raw", "type": "number_decimal", "value": str(cashback_amount)}
+                ]}
+            }, headers={"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"})
+        logger.info(f"Cashback metafield written on order {order_name}: {formatted_amount}")
+    except Exception as e:
+        logger.warning(f"Cashback metafield write: {e}")
+
+    # 4. Log to PostgreSQL
     db = get_db()
     if db:
         try:
@@ -2896,6 +2912,80 @@ async def webhook_order_paid(request: Request):
                  {"cashback_amount": cashback_amount, "base": cashback_base, "store_credit_used": store_credit_used, "customer_id": customer_id},
                  source="webhook", customer_email=customer_email, order_name=order_name)
     return {"ok": True, "cashback": cashback_amount, "base": cashback_base, "storeCreditUsed": store_credit_used}
+
+
+@app.post("/api/webhook/refund-created")
+async def webhook_refund_created(request: Request):
+    """When an order is refunded, debit the cashback store credit from the customer."""
+    try:
+        body = await request.json()
+    except Exception:
+        return {"ok": False, "error": "Invalid JSON"}
+
+    order_id = body.get("order_id")
+    if not order_id:
+        return {"ok": True, "skipped": True, "reason": "no order_id"}
+
+    # Find the cashback reward for this order
+    db = get_db()
+    if not db:
+        return {"ok": False, "error": "no db"}
+    try:
+        cur = db.cursor()
+        cur.execute("SELECT customer_id, cashback_amount, status FROM cashback_rewards WHERE order_id = %s ORDER BY id DESC LIMIT 1", (order_id,))
+        row = cur.fetchone()
+        cur.close(); db.close()
+    except Exception as e:
+        try: db.close()
+        except: pass
+        logger.error(f"Refund cashback lookup: {e}")
+        return {"ok": False, "error": str(e)}
+
+    if not row:
+        return {"ok": True, "skipped": True, "reason": "no cashback for this order"}
+    if row[2] == "revoked":
+        return {"ok": True, "skipped": True, "reason": "already revoked"}
+
+    customer_id, cashback_amount, _ = row
+    customer_gid = f"gid://shopify/Customer/{customer_id}"
+
+    # Debit the store credit
+    try:
+        async with httpx.AsyncClient(timeout=15) as c:
+            r = await c.post(SHOPIFY_GRAPHQL_URL, json={
+                "query": """mutation($id: ID!, $debitInput: StoreCreditAccountDebitInput!) {
+                  storeCreditAccountDebit(id: $id, debitInput: $debitInput) {
+                    storeCreditAccountTransaction { id }
+                    userErrors { field message }
+                  }
+                }""",
+                "variables": {
+                    "id": customer_gid,
+                    "debitInput": {
+                        "debitAmount": {"amount": str(cashback_amount), "currencyCode": "EUR"}
+                    }
+                }
+            }, headers={"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"})
+            resp = r.json()
+            errors = resp.get("data", {}).get("storeCreditAccountDebit", {}).get("userErrors", [])
+            if not errors:
+                # Mark as revoked in DB
+                db2 = get_db()
+                if db2:
+                    cur2 = db2.cursor()
+                    cur2.execute("UPDATE cashback_rewards SET status = 'revoked' WHERE order_id = %s", (order_id,))
+                    db2.commit(); cur2.close(); db2.close()
+                log_activity("cashback_revoked", f"Cashback {cashback_amount}€ révoqué (remboursement)",
+                             {"cashback_amount": cashback_amount, "customer_id": customer_id, "order_id": order_id},
+                             source="webhook", order_name=f"Order {order_id}")
+                logger.info(f"Cashback {cashback_amount}EUR revoked for customer {customer_id} (refund order {order_id})")
+                return {"ok": True, "revoked": cashback_amount}
+            else:
+                logger.error(f"Refund debit error: {errors}")
+                return {"ok": False, "error": str(errors)}
+    except Exception as e:
+        logger.error(f"Refund cashback debit: {e}")
+        return {"ok": False, "error": str(e)}
 
 
 @app.get("/api/cashback/dashboard")
