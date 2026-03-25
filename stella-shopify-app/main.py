@@ -2785,6 +2785,7 @@ async def webhook_order_paid(request: Request):
     # Best approach: fetch order details via Admin API for precise credit detection
     cashback_base = current_subtotal  # Subtotal after discounts, before shipping, before tax
     customer_id = customer["id"]
+    customer_email = customer.get("email", "")
     customer_gid = f"gid://shopify/Customer/{customer_id}"
     gql_url = SHOPIFY_GRAPHQL_URL
 
