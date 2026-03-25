@@ -3733,6 +3733,7 @@ async def reviews_dashboard():
 
 
 @app.get("/health")
+async def health():
     redis_ok = False
     rc = get_redis()
     if rc:
