@@ -2778,6 +2778,21 @@ async def _process_cashback_inner(body):
     if not customer or not customer.get("id"):
         return {"ok": True, "skipped": True, "reason": "no customer"}
 
+    # Deduplication: check if cashback already credited for this order
+    db_check = get_db()
+    if db_check:
+        try:
+            cur = db_check.cursor()
+            cur.execute("SELECT id FROM cashback_rewards WHERE order_id = %s AND status != 'revoked' LIMIT 1", (order_id,))
+            if cur.fetchone():
+                cur.close(); db_check.close()
+                logger.info(f"[CASHBACK] {order_name} already credited — skipping duplicate")
+                return {"ok": True, "skipped": True, "reason": "already credited"}
+            cur.close(); db_check.close()
+        except Exception:
+            try: db_check.close()
+            except: pass
+
     # Skip orders matching excluded tags
     excluded_tags = [t.strip().lower() for t in settings["excluded_tags"].split(",") if t.strip()]
     order_tags = [t.strip().lower() for t in tags.split(",") if t.strip()]
