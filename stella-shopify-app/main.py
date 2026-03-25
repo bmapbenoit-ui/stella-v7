@@ -2760,9 +2760,19 @@ async def webhook_order_paid(request: Request):
 
     # Calculate cashback base:
     # subtotal_price = produits après remises (hors port, hors taxes)
-    # On soustrait le crédit magasin utilisé (store credit used in payment)
+    # Exclude Try Me items, shipping items, and items tagged no-discount/tryme
     subtotal = float(body.get("subtotal_price", "0"))  # Produits après remises, hors port
     total_discounts = float(body.get("total_discounts", "0"))  # Remises déjà soustraites du subtotal
+
+    # Calculate eligible subtotal (exclude Try Me / no-discount items)
+    tryme_total = 0.0
+    for li in body.get("line_items", []):
+        title = (li.get("title") or "").lower()
+        tags = [t.lower() for t in (li.get("tags") or li.get("properties", {}).get("_tags", "").split(",") if isinstance(li.get("tags"), list) else [])]
+        product_type = (li.get("product_type") or "").lower()
+        # Exclude by title, product_type, or vendor pattern
+        if "try me" in title or "tryme" in title or product_type == "try me" or "échantillon" in title or "echantillon" in title:
+            tryme_total += float(li.get("price", "0")) * int(li.get("quantity", 1))
 
     # Detect store credit used in this order (payment gateway = "gift_card" or "store_credit")
     store_credit_used = 0.0
@@ -2783,7 +2793,7 @@ async def webhook_order_paid(request: Request):
     # Shopify webhook includes total_outstanding (what customer actually paid out of pocket)
     # total_outstanding = 0 means fully paid. We need the non-credit portion.
     # Best approach: fetch order details via Admin API for precise credit detection
-    cashback_base = current_subtotal  # Subtotal after discounts, before shipping, before tax
+    cashback_base = current_subtotal - tryme_total  # Subtotal minus Try Me items, before shipping
     customer_id = customer["id"]
     customer_email = customer.get("email", "")
     customer_gid = f"gid://shopify/Customer/{customer_id}"
