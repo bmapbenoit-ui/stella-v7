@@ -3537,62 +3537,6 @@ async def bis_webhook_inventory(request: Request):
         return {"ok": False, "error": str(e)}
 
 
-# ══════════════════════ TEMP: MANUAL CASHBACK + TOKEN ══════════════════════
-
-@app.get("/api/admin/token-full")
-async def admin_token_full(key: str = ""):
-    """TEMPORARY — returns full token for config update. Remove after use."""
-    if key != "stella-mem-2026-planetebeauty":
-        raise HTTPException(403, "Unauthorized")
-    return {"token": SHOPIFY_ACCESS_TOKEN}
-
-@app.post("/api/admin/cashback-manual")
-async def admin_cashback_manual(request: Request):
-    """TEMPORARY — credit cashback for missed orders. Remove after use."""
-    body = await request.json()
-    if body.get("key") != "stella-mem-2026-planetebeauty":
-        raise HTTPException(403, "Unauthorized")
-    order_name = body["order_name"]
-    # Fetch order from Shopify
-    gql_url = SHOPIFY_GRAPHQL_URL
-    headers = {"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"}
-    async with httpx.AsyncClient(timeout=15) as c:
-        r = await c.post(gql_url, json={"query": '{ orders(first:1, query:"name:%s") { edges { node { id name currentSubtotalPriceSet { shopMoney { amount } } customer { id email } transactions(first:20) { edges { node { gateway kind status amountSet { shopMoney { amount } } } } } } } } }' % order_name}, headers=headers)
-        edges = r.json().get("data", {}).get("orders", {}).get("edges", [])
-        if not edges:
-            return {"ok": False, "error": f"Order {order_name} not found"}
-        order = edges[0]["node"]
-        customer = order.get("customer")
-        if not customer:
-            return {"ok": False, "error": f"No customer on {order_name}"}
-        subtotal = float(order["currentSubtotalPriceSet"]["shopMoney"]["amount"])
-        # Detect store credit used
-        sc_used = 0.0
-        for txn_edge in order.get("transactions", {}).get("edges", []):
-            txn = txn_edge["node"]
-            if txn.get("kind") == "SALE" and txn.get("status") == "SUCCESS":
-                gw = (txn.get("gateway") or "").lower()
-                if "gift_card" in gw or "store_credit" in gw or "credit" in gw:
-                    sc_used += float(txn["amountSet"]["shopMoney"]["amount"])
-        base = max(0, subtotal - sc_used)
-        cashback = round(base * 0.05, 2)
-        if cashback < 0.50:
-            return {"ok": True, "skipped": True, "reason": f"cashback {cashback} < 0.50", "order": order_name}
-        from datetime import timedelta
-        expires = (datetime.utcnow() + timedelta(days=60)).strftime("%Y-%m-%dT23:59:59Z")
-        customer_gid = customer["id"]
-        # Credit
-        mutation = 'mutation($id: ID!, $ci: StoreCreditAccountCreditInput!) { storeCreditAccountCredit(id: $id, creditInput: $ci) { storeCreditAccountTransaction { id } userErrors { field message } } }'
-        cr = await c.post(gql_url, json={"query": mutation, "variables": {"id": customer_gid, "ci": {"creditAmount": {"amount": str(cashback), "currencyCode": "EUR"}, "expiresAt": expires}}}, headers=headers)
-        cr_data = cr.json()
-        errors = cr_data.get("data", {}).get("storeCreditAccountCredit", {}).get("userErrors", [])
-        if errors:
-            return {"ok": False, "error": str(errors), "order": order_name}
-        log_activity("cashback_credit", f"Cashback MANUEL {cashback}€ pour {order_name}",
-                     {"cashback_amount": cashback, "base": base, "store_credit_used": sc_used},
-                     source="manual", customer_email=customer.get("email",""), order_name=order_name)
-        return {"ok": True, "order": order_name, "cashback": cashback, "base": base, "sc_used": sc_used, "customer": customer.get("email","")}
-
 # ══════════════════════ DASHBOARD V8 API ══════════════════════
 
 @app.get("/api/activity/log")
