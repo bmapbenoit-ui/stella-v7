@@ -2770,8 +2770,8 @@ async def webhook_order_paid(request: Request):
         title = (li.get("title") or "").lower()
         tags = [t.lower() for t in (li.get("tags") or li.get("properties", {}).get("_tags", "").split(",") if isinstance(li.get("tags"), list) else [])]
         product_type = (li.get("product_type") or "").lower()
-        # Exclude by title, product_type, or vendor pattern
-        if "try me" in title or "tryme" in title or product_type == "try me" or "échantillon" in title or "echantillon" in title:
+        # Exclude Try Me, gifts, samples by title or product_type
+        if any(kw in title for kw in ["try me", "tryme", "échantillon", "echantillon", "mystère", "mystere", "cadeau", "gift", "shipping", "livraison"]) or product_type in ["try me", "gift"]:
             tryme_total += float(li.get("price", "0")) * int(li.get("quantity", 1))
 
     # Detect store credit used in this order (payment gateway = "gift_card" or "store_credit")
