@@ -194,7 +194,39 @@ CREATE TABLE IF NOT EXISTS cashback_settings (
     is_active BOOLEAN DEFAULT TRUE,
     updated_at TIMESTAMP DEFAULT NOW()
 );
+
+CREATE TABLE IF NOT EXISTS activity_log (
+    id SERIAL PRIMARY KEY,
+    timestamp TIMESTAMPTZ DEFAULT NOW(),
+    type VARCHAR(50) NOT NULL,
+    action VARCHAR(500) NOT NULL,
+    details JSONB DEFAULT '{}',
+    source VARCHAR(50) DEFAULT 'system',
+    status VARCHAR(20) DEFAULT 'success',
+    customer_email VARCHAR(200),
+    order_name VARCHAR(50),
+    product_title VARCHAR(500)
+);
+CREATE INDEX IF NOT EXISTS idx_activity_ts ON activity_log(timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_activity_type ON activity_log(type, timestamp DESC);
 """
+
+def log_activity(type: str, action: str, details: dict = None, source: str = "system",
+                  status: str = "success", customer_email: str = None,
+                  order_name: str = None, product_title: str = None):
+    """Log une action dans activity_log — tour de contrôle centralisée."""
+    db = get_db()
+    if not db: return
+    try:
+        cur = db.cursor()
+        cur.execute("""INSERT INTO activity_log (type, action, details, source, status, customer_email, order_name, product_title)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+                    (type, action, json.dumps(details or {}), source, status, customer_email, order_name, product_title))
+        db.commit(); cur.close(); db.close()
+    except Exception as e:
+        logger.error(f"log_activity error: {e}")
+        try: db.close()
+        except: pass
 
 def load_shopify_token_from_db():
     """Load V8 OAuth token from DB if available (overrides env var)."""
@@ -223,8 +255,15 @@ async def _run_cron(name, endpoint):
             r = await client.post(f"http://localhost:{os.getenv('PORT', '8000')}{endpoint}",
                                   headers={"X-Cron-Key": os.getenv("RAILWAY_CRON_KEY", "stella-internal")})
             logger.info(f"Scheduler {name}: {r.status_code}")
+            status = "success" if r.status_code == 200 else "error"
+            log_activity("cron_run", f"Cron {name} exécuté ({r.status_code})",
+                         {"cron_name": name, "endpoint": endpoint, "status_code": r.status_code},
+                         source="cron", status=status)
     except Exception as e:
         logger.error(f"Scheduler {name} error: {e}")
+        log_activity("cron_run", f"Cron {name} ERREUR: {str(e)[:200]}",
+                     {"cron_name": name, "endpoint": endpoint, "error": str(e)[:500]},
+                     source="cron", status="error")
 
 @app.on_event("startup")
 async def startup():
@@ -1969,6 +2008,9 @@ async def cron_trustpilot_scan(request: Request):
                         cur.execute("INSERT INTO trustpilot_credits (order_number, review_id, reviewer_name, customer_id, amount) VALUES (%s,%s,%s,%s,%s)",
                             (order_name, rv.get("id",""), rv.get("name",""), customer_id, 5.00))
                         results["credited"] += 1
+                        log_activity("trustpilot_credit", f"Trustpilot: 5€ credite pour avis {order_name}",
+                                     {"order_name": order_name, "reviewer": rv.get("name",""), "amount": 5.00},
+                                     source="cron", customer_email=customer.get("email",""), order_name=order_name)
 
                         # Also add review to product_reviews for each product in the order
                         items_q = await client.post(gql_url, json={"query": f'{{ order(id: "{order["id"]}") {{ lineItems(first:10) {{ edges {{ node {{ title product {{ handle }} }} }} }} }} }}'}, headers=headers_gql)
@@ -2598,8 +2640,14 @@ async def webhook_product_change(request: Request):
         rc.set("quiz:regen:last", now, ex=120)
     # Trigger regeneration in background
     import asyncio
+    body_raw = await request.body()
+    try:
+        pdata = json.loads(body_raw)
+        ptitle = pdata.get("title", "Unknown")
+    except: ptitle = "Unknown"
     asyncio.create_task(quiz_regenerate())
     logger.info("Quiz data regeneration triggered by product webhook")
+    log_activity("product_change", f"Produit modifié : {ptitle}", {"product_title": ptitle}, source="webhook", product_title=ptitle)
     return {"ok": True, "regenerating": True}
 
 # ══════════════════════ CASHBACK FIDÉLITÉ (Crédit Magasin) ══════════════════════
@@ -2810,6 +2858,9 @@ async def webhook_order_paid(request: Request):
             logger.error(f"Cashback DB insert: {e}")
 
     logger.info(f"Cashback {cashback_amount}EUR store credit for customer {customer_id} order {order_name} (base:{cashback_base}, credit_used:{store_credit_used})")
+    log_activity("cashback_credit", f"Cashback {cashback_amount}€ crédité",
+                 {"cashback_amount": cashback_amount, "base": cashback_base, "store_credit_used": store_credit_used, "customer_id": customer_id},
+                 source="webhook", customer_email=customer_email, order_name=order_name)
     return {"ok": True, "cashback": cashback_amount, "base": cashback_base, "storeCreditUsed": store_credit_used}
 
 
@@ -3434,6 +3485,9 @@ async def bis_webhook_inventory(request: Request):
                     logger.warning(f"BIS remove tag for {email}: {e}")
 
         logger.info(f"BIS webhook: notified {len(subscribers)} subscribers for {product_title}, {emails_sent} emails sent, tags removed")
+        log_activity("bis_notification", f"BIS: {emails_sent} emails envoyés pour {product_title}",
+                     {"product_title": product_title, "subscribers": len(subscribers), "emails_sent": emails_sent, "emails": notified_emails},
+                     source="webhook", product_title=product_title)
 
         return {
             "ok": True,
@@ -3449,8 +3503,236 @@ async def bis_webhook_inventory(request: Request):
         return {"ok": False, "error": str(e)}
 
 
+# ══════════════════════ DASHBOARD V8 API ══════════════════════
+
+@app.get("/api/activity/log")
+async def get_activity_log(limit: int = 50, type: str = None):
+    """Journal centralisé — tour de contrôle."""
+    db = get_db()
+    if not db: return {"activities": [], "total": 0}
+    try:
+        cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        if type and type != "all":
+            cur.execute("SELECT * FROM activity_log WHERE type=%s ORDER BY timestamp DESC LIMIT %s", (type, limit))
+        else:
+            cur.execute("SELECT * FROM activity_log ORDER BY timestamp DESC LIMIT %s", (limit,))
+        rows = cur.fetchall()
+        cur.execute("SELECT COUNT(*) as total FROM activity_log")
+        total = cur.fetchone()["total"]
+        cur.close(); db.close()
+        for r in rows:
+            r["timestamp"] = r["timestamp"].isoformat() if r.get("timestamp") else None
+        return {"activities": rows, "total": total}
+    except Exception as e:
+        try: db.close()
+        except: pass
+        return {"activities": [], "total": 0, "error": str(e)}
+
+@app.get("/api/kpis/summary")
+async def kpis_summary():
+    """KPIs temps réel — CA, commandes, panier moyen, cashback, BIS, quiz."""
+    result = {"revenue_today": 0, "orders_today": 0, "avg_order_value": 0,
+              "cashback_generated_today": 0, "bis_active": 0, "quiz_views_today": 0}
+    try:
+        # Revenue + orders from Shopify
+        from datetime import timezone
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%dT00:00:00Z")
+        query = f'''{{ orders(first: 250, query: "created_at:>='{today}'") {{ edges {{ node {{ name totalPriceSet {{ shopMoney {{ amount }} }} displayFinancialStatus }} }} }} }}'''
+        data = await shopify_graphql(query)
+        orders = data.get("data", {}).get("orders", {}).get("edges", [])
+        paid = [o for o in orders if o["node"].get("displayFinancialStatus") in ["PAID", "PARTIALLY_PAID", "PARTIALLY_REFUNDED"]]
+        result["orders_today"] = len(paid)
+        result["revenue_today"] = round(sum(float(o["node"]["totalPriceSet"]["shopMoney"]["amount"]) for o in paid), 2)
+        result["avg_order_value"] = round(result["revenue_today"] / max(result["orders_today"], 1), 2)
+    except Exception as e:
+        logger.warning(f"KPI shopify error: {e}")
+    # Cashback today
+    db = get_db()
+    if db:
+        try:
+            cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cur.execute("SELECT COALESCE(SUM((details->>'cashback_amount')::numeric), 0) as total FROM activity_log WHERE type='cashback_credit' AND timestamp >= CURRENT_DATE")
+            result["cashback_generated_today"] = float(cur.fetchone()["total"])
+            cur.execute("SELECT COUNT(*) as c FROM bis_subscriptions WHERE status='active'")
+            result["bis_active"] = cur.fetchone()["c"]
+            cur.close(); db.close()
+        except Exception as e:
+            try: db.close()
+            except: pass
+    # Quiz views
+    rc = get_redis()
+    if rc:
+        try:
+            today_key = datetime.now().strftime("%Y-%m-%d")
+            result["quiz_views_today"] = int(rc.get(f"quiz:quiz_view:{today_key}") or 0)
+        except: pass
+    return result
+
+@app.get("/api/orders/dashboard")
+async def orders_dashboard():
+    """Commandes du jour depuis Shopify."""
+    rc = get_redis()
+    cached = None
+    if rc:
+        try: cached = rc.get("dashboard:orders:today")
+        except: pass
+    if cached:
+        return json.loads(cached)
+    try:
+        from datetime import timezone
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%dT00:00:00Z")
+        query = f'''{{ orders(first: 50, query: "created_at:>='{today}'", sortKey: CREATED_AT, reverse: true) {{ edges {{ node {{ id name createdAt totalPriceSet {{ shopMoney {{ amount currencyCode }} }} displayFinancialStatus displayFulfillmentStatus customer {{ email displayName }} tags }} }} }} }}'''
+        data = await shopify_graphql(query)
+        orders = []
+        for edge in data.get("data", {}).get("orders", {}).get("edges", []):
+            n = edge["node"]
+            orders.append({
+                "name": n["name"], "created_at": n["createdAt"],
+                "total": float(n["totalPriceSet"]["shopMoney"]["amount"]),
+                "financial_status": n.get("displayFinancialStatus", ""),
+                "fulfillment_status": n.get("displayFulfillmentStatus", "UNFULFILLED"),
+                "customer_email": n.get("customer", {}).get("email", ""),
+                "customer_name": n.get("customer", {}).get("displayName", ""),
+                "tags": n.get("tags", [])
+            })
+        revenue = round(sum(o["total"] for o in orders if o["financial_status"] in ["PAID", "PARTIALLY_PAID", "PARTIALLY_REFUNDED"]), 2)
+        result = {"orders": orders, "count": len(orders), "revenue_today": revenue}
+        if rc:
+            try: rc.setex("dashboard:orders:today", 60, json.dumps(result))
+            except: pass
+        return result
+    except Exception as e:
+        return {"orders": [], "count": 0, "revenue_today": 0, "error": str(e)}
+
+@app.get("/api/trustpilot/dashboard")
+async def trustpilot_dashboard_api():
+    """Stats Trustpilot — crédits, scans, récents."""
+    db = get_db()
+    if not db: return {"total_credits": 0, "total_amount": 0, "recent": [], "last_scan": None}
+    try:
+        cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("SELECT COUNT(*) as c, COALESCE(SUM(amount), 0) as total FROM trustpilot_credits")
+        stats = cur.fetchone()
+        cur.execute("SELECT * FROM trustpilot_credits ORDER BY credited_at DESC LIMIT 20")
+        recent = cur.fetchall()
+        for r in recent:
+            if r.get("credited_at"): r["credited_at"] = r["credited_at"].isoformat()
+        cur.execute("SELECT result, executed_at FROM cron_results WHERE cron_name='trustpilot-scan' ORDER BY executed_at DESC LIMIT 1")
+        scan = cur.fetchone()
+        if scan and scan.get("executed_at"): scan["executed_at"] = scan["executed_at"].isoformat()
+        cur.close(); db.close()
+        return {"total_credits": stats["c"], "total_amount": float(stats["total"]), "recent": recent, "last_scan": scan}
+    except Exception as e:
+        try: db.close()
+        except: pass
+        return {"total_credits": 0, "total_amount": 0, "recent": [], "last_scan": None, "error": str(e)}
+
+@app.get("/api/catalogue/dashboard")
+async def catalogue_dashboard():
+    """Catalogue — audit qualité, completude, nouveautés."""
+    result = {"total_products": 0, "products_with_issues": 0, "issues": [], "last_audit": None}
+    db = get_db()
+    if db:
+        try:
+            cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cur.execute("SELECT result, executed_at FROM cron_results WHERE cron_name='audit-qualite' ORDER BY executed_at DESC LIMIT 1")
+            audit = cur.fetchone()
+            if audit:
+                result["last_audit"] = audit["executed_at"].isoformat() if audit.get("executed_at") else None
+                audit_data = audit.get("result", {})
+                if isinstance(audit_data, str):
+                    try: audit_data = json.loads(audit_data)
+                    except: audit_data = {}
+                result["products_with_issues"] = audit_data.get("issues_count", 0)
+                result["issues"] = audit_data.get("issues", [])[:50]
+            cur.close(); db.close()
+        except Exception as e:
+            try: db.close()
+            except: pass
+    try:
+        query = '{ productsCount { count } }'
+        data = await shopify_graphql(query)
+        result["total_products"] = data.get("data", {}).get("productsCount", {}).get("count", 0)
+    except: pass
+    return result
+
+@app.get("/api/system/status")
+async def system_status():
+    """Système — santé services, webhooks, crons, erreurs."""
+    result = {"services": {}, "crons": [], "webhooks": [], "errors_24h": 0, "version": "8.0.0"}
+    # Services health
+    rc = get_redis()
+    result["services"]["redis"] = "online" if rc and rc.ping() else "offline"
+    db = get_db()
+    if db:
+        try:
+            cur = db.cursor(); cur.execute("SELECT 1"); cur.close()
+            result["services"]["postgresql"] = "online"
+        except: result["services"]["postgresql"] = "offline"
+        finally:
+            try: db.close()
+            except: pass
+    else:
+        result["services"]["postgresql"] = "offline"
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            r = await client.get(f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/{SHOPIFY_API_VERSION}/shop.json",
+                                 headers={"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN})
+            result["services"]["shopify"] = "online" if r.status_code == 200 else "error"
+    except: result["services"]["shopify"] = "offline"
+    result["services"]["smtp"] = "online" if SMTP_HOST and SMTP_USER else "not_configured"
+    # Crons — derniers résultats
+    db = get_db()
+    if db:
+        try:
+            cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cur.execute("""SELECT DISTINCT ON (cron_name) cron_name, result, executed_at,
+                           CASE WHEN result::text LIKE '%error%' OR result::text LIKE '%Error%' THEN 'error' ELSE 'success' END as status
+                           FROM cron_results ORDER BY cron_name, executed_at DESC""")
+            crons = cur.fetchall()
+            for c in crons:
+                if c.get("executed_at"): c["executed_at"] = c["executed_at"].isoformat()
+            result["crons"] = crons
+            # Errors 24h
+            cur.execute("SELECT COUNT(*) as c FROM activity_log WHERE status='error' AND timestamp >= NOW() - INTERVAL '24 hours'")
+            result["errors_24h"] = cur.fetchone()["c"]
+            cur.close(); db.close()
+        except Exception as e:
+            try: db.close()
+            except: pass
+    # Webhooks
+    try:
+        query = '{ webhookSubscriptions(first: 20) { nodes { id topic endpoint { ... on WebhookHttpEndpoint { callbackUrl } } } } }'
+        data = await shopify_graphql(query)
+        wh = data.get("data", {}).get("webhookSubscriptions", {}).get("nodes", [])
+        result["webhooks"] = [{"topic": w["topic"], "url": w.get("endpoint", {}).get("callbackUrl", "")} for w in wh]
+    except: pass
+    return result
+
+@app.get("/api/reviews/dashboard")
+async def reviews_dashboard():
+    """Avis — stats globales, récents, par source."""
+    db = get_db()
+    if not db: return {"total": 0, "avg_rating": 0, "recent": [], "by_source": {}}
+    try:
+        cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("SELECT COUNT(*) as c, COALESCE(AVG(rating), 0) as avg FROM product_reviews")
+        stats = cur.fetchone()
+        cur.execute("SELECT * FROM product_reviews ORDER BY created_at DESC LIMIT 20")
+        recent = cur.fetchall()
+        for r in recent:
+            if r.get("created_at"): r["created_at"] = r["created_at"].isoformat()
+        cur.execute("SELECT source, COUNT(*) as c FROM product_reviews GROUP BY source")
+        by_source = {r["source"]: r["c"] for r in cur.fetchall()}
+        cur.close(); db.close()
+        return {"total": stats["c"], "avg_rating": round(float(stats["avg"]), 2), "recent": recent, "by_source": by_source}
+    except Exception as e:
+        try: db.close()
+        except: pass
+        return {"total": 0, "avg_rating": 0, "recent": [], "by_source": {}, "error": str(e)}
+
+
 @app.get("/health")
-async def health():
     redis_ok = False
     rc = get_redis()
     if rc:
@@ -3473,9 +3755,9 @@ async def health():
     return {"status": "ok" if (redis_ok or db_ok) else "degraded", "version": APP_VERSION, "redis": redis_ok, "database": db_ok, "qdrant": qdrant_ok, "shopify_api": "connected" if SHOPIFY_ACCESS_TOKEN else "no_token", "dev_mode": DEV_MODE}
 
 # ══════════════════════ FRONTEND ══════════════════════
-@app.get("/", response_class=HTMLResponse)
-async def index(request: Request):
-    """App home — BIS Dashboard embedded in Shopify Admin via App Bridge."""
+@app.get("/dashboard-legacy", response_class=HTMLResponse)
+async def index_legacy(request: Request):
+    """Legacy dashboard — kept as fallback."""
     api_key = SHOPIFY_V8_CLIENT_ID or SHOPIFY_API_KEY
     host_param = request.query_params.get("host", "")
 
@@ -4328,6 +4610,17 @@ function switchTab(tab) {{
 </body>
 </html>"""
     return HTMLResponse(html)
+
+@app.get("/", response_class=HTMLResponse)
+async def index(request: Request):
+    """STELLA V8 — Dashboard Tour de Contrôle."""
+    html_path = os.path.join(os.path.dirname(__file__), "static", "dashboard_v8.html")
+    try:
+        with open(html_path, "r") as f:
+            return HTMLResponse(f.read())
+    except FileNotFoundError:
+        return HTMLResponse("<h1>Dashboard V8 not found</h1>", status_code=500)
+
 
 @app.get("/chat", response_class=HTMLResponse)
 async def chat_page(request: Request):
