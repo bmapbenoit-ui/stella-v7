@@ -2809,7 +2809,7 @@ async def _process_cashback_inner(body):
             # Look in transactions for the store credit amount
             break
     # More precise: check refunds/transactions for store credit
-    for line in body.get("payment_terms", {}).get("payment_schedules", []) or []:
+    for line in (body.get("payment_terms") or {}).get("payment_schedules", []) or []:
         pass  # Fallback
     # Safest method: check total_price vs subtotal + shipping - discounts
     shipping_total = sum(float(s.get("price", "0")) for s in body.get("shipping_lines", []))
