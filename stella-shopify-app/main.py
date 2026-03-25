@@ -2751,12 +2751,14 @@ async def webhook_order_paid(request: Request):
 
 async def _process_cashback(body):
     """Background task: calculate and credit cashback after webhook returns 200."""
+    import traceback
     try:
         await _process_cashback_inner(body)
     except Exception as e:
-        logger.error(f"[CASHBACK] Background processing error: {e}")
+        tb = traceback.format_exc()
+        logger.error(f"[CASHBACK] Background error: {e}\n{tb}")
         log_activity("cashback_error", f"Erreur cashback: {e}",
-                     {"order_name": body.get("name", ""), "error": str(e)},
+                     {"order_name": body.get("name", ""), "error": str(e), "traceback": tb[-500:]},
                      source="webhook", order_name=body.get("name", ""))
 
 
