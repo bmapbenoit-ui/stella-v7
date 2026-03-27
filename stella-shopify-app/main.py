@@ -2576,28 +2576,90 @@ async def import_reviews(request: Request):
             picture_urls TEXT,
             created_at TIMESTAMP DEFAULT NOW()
         )""")
+        # Add unique index if not exists (product_handle + reviewer_name + rating + title)
+        cur.execute("""CREATE UNIQUE INDEX IF NOT EXISTS idx_reviews_unique
+            ON product_reviews(product_handle, reviewer_name, rating, title)""")
         imported = 0
+        skipped = 0
         for r in reviews:
             try:
                 rd = r.get("date") or None
                 rpd = r.get("reply_date") or None
                 cur.execute("""INSERT INTO product_reviews
                     (title, body, rating, review_date, source, curated, reviewer_name, reviewer_email, product_id, product_handle, reply, reply_date, picture_urls)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT (product_handle, reviewer_name, rating, title) DO NOTHING""",
                     (r.get("title",""), r.get("body",""), r.get("rating",0), rd, r.get("source",""), r.get("curated",""),
                      r.get("name",""), r.get("email",""), r.get("product_id",""), r.get("product_handle",""),
                      r.get("reply",""), rpd if rpd else None, r.get("picture_urls","")))
-                imported += 1
+                if cur.rowcount > 0:
+                    imported += 1
+                else:
+                    skipped += 1
             except Exception as e:
                 logger.warning(f"Review import row error: {e}")
         db.commit()
         cur.close()
         db.close()
-        return {"imported": imported}
+        return {"imported": imported, "skipped": skipped}
     except Exception as e:
         try: db.close()
         except: pass
-        return {"imported": 0, "error": str(e)}
+        return {"imported": 0, "skipped": 0, "error": str(e)}
+
+
+@app.get("/api/reviews/dashboard")
+async def reviews_dashboard():
+    """Avis — stats globales, récents, par source."""
+    db = get_db()
+    if not db: return {"total": 0, "avg_rating": 0, "recent": [], "by_source": {}}
+    try:
+        cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("SELECT COUNT(*) as c, COALESCE(AVG(rating), 0) as avg FROM product_reviews")
+        stats = cur.fetchone()
+        cur.execute("SELECT * FROM product_reviews ORDER BY created_at DESC LIMIT 20")
+        recent = cur.fetchall()
+        for r in recent:
+            if r.get("created_at"): r["created_at"] = r["created_at"].isoformat()
+            if r.get("review_date"): r["review_date"] = r["review_date"].isoformat()
+        cur.execute("SELECT source, COUNT(*) as c FROM product_reviews GROUP BY source")
+        by_source = {r["source"]: r["c"] for r in cur.fetchall()}
+        cur.close(); db.close()
+        return {"total": stats["c"], "avg_rating": round(float(stats["avg"]), 2), "recent": recent, "by_source": by_source}
+    except Exception as e:
+        try: db.close()
+        except: pass
+        return {"total": 0, "avg_rating": 0, "recent": [], "by_source": {}, "error": str(e)}
+
+
+@app.post("/api/reviews/deduplicate")
+async def deduplicate_reviews(request: Request):
+    """Remove duplicate reviews, keeping the oldest entry per (product_handle, reviewer_email, rating, title)."""
+    api_key = request.headers.get("X-API-Key", "")
+    if api_key != "stella-mem-2026-planetebeauty":
+        raise HTTPException(403, "Unauthorized")
+    db = get_db()
+    if not db: return {"error": "No DB"}
+    try:
+        cur = db.cursor()
+        cur.execute("SELECT COUNT(*) FROM product_reviews")
+        before = cur.fetchone()[0]
+        cur.execute("""DELETE FROM product_reviews
+            WHERE id NOT IN (
+                SELECT MIN(id) FROM product_reviews
+                GROUP BY product_handle, reviewer_name, rating, title
+            )""")
+        deleted = cur.rowcount
+        cur.execute("SELECT COUNT(*) FROM product_reviews")
+        after = cur.fetchone()[0]
+        db.commit()
+        cur.close(); db.close()
+        log_activity("cron_run", f"Reviews deduplicated: {before} → {after} ({deleted} supprimés)", {"before": before, "after": after, "deleted": deleted})
+        return {"before": before, "after": after, "deleted": deleted}
+    except Exception as e:
+        try: db.close()
+        except: pass
+        return {"error": str(e)}
 
 
 @app.get("/api/reviews/{product_handle}")
@@ -3884,29 +3946,6 @@ async def system_status():
         result["webhooks"] = [{"topic": w["topic"], "url": w.get("endpoint", {}).get("callbackUrl", "")} for w in wh]
     except: pass
     return result
-
-@app.get("/api/reviews/dashboard")
-async def reviews_dashboard():
-    """Avis — stats globales, récents, par source."""
-    db = get_db()
-    if not db: return {"total": 0, "avg_rating": 0, "recent": [], "by_source": {}}
-    try:
-        cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute("SELECT COUNT(*) as c, COALESCE(AVG(rating), 0) as avg FROM product_reviews")
-        stats = cur.fetchone()
-        cur.execute("SELECT * FROM product_reviews ORDER BY created_at DESC LIMIT 20")
-        recent = cur.fetchall()
-        for r in recent:
-            if r.get("created_at"): r["created_at"] = r["created_at"].isoformat()
-        cur.execute("SELECT source, COUNT(*) as c FROM product_reviews GROUP BY source")
-        by_source = {r["source"]: r["c"] for r in cur.fetchall()}
-        cur.close(); db.close()
-        return {"total": stats["c"], "avg_rating": round(float(stats["avg"]), 2), "recent": recent, "by_source": by_source}
-    except Exception as e:
-        try: db.close()
-        except: pass
-        return {"total": 0, "avg_rating": 0, "recent": [], "by_source": {}, "error": str(e)}
-
 
 @app.get("/health")
 async def health():
