@@ -427,6 +427,38 @@ const STELLA = {
         }
       }
     }
+  },
+
+  // ═══════════════════════════════════════════════════════════════
+  // TAB 10: LIVRAISON
+  // ═══════════════════════════════════════════════════════════════
+  shipping: {
+    async load() {
+      const data = await STELLA.api('/api/shipping/settings');
+      if (data) {
+        document.getElementById('shipping-threshold').value = data.threshold || 99;
+        document.getElementById('shipping-amount').value = data.amount || 5;
+        document.getElementById('shipping-status').innerHTML = `
+          <span class="badge-pill badge-success">ACTIF</span>
+          <span style="margin-left:8px;color:var(--text-secondary)">-${data.amount || 5}€ dès ${data.threshold || 99}€</span>
+        `;
+      }
+    },
+    async save() {
+      const threshold = parseFloat(document.getElementById('shipping-threshold').value);
+      const amount = parseFloat(document.getElementById('shipping-amount').value);
+      if (!threshold || !amount || threshold <= 0 || amount <= 0) {
+        return STELLA.showToast('Valeurs invalides', 'error');
+      }
+      STELLA.showToast('Sauvegarde en cours...', 'success');
+      const r = await STELLA.apiPost('/api/shipping/settings', { threshold, amount });
+      if (r && r.success) {
+        STELLA.showToast(`Livraison mis à jour: -${amount}€ dès ${threshold}€`, 'success');
+        this.load();
+      } else {
+        STELLA.showToast('Erreur sauvegarde', 'error');
+      }
+    }
   }
 };
 

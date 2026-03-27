@@ -3217,6 +3217,78 @@ async def save_cashback_settings_api(request: Request):
     return {"success": True, "metafield_sync": sync_ok}
 
 
+# ══════════════════════ SHIPPING DISCOUNT CONFIG ══════════════════════
+
+SHIPPING_DISCOUNT_ID = "gid://shopify/DiscountAutomaticNode/1880224399702"
+
+@app.get("/api/shipping/settings")
+async def get_shipping_settings():
+    """Get shipping discount config from Shopify metafield."""
+    defaults = {"threshold": 99, "amount": 5}
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.post(SHOPIFY_GRAPHQL_URL, json={
+                "query": f'{{ discountNode(id: "{SHIPPING_DISCOUNT_ID}") {{ metafield(namespace: "$app:pb-shipping-discount", key: "function-configuration") {{ value }} }} }}'
+            }, headers={"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"})
+            mf = r.json().get("data", {}).get("discountNode", {}).get("metafield")
+            if mf and mf.get("value"):
+                config = json.loads(mf["value"])
+                return {"threshold": config.get("threshold", 99), "amount": config.get("amount", 5)}
+    except Exception as e:
+        logger.error(f"Shipping settings read error: {e}")
+    return defaults
+
+
+@app.post("/api/shipping/settings")
+async def save_shipping_settings(request: Request):
+    """Save shipping discount config to Shopify metafield on discount node."""
+    body = await request.json()
+    threshold = float(body.get("threshold", 99))
+    amount = float(body.get("amount", 5))
+    if threshold <= 0 or amount <= 0:
+        raise HTTPException(400, "Valeurs invalides")
+
+    config_json = json.dumps({"threshold": threshold, "amount": amount})
+    try:
+        mutation = """mutation($metafields: [MetafieldsSetInput!]!) {
+          metafieldsSet(metafields: $metafields) {
+            metafields { id namespace key }
+            userErrors { field message }
+          }
+        }"""
+        variables = {"metafields": [{
+            "ownerId": SHIPPING_DISCOUNT_ID,
+            "namespace": "$app:pb-shipping-discount",
+            "key": "function-configuration",
+            "type": "json",
+            "value": config_json,
+        }]}
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.post(SHOPIFY_GRAPHQL_URL, json={"query": mutation, "variables": variables},
+                           headers={"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"})
+            resp = r.json()
+            errors = resp.get("data", {}).get("metafieldsSet", {}).get("userErrors", [])
+            if errors:
+                return {"success": False, "errors": errors}
+
+        # Update discount title to reflect new values
+        title_mutation = f"""mutation {{
+          discountAutomaticAppUpdate(id: "{SHIPPING_DISCOUNT_ID}", automaticAppDiscount: {{
+            title: "-{int(amount)}€ sur la livraison dès {int(threshold)}€"
+          }}) {{ automaticAppDiscount {{ discountId title }} userErrors {{ message }} }}
+        }}"""
+        async with httpx.AsyncClient(timeout=10) as c:
+            await c.post(SHOPIFY_GRAPHQL_URL, json={"query": title_mutation},
+                        headers={"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"})
+
+        log_activity("shipping_config", f"Shipping discount mis à jour: -{int(amount)}€ dès {int(threshold)}€",
+                     {"threshold": threshold, "amount": amount}, source="api")
+        return {"success": True, "threshold": threshold, "amount": amount}
+    except Exception as e:
+        logger.error(f"Shipping settings save error: {e}")
+        return {"success": False, "error": str(e)}
+
+
 # ══════════════════════ BACK IN STOCK ══════════════════════
 
 @app.post("/api/bis/subscribe")
