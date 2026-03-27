@@ -307,8 +307,15 @@ async def startup():
             cur = db.cursor(); cur.execute(CHAT_MIGRATION)
             cur.execute("""INSERT INTO cashback_settings (shop) SELECT 'planetemode.myshopify.com'
                            WHERE NOT EXISTS (SELECT 1 FROM cashback_settings WHERE shop = 'planetemode.myshopify.com')""")
+            # Cashback rewards migration: add tracking columns
+            for col_sql in [
+                "ALTER TABLE cashback_rewards ADD COLUMN IF NOT EXISTS email_sent BOOLEAN DEFAULT FALSE",
+                "ALTER TABLE cashback_rewards ADD COLUMN IF NOT EXISTS reminder_sent_at TIMESTAMP",
+            ]:
+                try: cur.execute(col_sql)
+                except Exception: pass
             db.commit(); cur.close(); db.close()
-            logger.info("Chat tables ready (cashback_settings seeded)")
+            logger.info("Chat tables ready (cashback_settings seeded, cashback columns migrated)")
         except Exception as e:
             logger.error(f"Migration: {e}")
             try: db.close()
