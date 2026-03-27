@@ -3771,8 +3771,8 @@ async def bis_dashboard(request: Request):
 
         # Recent 10
         cur.execute("""
-            SELECT email, product_title, product_handle, subscribed_at
-            FROM bis_subscriptions WHERE status='active'
+            SELECT email, product_title, product_handle, subscribed_at, status
+            FROM bis_subscriptions
             ORDER BY subscribed_at DESC LIMIT 10
         """)
         recent = cur.fetchall()
@@ -4034,8 +4034,10 @@ PlanèteBeauty — planetebeauty.com
 @app.get("/api/bis/smtp-status")
 async def bis_smtp_status(request: Request):
     """Check SMTP configuration status."""
+    configured = bool(SMTP_HOST and SMTP_USER and SMTP_FROM_EMAIL)
     return {
-        "configured": bool(SMTP_HOST and SMTP_USER and SMTP_FROM_EMAIL),
+        "status": "ok" if configured else "not_configured",
+        "configured": configured,
         "host": SMTP_HOST or "(not set)",
         "port": SMTP_PORT,
         "from": f"{SMTP_FROM_NAME} <{SMTP_FROM_EMAIL}>" if SMTP_FROM_EMAIL else "(not set)",
