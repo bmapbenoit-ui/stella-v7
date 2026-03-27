@@ -329,8 +329,10 @@ async def startup():
                       args=["tryme-expire", "/api/cron/tryme-expire"])
     scheduler.add_job(_run_cron, 'interval', hours=6, id='trustpilot_scan',
                       args=["trustpilot-scan", "/api/cron/trustpilot-scan"])
+    scheduler.add_job(_run_cron, 'cron', hour=9, minute=15, id='cashback_reminder',
+                      args=["cashback-reminder", "/api/cron/cashback-reminder"])
     scheduler.start()
-    logger.info("Scheduler started: stock(1h), tags(3h15), nouveautes(3h45), audit(lun 7h), tryme(4h30), trustpilot(6h)")
+    logger.info("Scheduler started: stock(1h), tags(3h15), nouveautes(3h45), audit(lun 7h), tryme(4h30), trustpilot(6h), cashback-reminder(9h15)")
 
 # ══════════════════════ 3-LAYER MEMORY ══════════════════════
 def save_to_redis(conv_id, role, content):
@@ -2091,6 +2093,127 @@ async def cron_trustpilot_scan(request: Request):
     return {"status": "ok", **results}
 
 
+# ══════════════════════ CRON: CASHBACK REMINDER ══════════════════════
+
+@app.post("/api/cron/cashback-reminder")
+async def cron_cashback_reminder(request: Request):
+    """Daily 9h15: send reminder email 2 days before cashback expiration."""
+    db = get_db()
+    if not db:
+        return {"ok": False, "error": "no db"}
+    sent = 0
+    try:
+        cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        # Find active cashback expiring within 2 days, not yet reminded
+        cur.execute("""SELECT id, customer_email, order_name, cashback_amount, expires_at
+                      FROM cashback_rewards
+                      WHERE status = 'active'
+                      AND reminder_sent_at IS NULL
+                      AND expires_at > NOW()
+                      AND expires_at < NOW() + INTERVAL '2 days'""")
+        rows = cur.fetchall()
+        cur.close(); db.close()
+    except Exception as e:
+        try: db.close()
+        except: pass
+        logger.error(f"Cashback reminder query: {e}")
+        return {"ok": False, "error": str(e)}
+
+    for row in rows:
+        email = row["customer_email"]
+        if not email:
+            continue
+        ok = await _send_cashback_reminder_email(
+            email, float(row["cashback_amount"]),
+            str(row["expires_at"])[:10], row["order_name"]
+        )
+        if ok:
+            db2 = get_db()
+            if db2:
+                try:
+                    c2 = db2.cursor()
+                    c2.execute("UPDATE cashback_rewards SET reminder_sent_at = NOW() WHERE id = %s", (row["id"],))
+                    db2.commit(); c2.close(); db2.close()
+                    sent += 1
+                except Exception:
+                    try: db2.close()
+                    except: pass
+
+    log_activity("cashback_reminder", f"Relance cashback: {sent} emails envoyes sur {len(rows)} eligibles",
+                 {"sent": sent, "total": len(rows)}, source="cron")
+    return {"ok": True, "sent": sent, "eligible": len(rows)}
+
+
+async def _send_cashback_reminder_email(to_email: str, amount: float, expires_date: str, order_name: str):
+    """Send reminder email 2 days before cashback store credit expires."""
+    if not SMTP_HOST or not SMTP_USER or not SMTP_FROM_EMAIL:
+        return False
+
+    formatted = f"{amount:.2f}".replace(".", ",")
+    try:
+        from datetime import datetime as dt
+        exp_display = dt.strptime(expires_date[:10], "%Y-%m-%d").strftime("%d/%m/%Y")
+    except Exception:
+        exp_display = expires_date[:10]
+
+    msg = MIMEMultipart("alternative")
+    msg["From"] = f"{SMTP_FROM_NAME} <{SMTP_FROM_EMAIL}>"
+    msg["To"] = to_email
+    msg["Subject"] = f"Votre credit de {formatted} € expire bientot !"
+
+    text_body = f"""Rappel : votre credit magasin de {formatted} EUR (commande {order_name}) expire le {exp_display}.
+
+Utilisez-le sur votre prochaine commande des 70 EUR sur planetebeauty.com.
+
+PlaneteBeauty — planetebeauty.com
+"""
+
+    html_body = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"></head>
+<body style="margin:0;padding:0;font-family:Arial,Helvetica,sans-serif;background:#f8f6f3;">
+<div style="max-width:560px;margin:20px auto;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,0.08);">
+  <div style="background:#1a1a2e;padding:28px 32px;text-align:center;">
+    <h1 style="color:#d4af37;margin:0;font-size:22px;letter-spacing:1px;">PLAN&Egrave;TEBEAUTY</h1>
+  </div>
+  <div style="padding:32px;">
+    <h2 style="color:#c0392b;margin:0 0 16px;font-size:20px;">Votre cr&eacute;dit expire bient&ocirc;t !</h2>
+    <p style="color:#444;line-height:1.6;margin:0 0 20px;">
+      Le cr&eacute;dit magasin de votre commande <strong>{order_name}</strong> arrive bient&ocirc;t &agrave; expiration.
+    </p>
+    <div style="background:linear-gradient(135deg,#8e1c1c,#c0392b);border-radius:10px;padding:24px;text-align:center;margin:0 0 20px;">
+      <div style="color:#fff;font-size:36px;font-weight:700;margin:0 0 4px;">{formatted} &euro;</div>
+      <div style="color:#ffcdd2;font-size:13px;">expire le {exp_display}</div>
+    </div>
+    <div style="background:#fff5f5;border:1px solid #ffcdd2;border-radius:8px;padding:16px;margin:0 0 20px;">
+      <p style="margin:0;color:#c0392b;font-size:14px;font-weight:600;">Ne perdez pas votre cr&eacute;dit !</p>
+      <p style="margin:8px 0 0;color:#666;font-size:13px;">Passez commande d'au moins 70 &euro; avant le {exp_display} pour en profiter.</p>
+    </div>
+    <div style="text-align:center;margin:24px 0;">
+      <a href="https://planetebeauty.com" style="display:inline-block;background:#d4af37;color:#1a1a2e;text-decoration:none;padding:12px 32px;border-radius:6px;font-weight:600;font-size:14px;">Utiliser mon cr&eacute;dit</a>
+    </div>
+  </div>
+  <div style="background:#f8f6f3;padding:16px 32px;text-align:center;border-top:1px solid #eee;">
+    <p style="margin:0;color:#999;font-size:11px;">
+      Plan&egrave;teBeauty &mdash; Parfumerie de niche<br>
+      Livraison 24h &middot; Try&amp;Buy &middot; Cashback 5%
+    </p>
+  </div>
+</div>
+</body></html>"""
+
+    msg.attach(MIMEText(text_body, "plain", "utf-8"))
+    msg.attach(MIMEText(html_body, "html", "utf-8"))
+
+    try:
+        await aiosmtplib.send(msg, hostname=SMTP_HOST, port=SMTP_PORT,
+                              username=SMTP_USER, password=SMTP_PASS, use_tls=False, start_tls=True)
+        logger.info(f"Cashback reminder sent to {to_email}: {formatted}€ expires {exp_display}")
+        return True
+    except Exception as e:
+        logger.error(f"Cashback reminder email failed for {to_email}: {e}")
+        return False
+
+
 # ══════════════════════ CRON: STOCK CHECK ══════════════════════
 
 @app.post("/api/cron/stock-check")
@@ -3008,7 +3131,17 @@ async def _process_cashback_inner(body):
                 order_id BIGINT, order_name TEXT, order_subtotal DECIMAL(10,2),
                 store_credit_used DECIMAL(10,2), cashback_base DECIMAL(10,2),
                 cashback_amount DECIMAL(10,2), credit_type TEXT DEFAULT 'store_credit',
-                expires_at TIMESTAMP, created_at TIMESTAMP DEFAULT NOW(), status TEXT DEFAULT 'active')""")
+                expires_at TIMESTAMP, created_at TIMESTAMP DEFAULT NOW(), status TEXT DEFAULT 'active',
+                email_sent BOOLEAN DEFAULT FALSE, reminder_sent_at TIMESTAMP)""")
+            # Add columns if missing (for existing tables)
+            for col_sql in [
+                "ALTER TABLE cashback_rewards ADD COLUMN IF NOT EXISTS email_sent BOOLEAN DEFAULT FALSE",
+                "ALTER TABLE cashback_rewards ADD COLUMN IF NOT EXISTS reminder_sent_at TIMESTAMP",
+            ]:
+                try:
+                    cur.execute(col_sql)
+                except Exception:
+                    pass
             cur.execute("""INSERT INTO cashback_rewards (customer_id, customer_email, order_id, order_name,
                 order_subtotal, store_credit_used, cashback_base, cashback_amount, expires_at)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
@@ -3027,10 +3160,21 @@ async def _process_cashback_inner(body):
                  source="webhook", customer_email=customer_email, order_name=order_name)
 
     # 5. Send cashback notification email to customer
+    email_ok = False
     if customer_email:
-        await _send_cashback_email(customer_email, cashback_amount, expires_at, order_name)
+        email_ok = await _send_cashback_email(customer_email, cashback_amount, expires_at, order_name)
+        if email_ok:
+            db2 = get_db()
+            if db2:
+                try:
+                    c2 = db2.cursor()
+                    c2.execute("UPDATE cashback_rewards SET email_sent = TRUE WHERE order_id = %s", (order_id,))
+                    db2.commit(); c2.close(); db2.close()
+                except Exception:
+                    try: db2.close()
+                    except: pass
 
-    return {"ok": True, "cashback": cashback_amount, "base": cashback_base, "storeCreditUsed": store_credit_used}
+    return {"ok": True, "cashback": cashback_amount, "base": cashback_base, "storeCreditUsed": store_credit_used, "email_sent": email_ok}
 
 
 async def _send_cashback_email(to_email: str, amount: float, expires_at: str, order_name: str):
@@ -3189,22 +3333,51 @@ async def webhook_refund_created(request: Request):
 
 @app.get("/api/cashback/dashboard")
 async def cashback_dashboard():
-    """Dashboard data for cashback tab in STELLA V8. Uses store credit (not discount codes)."""
+    """Dashboard data for cashback tab in STELLA V8."""
     db = get_db()
     cb_settings = get_cashback_settings()
-    stats = {"total_rewarded": 0, "total_amount": 0, "total_used": 0, "min_use": cb_settings["min_order_use"], "recent": []}
+    stats = {
+        "total_rewarded": 0, "total_amount": 0, "total_used": 0, "total_revoked": 0,
+        "min_use": cb_settings["min_order_use"],
+        "recent": [], "pending": [], "expiring_soon": []
+    }
     if db:
         try:
             cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            # Global stats
             cur.execute("SELECT COUNT(*) as c, COALESCE(SUM(cashback_amount),0) as total FROM cashback_rewards")
             row = cur.fetchone()
             stats["total_rewarded"] = row["c"]
             stats["total_amount"] = float(row["total"])
             cur.execute("SELECT COUNT(*) as c FROM cashback_rewards WHERE status='used'")
             stats["total_used"] = cur.fetchone()["c"]
-            cur.execute("""SELECT customer_email, order_name, cashback_amount, discount_code, status, created_at
-                          FROM cashback_rewards ORDER BY created_at DESC LIMIT 20""")
+            cur.execute("SELECT COUNT(*) as c FROM cashback_rewards WHERE status='revoked'")
+            stats["total_revoked"] = cur.fetchone()["c"]
+
+            # Recent cashback flow (last 30)
+            cur.execute("""SELECT customer_email, order_name, cashback_base, cashback_amount,
+                          store_credit_used, status, expires_at, created_at,
+                          COALESCE(email_sent, false) as email_sent,
+                          reminder_sent_at
+                          FROM cashback_rewards ORDER BY created_at DESC LIMIT 30""")
             stats["recent"] = [dict(r) for r in cur.fetchall()]
+
+            # Pending (active, not expired, not used)
+            cur.execute("""SELECT customer_email, order_name, cashback_amount, expires_at, created_at
+                          FROM cashback_rewards
+                          WHERE status = 'active' AND expires_at > NOW()
+                          ORDER BY expires_at ASC""")
+            stats["pending"] = [dict(r) for r in cur.fetchall()]
+
+            # Expiring within 7 days
+            cur.execute("""SELECT customer_email, order_name, cashback_amount, expires_at,
+                          COALESCE(reminder_sent_at IS NOT NULL, false) as reminder_sent
+                          FROM cashback_rewards
+                          WHERE status = 'active' AND expires_at > NOW()
+                          AND expires_at < NOW() + INTERVAL '7 days'
+                          ORDER BY expires_at ASC""")
+            stats["expiring_soon"] = [dict(r) for r in cur.fetchall()]
+
             cur.close(); db.close()
         except Exception as e:
             try: db.close()

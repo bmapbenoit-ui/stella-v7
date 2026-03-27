@@ -92,8 +92,16 @@
     </div>
   </div>
   <div class="card">
-    <div class="card-header"><span>Derniers cashbacks</span></div>
-    <div class="card-body"><table class="data-table" id="cb-table"><thead><tr><th>Client</th><th>Commande</th><th>Montant</th><th>Date</th></tr></thead><tbody></tbody></table></div>
+    <div class="card-header"><span>&#9888; Expirent bientot (7 jours)</span><span class="badge-pill badge-error" id="cb-expiring-count">0</span></div>
+    <div class="card-body"><table class="data-table" id="cb-expiring-table"><thead><tr><th>Client</th><th>Commande</th><th>Montant</th><th>Expire le</th><th>Relance</th></tr></thead><tbody></tbody></table></div>
+  </div>
+  <div class="card">
+    <div class="card-header"><span>&#128176; Encours actifs</span><span class="badge-pill badge-gold" id="cb-pending-count">0</span></div>
+    <div class="card-body"><table class="data-table" id="cb-pending-table"><thead><tr><th>Client</th><th>Commande</th><th>Montant</th><th>Expire le</th></tr></thead><tbody></tbody></table></div>
+  </div>
+  <div class="card">
+    <div class="card-header"><span>&#128203; Flux cashback (30 derniers)</span></div>
+    <div class="card-body"><table class="data-table" id="cb-table"><thead><tr><th>Client</th><th>Commande</th><th>Base</th><th>Cashback</th><th>Status</th><th>Email</th><th>Date</th></tr></thead><tbody></tbody></table></div>
   </div>
 </section>
 

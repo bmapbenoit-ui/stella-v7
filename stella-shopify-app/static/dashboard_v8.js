@@ -199,17 +199,62 @@ const STELLA = {
         STELLA.api('/api/cashback/settings')
       ]);
       if (dashboard) {
+        const pendingCount = (dashboard.pending || []).length;
+        const pendingAmount = (dashboard.pending || []).reduce((s, r) => s + parseFloat(r.cashback_amount || 0), 0);
         document.getElementById('cb-kpis').innerHTML = `
-          <div class="kpi-card"><div class="kpi-value gold">${dashboard.total_credited || 0}</div><div class="kpi-label">Credits generes</div></div>
+          <div class="kpi-card"><div class="kpi-value gold">${dashboard.total_rewarded || 0}</div><div class="kpi-label">Credits generes</div></div>
           <div class="kpi-card"><div class="kpi-value">${STELLA.eur(dashboard.total_amount || 0)}</div><div class="kpi-label">Montant total</div></div>
-          <div class="kpi-card"><div class="kpi-value">${dashboard.credits_used || 0}</div><div class="kpi-label">Credits utilises</div></div>
-          <div class="kpi-card"><div class="kpi-value">${dashboard.active_customers || 0}</div><div class="kpi-label">Clients actifs</div></div>
+          <div class="kpi-card"><div class="kpi-value">${pendingCount}</div><div class="kpi-label">Encours actifs</div></div>
+          <div class="kpi-card"><div class="kpi-value">${STELLA.eur(pendingAmount)}</div><div class="kpi-label">Encours EUR</div></div>
         `;
-        const tbody = document.querySelector('#cb-table tbody');
+
+        // Expiring soon table
+        const expiring = dashboard.expiring_soon || [];
+        document.getElementById('cb-expiring-count').textContent = expiring.length;
+        const expTbody = document.querySelector('#cb-expiring-table tbody');
+        expTbody.innerHTML = expiring.length ? expiring.map(r => `
+          <tr>
+            <td>${r.customer_email || '--'}</td>
+            <td>${r.order_name || '--'}</td>
+            <td style="font-weight:600;color:var(--gold)">${STELLA.eur(r.cashback_amount)}</td>
+            <td style="color:var(--error)">${STELLA.shortTime(r.expires_at)}</td>
+            <td>${r.reminder_sent ? '<span style="color:var(--success)">Envoye</span>' : '<span style="color:var(--text-muted)">En attente</span>'}</td>
+          </tr>
+        `).join('') : '<tr><td colspan="5" style="text-align:center;color:var(--text-muted)">Aucun cashback a expiration proche</td></tr>';
+
+        // Pending table
+        const pending = dashboard.pending || [];
+        document.getElementById('cb-pending-count').textContent = pendingCount;
+        const pendTbody = document.querySelector('#cb-pending-table tbody');
+        pendTbody.innerHTML = pending.length ? pending.map(r => `
+          <tr>
+            <td>${r.customer_email || '--'}</td>
+            <td>${r.order_name || '--'}</td>
+            <td>${STELLA.eur(r.cashback_amount)}</td>
+            <td>${STELLA.shortTime(r.expires_at)}</td>
+          </tr>
+        `).join('') : '<tr><td colspan="4" style="text-align:center;color:var(--text-muted)">Aucun encours</td></tr>';
+
+        // Flow table (recent with full details)
         const recent = dashboard.recent || [];
-        tbody.innerHTML = recent.length ? recent.map(r => `
-          <tr><td>${r.customer_email || '--'}</td><td>${r.order_name || '--'}</td><td>${STELLA.eur(r.cashback_amount)}</td><td>${STELLA.shortTime(r.created_at)}</td></tr>
-        `).join('') : '<tr><td colspan="4" style="text-align:center;color:var(--text-muted)">Aucun cashback</td></tr>';
+        const flowTbody = document.querySelector('#cb-table tbody');
+        flowTbody.innerHTML = recent.length ? recent.map(r => {
+          const statusBadge = r.status === 'active' ? '<span style="color:var(--success)">Actif</span>'
+            : r.status === 'revoked' ? '<span style="color:var(--error)">Annule</span>'
+            : r.status === 'used' ? '<span style="color:var(--text-muted)">Utilise</span>'
+            : r.status || '--';
+          const emailIcon = r.email_sent ? '\u2709\uFE0F' : '\u274C';
+          const reminderInfo = r.reminder_sent_at ? ' \u23F0' : '';
+          return `<tr>
+            <td>${r.customer_email || '--'}</td>
+            <td>${r.order_name || '--'}</td>
+            <td>${STELLA.eur(r.cashback_base)}</td>
+            <td style="font-weight:600">${STELLA.eur(r.cashback_amount)}</td>
+            <td>${statusBadge}</td>
+            <td>${emailIcon}${reminderInfo}</td>
+            <td>${STELLA.shortTime(r.created_at)}</td>
+          </tr>`;
+        }).join('') : '<tr><td colspan="7" style="text-align:center;color:var(--text-muted)">Aucun cashback</td></tr>';
       }
       if (settings) {
         document.getElementById('cb-rate').value = (settings.cashback_rate || 0.05) * 100;
