@@ -3025,7 +3025,92 @@ async def _process_cashback_inner(body):
     log_activity("cashback_credit", f"Cashback {cashback_amount}€ crédité",
                  {"cashback_amount": cashback_amount, "base": cashback_base, "store_credit_used": store_credit_used, "customer_id": customer_id},
                  source="webhook", customer_email=customer_email, order_name=order_name)
+
+    # 5. Send cashback notification email to customer
+    if customer_email:
+        await _send_cashback_email(customer_email, cashback_amount, expires_at, order_name)
+
     return {"ok": True, "cashback": cashback_amount, "base": cashback_base, "storeCreditUsed": store_credit_used}
+
+
+async def _send_cashback_email(to_email: str, amount: float, expires_at: str, order_name: str):
+    """Send cashback notification email to customer after store credit is applied."""
+    if not SMTP_HOST or not SMTP_USER or not SMTP_FROM_EMAIL:
+        logger.warning("Cashback email: SMTP not configured")
+        return False
+
+    formatted = f"{amount:.2f}".replace(".", ",")
+    # Parse expiry date for display
+    try:
+        from datetime import datetime as dt
+        exp_date = dt.strptime(expires_at[:10], "%Y-%m-%d").strftime("%d/%m/%Y")
+    except Exception:
+        exp_date = expires_at[:10]
+
+    msg = MIMEMultipart("alternative")
+    msg["From"] = f"{SMTP_FROM_NAME} <{SMTP_FROM_EMAIL}>"
+    msg["To"] = to_email
+    msg["Subject"] = f"Votre cashback de {formatted} € est disponible !"
+
+    text_body = f"""Merci pour votre commande {order_name} !
+
+Votre cashback de {formatted} EUR a ete credite sur votre compte PlaneteBeauty.
+
+Ce credit magasin est utilisable sur votre prochaine commande des 70 EUR d'achat.
+Il est valable jusqu'au {exp_date}.
+
+Pour l'utiliser : passez une commande, le credit apparaitra automatiquement dans les moyens de paiement au checkout.
+
+Bonne decouverte olfactive !
+PlaneteBeauty — planetebeauty.com
+"""
+
+    html_body = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"></head>
+<body style="margin:0;padding:0;font-family:Arial,Helvetica,sans-serif;background:#f8f6f3;">
+<div style="max-width:560px;margin:20px auto;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,0.08);">
+  <div style="background:#1a1a2e;padding:28px 32px;text-align:center;">
+    <h1 style="color:#d4af37;margin:0;font-size:22px;letter-spacing:1px;">PLAN&Egrave;TEBEAUTY</h1>
+  </div>
+  <div style="padding:32px;">
+    <h2 style="color:#1a1a2e;margin:0 0 16px;font-size:20px;">Votre cashback est disponible !</h2>
+    <p style="color:#444;line-height:1.6;margin:0 0 20px;">
+      Merci pour votre commande <strong>{order_name}</strong>. En tant que cliente fid&egrave;le, nous avons cr&eacute;dit&eacute; votre compte :
+    </p>
+    <div style="background:linear-gradient(135deg,#1a1a2e,#2d2d4e);border-radius:10px;padding:24px;text-align:center;margin:0 0 20px;">
+      <div style="color:#d4af37;font-size:36px;font-weight:700;margin:0 0 4px;">{formatted} &euro;</div>
+      <div style="color:#aaa;font-size:13px;">de cr&eacute;dit magasin</div>
+    </div>
+    <div style="background:#faf8f5;border-radius:8px;padding:16px;margin:0 0 20px;">
+      <p style="margin:0 0 8px;color:#666;font-size:14px;"><strong>Comment l'utiliser ?</strong></p>
+      <p style="margin:0 0 4px;color:#666;font-size:13px;">&bull; Passez une commande d'au moins 70 &euro;</p>
+      <p style="margin:0 0 4px;color:#666;font-size:13px;">&bull; Au checkout, s&eacute;lectionnez &laquo; Cr&eacute;dit magasin &raquo;</p>
+      <p style="margin:0;color:#666;font-size:13px;">&bull; Valable jusqu'au <strong>{exp_date}</strong></p>
+    </div>
+    <div style="text-align:center;margin:24px 0;">
+      <a href="https://planetebeauty.com" style="display:inline-block;background:#d4af37;color:#1a1a2e;text-decoration:none;padding:12px 32px;border-radius:6px;font-weight:600;font-size:14px;">Decouvrir nos nouveautes</a>
+    </div>
+  </div>
+  <div style="background:#f8f6f3;padding:16px 32px;text-align:center;border-top:1px solid #eee;">
+    <p style="margin:0;color:#999;font-size:11px;">
+      Plan&egrave;teBeauty &mdash; Parfumerie de niche<br>
+      Livraison 24h &middot; Try&amp;Buy &middot; Cashback 5%
+    </p>
+  </div>
+</div>
+</body></html>"""
+
+    msg.attach(MIMEText(text_body, "plain", "utf-8"))
+    msg.attach(MIMEText(html_body, "html", "utf-8"))
+
+    try:
+        await aiosmtplib.send(msg, hostname=SMTP_HOST, port=SMTP_PORT,
+                              username=SMTP_USER, password=SMTP_PASS, use_tls=False, start_tls=True)
+        logger.info(f"Cashback email sent to {to_email}: {formatted}€ (order {order_name})")
+        return True
+    except Exception as e:
+        logger.error(f"Cashback email failed for {to_email}: {e}")
+        return False
 
 
 @app.post("/api/webhook/refund-created")
