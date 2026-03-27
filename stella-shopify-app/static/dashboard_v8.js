@@ -301,7 +301,7 @@ const STELLA = {
     async regenerate() {
       STELLA.showToast('Regeneration en cours...', 'success');
       const r = await STELLA.apiPost('/api/quiz/regenerate', {});
-      STELLA.showToast(r && r.ok ? 'Quiz regenere' : 'Erreur', r && r.ok ? 'success' : 'error');
+      STELLA.showToast(r && r.success ? `Quiz regenere: ${r.count} produits` : 'Erreur', r && r.success ? 'success' : 'error');
       this.load();
     }
   },

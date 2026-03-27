@@ -2416,12 +2416,19 @@ async def quiz_stats():
             "completes": int(rc.get(f"quiz:quiz_complete:{d}") or 0),
             "atc": int(rc.get(f"quiz:quiz_atc:{d}") or 0)
         })
+    # Regen info
+    last_regen = rc.get("quiz:regen:last")
+    regen_count = rc.get("quiz:regen:count")
+    last_regen_str = datetime.utcfromtimestamp(int(last_regen)).strftime('%d/%m/%Y %H:%M') if last_regen else "Jamais"
+
     return {
         "today": {"views": views_today, "starts": starts_today, "completes": completes_today, "atc": atc_today},
         "total": {"views": views_total, "starts": starts_total, "completes": completes_total, "atc": atc_total},
         "conversion_rate": conv_rate,
         "atc_rate": atc_rate,
-        "daily": daily
+        "daily": daily,
+        "last_regenerated": last_regen_str,
+        "products_count": int(regen_count) if regen_count else 0
     }
 
 @app.post("/api/quiz/regenerate")
@@ -2514,6 +2521,13 @@ async def quiz_regenerate():
                 return {"success": False, "error": f"Upload failed: {asset_resp.status_code}"}
 
         logger.info(f"Quiz data regenerated: {len(all_products)} products")
+        # Store regen info in Redis for dashboard
+        rc = get_redis()
+        if rc:
+            rc.set("quiz:regen:last", int(time.time()), ex=86400*90)
+            rc.set("quiz:regen:count", len(all_products), ex=86400*90)
+        log_activity("quiz_regen", f"Quiz-data.json régénéré: {len(all_products)} produits",
+                     {"count": len(all_products), "size_kb": round(len(quiz_json) / 1024, 1)}, source="api")
         return {"success": True, "count": len(all_products), "size_kb": round(len(quiz_json) / 1024, 1)}
     except Exception as e:
         logger.error(f"Quiz regenerate error: {e}")
