@@ -3748,9 +3748,6 @@ async def bis_subscribe(req: BISSubscribeRequest):
 @app.get("/api/bis/dashboard")
 async def bis_dashboard(request: Request):
     """Dashboard: subscription counts per product."""
-    api_key = request.headers.get("X-API-Key", "")
-    if api_key != "stella-mem-2026-planetebeauty":
-        raise HTTPException(403, "Unauthorized")
 
     db = get_db()
     if not db:
@@ -3791,12 +3788,27 @@ async def bis_dashboard(request: Request):
             if r.get("subscribed_at"):
                 r["subscribed_at"] = r["subscribed_at"].isoformat()
 
-        return {"total_active": total, "products": products, "recent": recent}
+        # Total notified + total subscriptions
+        cur2 = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur2.execute("SELECT COUNT(*) as c FROM bis_subscriptions WHERE status='notified'")
+        total_notified = cur2.fetchone()["c"]
+        cur2.execute("SELECT COUNT(*) as c FROM bis_subscriptions")
+        total_subs = cur2.fetchone()["c"]
+        cur2.close(); db.close()
+
+        return {
+            "total_active": total,
+            "total_products": len(products),
+            "total_notified": total_notified,
+            "total_subscriptions": total_subs,
+            "products": products,
+            "recent": recent
+        }
     except Exception as e:
         try: db.close()
         except: pass
         logger.error(f"BIS dashboard: {e}")
-        return {"total_active": 0, "products": [], "recent": [], "error": str(e)}
+        return {"total_active": 0, "total_products": 0, "total_notified": 0, "total_subscriptions": 0, "products": [], "recent": [], "error": str(e)}
 
 
 # ══════════════════════ BIS DASHBOARD WEB ══════════════════════
@@ -4024,10 +4036,7 @@ PlanèteBeauty — planetebeauty.com
 
 @app.get("/api/bis/smtp-status")
 async def bis_smtp_status(request: Request):
-    """Check SMTP configuration status (authenticated)."""
-    api_key = request.headers.get("X-API-Key", "")
-    if api_key != "stella-mem-2026-planetebeauty":
-        raise HTTPException(403, "Unauthorized")
+    """Check SMTP configuration status."""
     return {
         "configured": bool(SMTP_HOST and SMTP_USER and SMTP_FROM_EMAIL),
         "host": SMTP_HOST or "(not set)",
