@@ -37,6 +37,7 @@
   <button class="tab-btn" data-tab="reviews"><span class="tab-icon">&#11088;</span> Avis</button>
   <button class="tab-btn" data-tab="catalogue"><span class="tab-icon">&#128218;</span> Catalogue</button>
   <button class="tab-btn" data-tab="system"><span class="tab-icon">&#9881;</span> Systeme</button>
+  <button class="tab-btn" data-tab="promo"><span class="tab-icon">&#127915;</span> Codes Promo</button>
   <button class="tab-btn" data-tab="shipping"><span class="tab-icon">&#128666;</span> Livraison</button>
 </nav>
 
@@ -182,7 +183,40 @@
 </section>
 
 <!-- ═══════════════════════════════════════════════════════════════ -->
-<!-- TAB 10: LIVRAISON -->
+<!-- TAB 10: CODES PROMO -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<section class="tab-panel" id="panel-promo">
+  <div class="card">
+    <div class="card-header">
+      <span>&#127915; Codes promo actifs</span>
+      <button class="btn-gold" onclick="STELLA.promo.addCode()" style="font-size:0.75rem;padding:4px 12px">+ Ajouter un code</button>
+    </div>
+    <div class="card-body">
+      <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:16px">
+        Les codes promo sont affiches dans le panier. Le client clique pour activer. Try Me, cadeaux et vendors exclus sont automatiquement ignores.
+        Les codes ne se cumulent pas avec les paliers automatiques.
+      </p>
+      <table class="data-table" id="promo-table">
+        <thead><tr><th>Code</th><th>Reduction</th><th>Min panier</th><th>Message</th><th>Actions</th></tr></thead>
+        <tbody id="promo-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-header"><span>&#128683; Vendors exclus</span></div>
+    <div class="card-body">
+      <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:8px">Les produits de ces marques ne recevront aucune reduction par code promo.</p>
+      <input type="text" class="form-input" id="promo-excluded-vendors" placeholder="Creed, Roja Parfums, Clive Christian" style="width:100%">
+      <small style="color:var(--text-muted)">Separes par des virgules</small>
+    </div>
+  </div>
+  <div style="padding:0 16px 16px">
+    <button class="btn-gold" onclick="STELLA.promo.save()">Sauvegarder les codes promo</button>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- TAB 11: LIVRAISON -->
 <!-- ═══════════════════════════════════════════════════════════════ -->
 <section class="tab-panel" id="panel-shipping">
   <div class="card">

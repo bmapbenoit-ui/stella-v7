@@ -430,7 +430,83 @@ const STELLA = {
   },
 
   // ═══════════════════════════════════════════════════════════════
-  // TAB 10: LIVRAISON
+  // TAB 10: CODES PROMO
+  // ═══════════════════════════════════════════════════════════════
+  promo: {
+    _config: null,
+    async load() {
+      const data = await STELLA.api('/api/promo/settings');
+      if (data) {
+        this._config = data;
+        this.render();
+      }
+    },
+    render() {
+      const codes = this._config?.codes || {};
+      const vendors = this._config?.excludedVendors || [];
+      const tbody = document.getElementById('promo-tbody');
+      const entries = Object.entries(codes);
+      tbody.innerHTML = entries.length ? entries.map(([name, r]) => `
+        <tr>
+          <td><strong style="color:var(--gold)">${name}</strong></td>
+          <td>-${r.percent}%</td>
+          <td>${r.minSubtotal}\u20AC+</td>
+          <td style="font-size:0.8rem">${r.message || ''}</td>
+          <td>
+            <button onclick="STELLA.promo.editCode('${name}')" style="background:none;border:none;cursor:pointer;font-size:0.85rem">\u270F\uFE0F</button>
+            <button onclick="STELLA.promo.deleteCode('${name}')" style="background:none;border:none;cursor:pointer;font-size:0.85rem">\u274C</button>
+          </td>
+        </tr>
+      `).join('') : '<tr><td colspan="5" style="text-align:center;color:var(--text-muted)">Aucun code</td></tr>';
+      document.getElementById('promo-excluded-vendors').value = vendors.join(', ');
+    },
+    addCode() {
+      const name = prompt('Nom du code (ex: PB580):');
+      if (!name) return;
+      const upper = name.toUpperCase().trim();
+      const percent = parseFloat(prompt('Pourcentage de reduction (ex: 5):'));
+      const minSubtotal = parseFloat(prompt('Montant minimum du panier (ex: 80):'));
+      if (!percent || !minSubtotal) return STELLA.showToast('Valeurs invalides', 'error');
+      const message = `-${percent}% avec le code ${upper}`;
+      if (!this._config) this._config = {codes: {}, excludedVendors: []};
+      this._config.codes[upper] = {percent, minSubtotal, message};
+      this.render();
+      STELLA.showToast(`Code ${upper} ajoute (non sauvegarde)`, 'success');
+    },
+    editCode(name) {
+      const rule = this._config?.codes?.[name];
+      if (!rule) return;
+      const percent = parseFloat(prompt(`Nouveau % pour ${name} (actuel: ${rule.percent}):`, rule.percent));
+      const minSubtotal = parseFloat(prompt(`Nouveau min panier pour ${name} (actuel: ${rule.minSubtotal}):`, rule.minSubtotal));
+      if (!percent || !minSubtotal) return;
+      rule.percent = percent;
+      rule.minSubtotal = minSubtotal;
+      rule.message = `-${percent}% avec le code ${name}`;
+      this.render();
+      STELLA.showToast(`Code ${name} modifie (non sauvegarde)`, 'success');
+    },
+    deleteCode(name) {
+      if (!confirm(`Supprimer le code ${name} ?`)) return;
+      delete this._config.codes[name];
+      this.render();
+      STELLA.showToast(`Code ${name} supprime (non sauvegarde)`, 'success');
+    },
+    async save() {
+      const vendorsRaw = document.getElementById('promo-excluded-vendors').value;
+      const excludedVendors = vendorsRaw.split(',').map(v => v.trim()).filter(Boolean);
+      this._config.excludedVendors = excludedVendors;
+      STELLA.showToast('Sauvegarde en cours...', 'success');
+      const r = await STELLA.apiPost('/api/promo/settings', this._config);
+      if (r && r.success) {
+        STELLA.showToast(`${r.codes_count} codes promo sauvegardes`, 'success');
+      } else {
+        STELLA.showToast('Erreur sauvegarde', 'error');
+      }
+    }
+  },
+
+  // ═══════════════════════════════════════════════════════════════
+  // TAB 11: LIVRAISON
   // ═══════════════════════════════════════════════════════════════
   shipping: {
     async load() {

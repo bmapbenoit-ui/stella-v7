@@ -3289,6 +3289,90 @@ async def save_shipping_settings(request: Request):
         return {"success": False, "error": str(e)}
 
 
+# ══════════════════════ PROMO CODES CONFIG ══════════════════════
+
+PROMO_DISCOUNT_ID = "gid://shopify/DiscountAutomaticNode/1880205492566"
+PROMO_MF_NS = "planete-beaute"
+PROMO_MF_KEY = "discount-codes-config"
+
+DEFAULT_PROMO_CONFIG = {
+    "codes": {
+        "PB580": {"percent": 5.0, "minSubtotal": 80.0, "message": "-5% avec le code PB580"},
+        "PB10180": {"percent": 10.0, "minSubtotal": 180.0, "message": "-10% avec le code PB10180"},
+        "PB15300": {"percent": 15.0, "minSubtotal": 300.0, "message": "-15% avec le code PB15300"},
+        "PB20500": {"percent": 20.0, "minSubtotal": 500.0, "message": "-20% avec le code PB20500"},
+    },
+    "excludedVendors": ["Creed", "Roja Parfums", "Clive Christian"]
+}
+
+
+@app.get("/api/promo/settings")
+async def get_promo_settings():
+    """Get promo codes config from Shopify metafield."""
+    try:
+        query = f"""{{ discountNode(id: "{PROMO_DISCOUNT_ID}") {{
+            metafield(namespace: "{PROMO_MF_NS}", key: "{PROMO_MF_KEY}") {{ value }}
+        }} }}"""
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.post(SHOPIFY_GRAPHQL_URL, json={"query": query},
+                           headers={"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"})
+            mf = r.json().get("data", {}).get("discountNode", {}).get("metafield")
+            if mf and mf.get("value"):
+                return json.loads(mf["value"])
+    except Exception as e:
+        logger.error(f"Promo settings read error: {e}")
+    return DEFAULT_PROMO_CONFIG
+
+
+@app.post("/api/promo/settings")
+async def save_promo_settings(request: Request):
+    """Save promo codes config to Shopify metafield."""
+    body = await request.json()
+    codes = body.get("codes", {})
+    excluded_vendors = body.get("excludedVendors", [])
+
+    if not codes:
+        raise HTTPException(400, "Au moins un code requis")
+
+    # Validate each code
+    for code_name, rule in codes.items():
+        if not rule.get("percent") or not rule.get("minSubtotal"):
+            raise HTTPException(400, f"Code {code_name}: percent et minSubtotal requis")
+
+    config = {"codes": codes, "excludedVendors": excluded_vendors}
+    config_json = json.dumps(config)
+
+    try:
+        mutation = """mutation($metafields: [MetafieldsSetInput!]!) {
+          metafieldsSet(metafields: $metafields) {
+            metafields { id namespace key }
+            userErrors { field message }
+          }
+        }"""
+        variables = {"metafields": [{
+            "ownerId": PROMO_DISCOUNT_ID,
+            "namespace": PROMO_MF_NS,
+            "key": PROMO_MF_KEY,
+            "type": "json",
+            "value": config_json,
+        }]}
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.post(SHOPIFY_GRAPHQL_URL, json={"query": mutation, "variables": variables},
+                           headers={"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"})
+            resp = r.json()
+            errors = resp.get("data", {}).get("metafieldsSet", {}).get("userErrors", [])
+            if errors:
+                return {"success": False, "errors": errors}
+
+        code_count = len(codes)
+        log_activity("promo_config", f"Codes promo mis à jour: {code_count} codes actifs",
+                     {"codes": list(codes.keys())}, source="api")
+        return {"success": True, "codes_count": code_count}
+    except Exception as e:
+        logger.error(f"Promo settings save error: {e}")
+        return {"success": False, "error": str(e)}
+
+
 # ══════════════════════ BACK IN STOCK ══════════════════════
 
 @app.post("/api/bis/subscribe")
