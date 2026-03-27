@@ -3777,8 +3777,13 @@ async def bis_dashboard(request: Request):
         """)
         recent = cur.fetchall()
 
-        cur.close()
-        db.close()
+        # Total notified + total subscriptions
+        cur.execute("SELECT COUNT(*) as c FROM bis_subscriptions WHERE status='notified'")
+        total_notified = cur.fetchone()["c"]
+        cur.execute("SELECT COUNT(*) as c FROM bis_subscriptions")
+        total_subs = cur.fetchone()["c"]
+
+        cur.close(); db.close()
 
         # Serialize datetimes
         for p in products:
@@ -3787,14 +3792,6 @@ async def bis_dashboard(request: Request):
         for r in recent:
             if r.get("subscribed_at"):
                 r["subscribed_at"] = r["subscribed_at"].isoformat()
-
-        # Total notified + total subscriptions
-        cur2 = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur2.execute("SELECT COUNT(*) as c FROM bis_subscriptions WHERE status='notified'")
-        total_notified = cur2.fetchone()["c"]
-        cur2.execute("SELECT COUNT(*) as c FROM bis_subscriptions")
-        total_subs = cur2.fetchone()["c"]
-        cur2.close(); db.close()
 
         return {
             "total_active": total,
