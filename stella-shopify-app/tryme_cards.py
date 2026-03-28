@@ -176,98 +176,151 @@ def _clean_product_title(product_title: str) -> str:
     return short
 
 
+# ── Note card backgrounds (matching product page) ──
+TETE_BG = (253, 246, 232)      # warm cream
+TETE_LABEL = (180, 140, 60)    # dark gold
+COEUR_BG = (248, 224, 224)     # soft pink
+COEUR_LABEL = (160, 80, 80)    # dark rose
+FOND_BG = (232, 226, 216)      # warm taupe
+FOND_LABEL = (110, 100, 85)    # dark taupe
+
+NOTE_LEVELS = [
+    {"key": "tete", "sec_key": "tete_sec", "label": "NOTES DE TETE", "bg": TETE_BG, "label_color": TETE_LABEL},
+    {"key": "coeur", "sec_key": "coeur_sec", "label": "NOTES DE COEUR", "bg": COEUR_BG, "label_color": COEUR_LABEL},
+    {"key": "fond", "sec_key": "fond_sec", "label": "NOTES DE FOND", "bg": FOND_BG, "label_color": FOND_LABEL},
+]
+
+
+def _draw_note_card(card: Image.Image, draw: ImageDraw.Draw,
+                     x: int, y: int, w: int, h: int,
+                     bg_color: tuple, label: str, label_color: tuple,
+                     note_name: str, note_img: Optional[Image.Image],
+                     secondary_notes: list):
+    """Draw a note card matching product page style — colored background, circle, pills."""
+    # Rounded rectangle background
+    draw.rounded_rectangle([x, y, x + w, y + h], radius=24, fill=bg_color)
+
+    cx = x + w // 2
+
+    # Label at top
+    font_label = _get_font(22, "regular")
+    lw = _text_width(draw, label, font_label)
+    draw.text((cx - lw // 2, y + 18), label, font=font_label, fill=label_color)
+
+    # Circle with white border
+    circle_r = 110
+    circle_cy = y + 58 + circle_r
+    # White circle border (slightly larger)
+    draw.ellipse([cx - circle_r - 6, circle_cy - circle_r - 6,
+                  cx + circle_r + 6, circle_cy + circle_r + 6],
+                 fill=(255, 255, 255))
+    # Inner circle
+    draw.ellipse([cx - circle_r, circle_cy - circle_r,
+                  cx + circle_r, circle_cy + circle_r],
+                 fill=(250, 248, 244))
+
+    # Paste note image
+    if note_img:
+        img_size = int(circle_r * 1.7)
+        resized = note_img.copy()
+        ratio = min(img_size / resized.width, img_size / resized.height)
+        nw = int(resized.width * ratio)
+        nh = int(resized.height * ratio)
+        resized = resized.resize((nw, nh), Image.LANCZOS)
+        mask = Image.new("L", (nw, nh), 0)
+        mask_draw = ImageDraw.Draw(mask)
+        mask_draw.ellipse([0, 0, nw - 1, nh - 1], fill=255)
+        card.paste(resized, (cx - nw // 2, circle_cy - nh // 2), mask)
+
+    # Note name in serif bold
+    font_name = _get_font(38, "serif-bold")
+    name_w = _text_width(draw, note_name, font_name)
+    name_y = circle_cy + circle_r + 14
+    draw.text((cx - name_w // 2, name_y), note_name, font=font_name, fill=TEXT_COLOR)
+
+    # Secondary notes as pills
+    if secondary_notes:
+        font_pill = _get_font(20, "regular")
+        pill_y = name_y + 48
+        pill_h = 32
+        pill_gap = 10
+        # Calculate total width to center
+        pill_widths = []
+        for s in secondary_notes[:3]:
+            pw = _text_width(draw, s, font_pill) + 24
+            pill_widths.append(pw)
+        total_pw = sum(pill_widths) + pill_gap * (len(pill_widths) - 1)
+        pill_x = cx - total_pw // 2
+
+        for i, s in enumerate(secondary_notes[:3]):
+            pw = pill_widths[i]
+            # Pill background (slightly darker than card bg)
+            pill_bg = tuple(max(0, c - 15) for c in bg_color)
+            draw.rounded_rectangle([pill_x, pill_y, pill_x + pw, pill_y + pill_h],
+                                    radius=pill_h // 2, fill=pill_bg,
+                                    outline=tuple(max(0, c - 30) for c in bg_color), width=1)
+            tw = _text_width(draw, s, font_pill)
+            draw.text((pill_x + (pw - tw) // 2, pill_y + 5), s, font=font_pill, fill=label_color)
+            pill_x += pw + pill_gap
+
+
 # ══════════════════════ RECTO ══════════════════════
 
 def generate_recto(product_title: str, notes: dict, note_images: dict,
                     product_img: Optional[Image.Image] = None) -> Image.Image:
-    """Generate recto: bottle left (45%) + pyramid right (55%)."""
+    """Generate recto: bottle left (45%) + pyramid right (55%) — matching product page design."""
     card = Image.new("RGB", (CARD_W, CARD_H), BG_COLOR)
     draw = ImageDraw.Draw(card)
     short_title = _clean_product_title(product_title)
 
     # ── Header ──
-    _text_center(draw, "PLANETEBEAUTY", 25, _get_font(28, "regular"), ACCENT_COLOR)
-
-    # Title — serif for elegance
-    title_font = _get_font(52, "serif-bold")
-    # Truncate if too long
+    _text_center(draw, "PLANETEBEAUTY", 20, _get_font(24, "regular"), ACCENT_COLOR)
+    title_font = _get_font(48, "serif-bold")
     if _text_width(draw, short_title, title_font) > CARD_W - 80:
-        title_font = _get_font(42, "serif-bold")
-    _text_center(draw, short_title, 70, title_font, TEXT_COLOR)
+        title_font = _get_font(38, "serif-bold")
+    _text_center(draw, short_title, 55, title_font, TEXT_COLOR)
+    draw.line([(80, 120), (CARD_W - 80, 120)], fill=ACCENT_COLOR, width=2)
 
-    # Gold line
-    draw.line([(80, 140), (CARD_W - 80, 140)], fill=ACCENT_COLOR, width=2)
+    # ── Layout: 42% left bottle, 58% right pyramid ──
+    left_w = int(CARD_W * 0.42)
+    right_x = left_w + 20
+    right_w = CARD_W - right_x - 30
 
-    # ── Layout: 45% left bottle, 55% right pyramid ──
-    left_w = int(CARD_W * 0.45)
-    right_x = left_w
-
-    # ── Left: Product bottle (preserve ratio!) ──
+    # ── Left: Product bottle (preserve ratio) ──
     if product_img:
-        max_h = 1500
-        max_w = left_w - 80
+        max_h = 1550
+        max_w = left_w - 60
         img = product_img.copy()
-        # PRESERVE original proportions
         ratio = min(max_w / img.width, max_h / img.height)
         new_w = int(img.width * ratio)
         new_h = int(img.height * ratio)
         img = img.resize((new_w, new_h), Image.LANCZOS)
-        # Center in left column
         px = (left_w - new_w) // 2
-        py = 180 + (max_h - new_h) // 2
+        py = 160 + (max_h - new_h) // 2
         if img.mode == "RGBA":
             card.paste(img, (px, py), img)
         else:
             card.paste(img, (px, py))
 
-    # ── Right: Pyramid olfactive ──
-    pyramid_cx = right_x + (CARD_W - right_x) // 2
-    circle_r = 155  # BIG circles
+    # ── Right: 3 note cards (matching product page) ──
+    card_h = 480
+    gap = 30
+    start_y = 150
 
-    # Pyramid label
-    _text_center(draw, "PYRAMIDE OLFACTIVE", 165, _get_font(24, "regular"), MUTED_COLOR, card_w=(CARD_W - right_x))
-    # Offset to right column center
-    lbl_font = _get_font(24, "regular")
-    lbl_w = _text_width(draw, "PYRAMIDE OLFACTIVE", lbl_font)
-    draw.text((pyramid_cx - lbl_w // 2, 165), "PYRAMIDE OLFACTIVE", font=lbl_font, fill=MUTED_COLOR)
+    for i, level in enumerate(NOTE_LEVELS):
+        cy = start_y + i * (card_h + gap)
+        note_name = notes.get(level["key"], "—")
+        note_img = note_images.get(level["key"])
+        sec_notes = notes.get(level["sec_key"], [])
 
-    # Three circles: tete=top, coeur=mid, fond=bottom
-    tete_y = 420
-    coeur_y = 900
-    fond_y = 1380
-
-    _draw_circle_note(card, draw, pyramid_cx, tete_y, circle_r,
-                       notes.get("tete", "—"), note_images.get("tete"), "TETE")
-    _draw_circle_note(card, draw, pyramid_cx, coeur_y, circle_r,
-                       notes.get("coeur", "—"), note_images.get("coeur"), "COEUR")
-    _draw_circle_note(card, draw, pyramid_cx, fond_y, circle_r,
-                       notes.get("fond", "—"), note_images.get("fond"), "FOND")
-
-    # Connecting gold lines
-    draw.line([(pyramid_cx, tete_y + circle_r + 50), (pyramid_cx, coeur_y - circle_r - 50)],
-              fill=ACCENT_COLOR, width=2)
-    draw.line([(pyramid_cx, coeur_y + circle_r + 50), (pyramid_cx, fond_y - circle_r - 50)],
-              fill=ACCENT_COLOR, width=2)
+        _draw_note_card(card, draw, right_x, cy, right_w, card_h,
+                         level["bg"], level["label"], level["label_color"],
+                         note_name, note_img, sec_notes)
 
     # ── Footer ──
-    draw.line([(80, 1750), (CARD_W - 80, 1750)], fill=LINE_COLOR, width=1)
-
-    # Secondary notes
-    font_sec = _get_font(26, "regular")
-    sec_parts = []
-    for key in ["tete_sec", "coeur_sec", "fond_sec"]:
-        secs = notes.get(key, [])
-        sec_parts.extend(secs[:2])
-    if sec_parts:
-        sec_text = " · ".join(sec_parts[:6])
-        if _text_width(draw, sec_text, font_sec) > CARD_W - 120:
-            sec_text = " · ".join(sec_parts[:4])
-        _text_center(draw, sec_text, 1770, font_sec, MUTED_COLOR)
-
-    # TRY ME badge
-    _text_center(draw, "TRY ME", 1830, _get_font(48, "serif-bold"), ACCENT_COLOR)
-    _text_center(draw, "Testez avant de craquer", 1900, _get_font(28, "regular"), MUTED_COLOR)
-    _text_center(draw, "planetebeauty.com", 1950, _get_font(24, "regular"), ACCENT_COLOR)
+    _text_center(draw, "TRY ME", 1830, _get_font(44, "serif-bold"), ACCENT_COLOR)
+    _text_center(draw, "Testez avant de craquer", 1890, _get_font(26, "regular"), MUTED_COLOR)
+    _text_center(draw, "planetebeauty.com", 1940, _get_font(22, "regular"), ACCENT_COLOR)
 
     return card
 
