@@ -266,61 +266,206 @@ def _draw_note_card(card: Image.Image, draw: ImageDraw.Draw,
 
 # ══════════════════════ RECTO ══════════════════════
 
+def _draw_pills(draw: ImageDraw.Draw, cx: int, y: int, labels: list,
+                  font, text_color: tuple, bg_color: tuple, border_color: tuple,
+                  highlight_first: bool = False, max_w: int = 1000) -> int:
+    """Draw centered pill tags. Returns y_bottom."""
+    if not labels:
+        return y
+    pill_h = 36
+    pill_gap = 10
+    pill_pad = 20
+
+    # Calculate widths
+    widths = [_text_width(draw, l, font) + pill_pad * 2 for l in labels]
+    total = sum(widths) + pill_gap * (len(widths) - 1)
+
+    # If too wide, truncate
+    while total > max_w and len(labels) > 2:
+        labels = labels[:-1]
+        widths = widths[:-1]
+        total = sum(widths) + pill_gap * (len(widths) - 1)
+
+    px = cx - total // 2
+    for i, label in enumerate(labels):
+        pw = widths[i]
+        if highlight_first and i == 0:
+            fill = (ACCENT_COLOR[0], ACCENT_COLOR[1], ACCENT_COLOR[2], 30)
+            draw.rounded_rectangle([px, y, px + pw, y + pill_h], radius=pill_h // 2,
+                                    fill=(253, 243, 228), outline=ACCENT_COLOR, width=2)
+            tw = _text_width(draw, label, font)
+            draw.text((px + (pw - tw) // 2, y + 7), label, font=font, fill=ACCENT_COLOR)
+        else:
+            draw.rounded_rectangle([px, y, px + pw, y + pill_h], radius=pill_h // 2,
+                                    fill=bg_color, outline=border_color, width=1)
+            tw = _text_width(draw, label, font)
+            draw.text((px + (pw - tw) // 2, y + 7), label, font=font, fill=text_color)
+        px += pw + pill_gap
+    return y + pill_h
+
+
+def _draw_progress_bar(draw: ImageDraw.Draw, x: int, y: int, w: int, h: int,
+                        value: int, max_val: int, colors: list):
+    """Draw a gradient progress bar."""
+    draw.rounded_rectangle([x, y, x + w, y + h], radius=h // 2, fill=(235, 230, 222))
+    filled_w = int(w * min(value, max_val) / max_val)
+    if filled_w > 0:
+        draw.rounded_rectangle([x, y, x + filled_w, y + h], radius=h // 2, fill=ACCENT_COLOR)
+
+
+def _draw_sillage_dots(draw: ImageDraw.Draw, x: int, y: int, level: int):
+    """Draw sillage dots (1-4 scale)."""
+    dot_r = 14
+    gap = 8
+    dot_colors = [(180, 150, 80), (170, 145, 75), (200, 170, 100), (210, 195, 160), (230, 225, 215)]
+    for i in range(5):
+        dx = x + i * (dot_r * 2 + gap)
+        if i < level:
+            draw.ellipse([dx, y, dx + dot_r * 2, y + dot_r * 2], fill=dot_colors[min(i, len(dot_colors)-1)])
+        else:
+            draw.ellipse([dx, y, dx + dot_r * 2, y + dot_r * 2], fill=(230, 225, 215))
+
+
 def generate_recto(product_title: str, notes: dict, note_images: dict,
-                    product_img: Optional[Image.Image] = None) -> Image.Image:
-    """Generate recto: bottle left (45%) + pyramid right (55%) — matching product page design."""
+                    product_img: Optional[Image.Image] = None,
+                    metadata: Optional[dict] = None) -> Image.Image:
+    """Generate recto: bottle left + pyramid right + famille/accords + intensite/sillage/tenue."""
     card = Image.new("RGB", (CARD_W, CARD_H), BG_COLOR)
     draw = ImageDraw.Draw(card)
     short_title = _clean_product_title(product_title)
+    meta = metadata or {}
 
     # ── Header ──
-    _text_center(draw, "PLANETEBEAUTY", 20, _get_font(24, "regular"), ACCENT_COLOR)
-    title_font = _get_font(48, "serif-bold")
+    _text_center(draw, "PLANETEBEAUTY", 15, _get_font(22, "regular"), ACCENT_COLOR)
+    title_font = _get_font(44, "serif-bold")
     if _text_width(draw, short_title, title_font) > CARD_W - 80:
-        title_font = _get_font(38, "serif-bold")
-    _text_center(draw, short_title, 55, title_font, TEXT_COLOR)
-    draw.line([(80, 120), (CARD_W - 80, 120)], fill=ACCENT_COLOR, width=2)
+        title_font = _get_font(36, "serif-bold")
+    _text_center(draw, short_title, 45, title_font, TEXT_COLOR)
+    draw.line([(80, 105), (CARD_W - 80, 105)], fill=ACCENT_COLOR, width=2)
 
-    # ── Layout: 42% left bottle, 58% right pyramid ──
-    left_w = int(CARD_W * 0.42)
-    right_x = left_w + 20
-    right_w = CARD_W - right_x - 30
+    # ── Famille & Accords pills ──
+    accords = []
+    if meta.get("accord"):
+        accords.append(meta["accord"])
+    accords.extend(meta.get("accords_sec", [])[:4])
+    if meta.get("famille"):
+        for f in meta["famille"][:2]:
+            if f not in accords:
+                accords.append(f)
+    if accords:
+        font_pill = _get_font(20, "regular")
+        _draw_pills(draw, CARD_W // 2, 120, accords[:5], font_pill,
+                      MUTED_COLOR, (245, 241, 234), (225, 220, 210),
+                      highlight_first=True, max_w=CARD_W - 100)
 
-    # ── Left: Product bottle (preserve ratio) ──
+    # ── Tete / Coeur / Fond compact summary ──
+    sum_y = 172
+    draw.line([(80, sum_y - 4), (CARD_W - 80, sum_y - 4)], fill=LINE_COLOR, width=1)
+    col_w = (CARD_W - 160) // 3
+    for i, (lbl, lbl_c, key) in enumerate([
+        ("TETE", TETE_LABEL, "tete"), ("COEUR", COEUR_LABEL, "coeur"), ("FOND", FOND_LABEL, "fond")
+    ]):
+        cx = 80 + i * col_w + col_w // 2
+        font_lbl = _get_font(20, "regular")
+        lw = _text_width(draw, lbl, font_lbl)
+        draw.text((cx - lw // 2, sum_y + 2), lbl, font=font_lbl, fill=lbl_c)
+        note_name = notes.get(key, "—")
+        font_val = _get_font(26, "bold")
+        vw = _text_width(draw, note_name, font_val)
+        draw.text((cx - vw // 2, sum_y + 26), note_name, font=font_val, fill=TEXT_COLOR)
+        if i < 2:
+            draw.line([(80 + (i + 1) * col_w, sum_y), (80 + (i + 1) * col_w, sum_y + 55)],
+                      fill=LINE_COLOR, width=1)
+
+    # ── Layout: 40% left bottle, 60% right note cards ──
+    content_y = 240
+    left_w = int(CARD_W * 0.40)
+    right_x = left_w + 15
+    right_w = CARD_W - right_x - 25
+
+    # ── Left: Product bottle ──
     if product_img:
-        max_h = 1550
-        max_w = left_w - 60
+        max_h = 1100
+        max_w = left_w - 50
         img = product_img.copy()
         ratio = min(max_w / img.width, max_h / img.height)
         new_w = int(img.width * ratio)
         new_h = int(img.height * ratio)
         img = img.resize((new_w, new_h), Image.LANCZOS)
         px = (left_w - new_w) // 2
-        py = 160 + (max_h - new_h) // 2
+        py = content_y + (max_h - new_h) // 2
         if img.mode == "RGBA":
             card.paste(img, (px, py), img)
         else:
             card.paste(img, (px, py))
 
-    # ── Right: 3 note cards (matching product page) ──
-    card_h = 480
-    gap = 30
-    start_y = 150
-
+    # ── Right: 3 note cards ──
+    note_card_h = 370
+    note_gap = 18
     for i, level in enumerate(NOTE_LEVELS):
-        cy = start_y + i * (card_h + gap)
-        note_name = notes.get(level["key"], "—")
-        note_img = note_images.get(level["key"])
-        sec_notes = notes.get(level["sec_key"], [])
-
-        _draw_note_card(card, draw, right_x, cy, right_w, card_h,
+        cy = content_y + i * (note_card_h + note_gap)
+        _draw_note_card(card, draw, right_x, cy, right_w, note_card_h,
                          level["bg"], level["label"], level["label_color"],
-                         note_name, note_img, sec_notes)
+                         notes.get(level["key"], "—"), note_images.get(level["key"]),
+                         notes.get(level["sec_key"], []))
+
+    # ── Intensite / Sillage / Tenue section ──
+    info_y = content_y + 3 * (note_card_h + note_gap) + 10
+    # Background card
+    draw.rounded_rectangle([40, info_y, CARD_W - 40, info_y + 200], radius=16, fill=(245, 241, 234))
+
+    # Intensite bar
+    intensite = meta.get("intensite", 3)
+    font_section = _get_font(22, "bold")
+    font_val = _get_font(22, "regular")
+    draw.text((70, info_y + 15), "INTENSITE", font=font_section, fill=TEXT_COLOR)
+    score_txt = f"{intensite}/5"
+    sw = _text_width(draw, score_txt, _get_font(26, "bold"))
+    draw.text((CARD_W - 70 - sw, info_y + 12), score_txt, font=_get_font(26, "bold"), fill=ACCENT_COLOR)
+    _draw_progress_bar(draw, 70, info_y + 48, CARD_W - 140, 16, intensite, 5, [])
+
+    # Sillage + Tenue side by side
+    half_w = (CARD_W - 160) // 2
+    # Sillage
+    draw.rounded_rectangle([60, info_y + 80, 60 + half_w, info_y + 180],
+                            radius=12, fill=(255, 253, 248))
+    draw.text((80, info_y + 88), "SILLAGE", font=_get_font(18, "regular"), fill=MUTED_COLOR)
+    sillage_level = meta.get("sillage_level", 2)
+    _draw_sillage_dots(draw, 80, info_y + 118, sillage_level)
+    sillage_txt = meta.get("sillage", "")
+    if sillage_txt:
+        draw.text((80 + 5 * 36, info_y + 120), sillage_txt, font=_get_font(22, "regular"), fill=ACCENT_COLOR)
+
+    # Tenue
+    tenue_x = 60 + half_w + 20
+    draw.rounded_rectangle([tenue_x, info_y + 80, tenue_x + half_w, info_y + 180],
+                            radius=12, fill=(255, 253, 248))
+    draw.text((tenue_x + 20, info_y + 88), "TENUE", font=_get_font(18, "regular"), fill=MUTED_COLOR)
+    duree = meta.get("duree_tenue", 0)
+    tenacite = meta.get("tenacite", "")
+    bar_w = half_w - 120
+    _draw_progress_bar(draw, tenue_x + 20, info_y + 130, bar_w, 14, duree, 12, [])
+    duree_txt = f"{duree}h+" if duree else tenacite
+    if duree_txt:
+        draw.text((tenue_x + 20 + bar_w + 10, info_y + 123), duree_txt,
+                  font=_get_font(22, "regular"), fill=ACCENT_COLOR)
+
+    # ── Tags (saison, genre, occasions) ──
+    tags = []
+    for s in meta.get("saison", [])[:2]:
+        tags.append(f"* {s}")
+    if meta.get("genre"):
+        tags.append(meta["genre"])
+    tags.extend(meta.get("occasions", [])[:2])
+    if tags:
+        font_tag = _get_font(20, "regular")
+        _draw_pills(draw, CARD_W // 2, info_y + 210, tags[:5], font_tag,
+                      MUTED_COLOR, (240, 237, 230), (220, 215, 205), max_w=CARD_W - 100)
 
     # ── Footer ──
-    _text_center(draw, "TRY ME", 1830, _get_font(44, "serif-bold"), ACCENT_COLOR)
-    _text_center(draw, "Testez avant de craquer", 1890, _get_font(26, "regular"), MUTED_COLOR)
-    _text_center(draw, "planetebeauty.com", 1940, _get_font(22, "regular"), ACCENT_COLOR)
+    _text_center(draw, "TRY ME", CARD_H - 110, _get_font(40, "serif-bold"), ACCENT_COLOR)
+    _text_center(draw, "Testez avant de craquer", CARD_H - 65, _get_font(24, "regular"), MUTED_COLOR)
+    _text_center(draw, "planetebeauty.com", CARD_H - 35, _get_font(20, "regular"), ACCENT_COLOR)
 
     return card
 
@@ -501,7 +646,8 @@ def generate_a4_pdf(cards: list[tuple[Image.Image, Image.Image]], output_path: s
 
 async def pregenerate_card_assets(product_id: str, product_title: str, product_handle: str,
                                     notes: dict, note_image_urls: dict, logo_url: str,
-                                    product_image_url: str = None) -> dict:
+                                    product_image_url: str = None,
+                                    metadata: dict = None) -> dict:
     """Pre-generate recto + verso template for a product."""
     CARDS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -523,7 +669,7 @@ async def pregenerate_card_assets(product_id: str, product_title: str, product_h
         logo_img = _download_image(logo_url, 1000)
 
     # Generate recto
-    recto = generate_recto(product_title, notes, note_images, product_img)
+    recto = generate_recto(product_title, notes, note_images, product_img, metadata=metadata)
     recto_path = CARDS_DIR / f"recto_{product_id}.png"
     recto.save(str(recto_path), "PNG")
 

@@ -1456,6 +1456,17 @@ async def _pregenerate_tryme_card(product_id: str, product_title: str, product_h
             img_tete: metafield(namespace: "parfum", key: "image_note_tete") {{ reference {{ ... on MediaImage {{ image {{ url }} }} }} }}
             img_coeur: metafield(namespace: "parfum", key: "image_note_coeur") {{ reference {{ ... on MediaImage {{ image {{ url }} }} }} }}
             img_fond: metafield(namespace: "parfum", key: "image_note_fond") {{ reference {{ ... on MediaImage {{ image {{ url }} }} }} }}
+            mf_famille: metafield(namespace: "parfum", key: "famille_olfactive") {{ value }}
+            mf_accord: metafield(namespace: "parfum", key: "accord_principal") {{ value }}
+            mf_accords_sec: metafield(namespace: "parfum", key: "accords_secondaires") {{ value }}
+            mf_intensite: metafield(namespace: "parfum", key: "intensite") {{ value }}
+            mf_sillage: metafield(namespace: "parfum", key: "sillage") {{ value }}
+            mf_sillage_level: metafield(namespace: "parfum", key: "sillage_level") {{ value }}
+            mf_tenacite: metafield(namespace: "parfum", key: "tenacite") {{ value }}
+            mf_duree: metafield(namespace: "parfum", key: "duree_tenue_heures") {{ value }}
+            mf_saison: metafield(namespace: "parfum", key: "saison") {{ value }}
+            mf_genre: metafield(namespace: "parfum", key: "genre") {{ value }}
+            mf_occasions: metafield(namespace: "parfum", key: "occasions") {{ value }}
             featuredImage {{ url }}
         }} }}"""
         async with httpx.AsyncClient(timeout=15) as c:
@@ -1488,9 +1499,27 @@ async def _pregenerate_tryme_card(product_id: str, product_title: str, product_h
 
         product_image_url = (data.get("featuredImage") or {}).get("url")
 
+        # Extra metadata for card design
+        def _val(key):
+            return (data.get(key) or {}).get("value", "")
+        metadata = {
+            "famille": _parse_list(_val("mf_famille")),
+            "accord": _val("mf_accord"),
+            "accords_sec": _parse_list(_val("mf_accords_sec")),
+            "intensite": int(_val("mf_intensite") or "3"),
+            "sillage": _val("mf_sillage"),
+            "sillage_level": int(_val("mf_sillage_level") or "2"),
+            "tenacite": _val("mf_tenacite"),
+            "duree_tenue": int(_val("mf_duree") or "0"),
+            "saison": _parse_list(_val("mf_saison")),
+            "genre": _val("mf_genre"),
+            "occasions": _parse_list(_val("mf_occasions")),
+        }
+
         result = await pregenerate_card_assets(product_id, product_title, product_handle,
                                                 notes, note_image_urls, LOGO_PB_URL,
-                                                product_image_url=product_image_url)
+                                                product_image_url=product_image_url,
+                                                metadata=metadata)
         logger.info(f"Card assets generated for {product_title}: {result}")
         log_activity("tryme_card_gen", f"Visuels carte pré-générés : {product_title}",
                      {"product_id": product_id}, source="auto")
