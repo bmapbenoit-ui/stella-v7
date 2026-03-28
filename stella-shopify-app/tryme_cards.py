@@ -133,76 +133,93 @@ def _clean_product_title(product_title: str) -> str:
     return short
 
 
-def generate_recto(product_title: str, notes: dict, note_images: dict) -> Image.Image:
+def generate_recto(product_title: str, notes: dict, note_images: dict,
+                    product_img: Optional[Image.Image] = None) -> Image.Image:
     """
-    Generate recto card with pyramid olfactive — FULL SIZE layout.
-    notes: {"tete": "Vanille", "coeur": "Santal", "fond": "Musc", "tete_sec": [...], "coeur_sec": [...], "fond_sec": [...]}
-    note_images: {"tete": Image, "coeur": Image, "fond": Image}
+    Generate recto card: bottle image left + pyramid olfactive right.
     """
     card = Image.new("RGB", (CARD_W, CARD_H), BG_COLOR)
     draw = ImageDraw.Draw(card)
 
     short_title = _clean_product_title(product_title)
 
-    # Header: brand + title
-    _text_center(draw, "PLANÈTEBEAUTY", 20, _get_font(16), ACCENT_COLOR)
-    _text_center(draw, short_title, 50, _get_font(38, bold=True), TEXT_COLOR)
+    # ── Header ──
+    _text_center(draw, "PLANÈTEBEAUTY", 15, _get_font(16), ACCENT_COLOR)
+    _text_center(draw, short_title, 42, _get_font(34, bold=True), TEXT_COLOR)
+    draw.line([(60, 85), (CARD_W - 60, 85)], fill=LINE_COLOR, width=1)
 
-    # Thin divider
-    draw.line([(80, 100), (CARD_W - 80, 100)], fill=LINE_COLOR, width=1)
+    # ── Layout: left column = bottle, right column = pyramid ──
+    left_w = CARD_W * 2 // 5   # 40% left for bottle
+    right_x = left_w            # 60% right for pyramid
 
-    # "Pyramide Olfactive" label
-    _text_center(draw, "PYRAMIDE OLFACTIVE", 112, _get_font(18), MUTED_COLOR)
+    # ── Left: Product bottle image ──
+    if product_img:
+        # Scale to fit left column with padding
+        max_h = 680
+        max_w = left_w - 40
+        img = product_img.copy()
+        ratio = min(max_w / img.width, max_h / img.height)
+        new_w = int(img.width * ratio)
+        new_h = int(img.height * ratio)
+        img = img.resize((new_w, new_h), Image.LANCZOS)
+        # Center in left column
+        px = (left_w - new_w) // 2
+        py = 110 + (max_h - new_h) // 2
+        if img.mode == "RGBA":
+            card.paste(img, (px, py), img)
+        else:
+            card.paste(img, (px, py))
 
-    # Three BIG note circles in pyramid layout
-    circle_r = 120  # radius — was 80, now 50% bigger
+    # ── Right: Pyramid olfactive ──
+    pyramid_cx = right_x + (CARD_W - right_x) // 2  # center of right column
+    pyramid_w = CARD_W - right_x
 
-    # Pyramid positions: tête top-center, coeur left, fond right
-    tete_y = 280
-    coeur_y = 545
-    fond_y = 545
+    # Label
+    label_x = pyramid_cx
+    bbox = draw.textbbox((0, 0), "PYRAMIDE", font=_get_font(14))
+    lw = bbox[2] - bbox[0]
+    draw.text((label_x - lw // 2, 98), "PYRAMIDE", font=_get_font(14), fill=MUTED_COLOR)
+    bbox2 = draw.textbbox((0, 0), "OLFACTIVE", font=_get_font(14))
+    lw2 = bbox2[2] - bbox2[0]
+    draw.text((label_x - lw2 // 2, 115), "OLFACTIVE", font=_get_font(14), fill=MUTED_COLOR)
 
-    # Tête (center top)
-    _draw_circle_note(card, draw, CARD_W // 2, tete_y, circle_r,
+    # Three circles vertically stacked (tête top, coeur mid, fond bottom)
+    circle_r = 90
+    tete_y = 230
+    coeur_y = 460
+    fond_y = 690
+
+    _draw_circle_note(card, draw, pyramid_cx, tete_y, circle_r,
                        notes.get("tete", "—"), note_images.get("tete"), "TÊTE")
-
-    # Coeur (left)
-    _draw_circle_note(card, draw, CARD_W // 4 + 20, coeur_y, circle_r,
+    _draw_circle_note(card, draw, pyramid_cx, coeur_y, circle_r,
                        notes.get("coeur", "—"), note_images.get("coeur"), "CŒUR")
-
-    # Fond (right)
-    _draw_circle_note(card, draw, 3 * CARD_W // 4 - 20, fond_y, circle_r,
+    _draw_circle_note(card, draw, pyramid_cx, fond_y, circle_r,
                        notes.get("fond", "—"), note_images.get("fond"), "FOND")
 
-    # Pyramid connecting lines (subtle)
-    tete_cx, tete_cy = CARD_W // 2, tete_y
-    coeur_cx, coeur_cy = CARD_W // 4 + 20, coeur_y
-    fond_cx, fond_cy = 3 * CARD_W // 4 - 20, fond_y
-    line_c = (230, 225, 215)
-    draw.line([(tete_cx, tete_cy + circle_r + 30), (coeur_cx + circle_r - 10, coeur_cy - circle_r - 30)], fill=line_c, width=1)
-    draw.line([(tete_cx, tete_cy + circle_r + 30), (fond_cx - circle_r + 10, fond_cy - circle_r - 30)], fill=line_c, width=1)
-    draw.line([(coeur_cx + circle_r + 10, coeur_cy), (fond_cx - circle_r - 10, fond_cy)], fill=line_c, width=1)
+    # Connecting lines between circles
+    line_c = (225, 220, 210)
+    draw.line([(pyramid_cx, tete_y + circle_r + 28), (pyramid_cx, coeur_y - circle_r - 28)], fill=line_c, width=1)
+    draw.line([(pyramid_cx, coeur_y + circle_r + 28), (pyramid_cx, fond_y - circle_r - 28)], fill=line_c, width=1)
 
-    # Secondary notes below
-    font_sec = _get_font(18)
-    sec_y = 730
-    for key, label, yoff in [("tete_sec", "Tête", 0), ("coeur_sec", "Cœur", 24), ("fond_sec", "Fond", 48)]:
+    # ── Footer ──
+    draw.line([(60, 870), (CARD_W - 60, 870)], fill=LINE_COLOR, width=1)
+
+    # Secondary notes compact
+    font_sec = _get_font(15)
+    sec_parts = []
+    for key in ["tete_sec", "coeur_sec", "fond_sec"]:
         secs = notes.get(key, [])
-        if secs:
-            text = f"{label} : {', '.join(secs[:3])}"
-            _text_center(draw, text, sec_y + yoff, font_sec, MUTED_COLOR)
+        sec_parts.extend(secs[:2])
+    if sec_parts:
+        sec_text = ", ".join(sec_parts[:6])
+        if len(sec_text) > 55:
+            sec_text = sec_text[:52] + "..."
+        _text_center(draw, sec_text, 880, font_sec, MUTED_COLOR)
 
-    # Divider before footer
-    draw.line([(120, 860), (CARD_W - 120, 860)], fill=LINE_COLOR, width=1)
-
-    # Footer: TRY ME badge
-    _text_center(draw, "✦  TRY ME  ✦", 885, _get_font(26, bold=True), ACCENT_COLOR)
-
-    # Tagline
-    _text_center(draw, "Découvrez avant de craquer", 930, _get_font(18), MUTED_COLOR)
-
-    # planetebeauty.com
-    _text_center(draw, "planetebeauty.com", 965, _get_font(16), ACCENT_COLOR)
+    # TRY ME badge + tagline
+    _text_center(draw, "✦  TRY ME  ✦", 910, _get_font(24, bold=True), ACCENT_COLOR)
+    _text_center(draw, "Découvrez avant de craquer", 945, _get_font(16), MUTED_COLOR)
+    _text_center(draw, "planetebeauty.com", 970, _get_font(14), ACCENT_COLOR)
 
     return card
 
@@ -358,7 +375,8 @@ def generate_multi_card_pdf(cards: list[tuple[Image.Image, Image.Image]], output
 # ── PRE-GENERATION ──
 
 async def pregenerate_card_assets(product_id: str, product_title: str, product_handle: str,
-                                    notes: dict, note_image_urls: dict, logo_url: str) -> dict:
+                                    notes: dict, note_image_urls: dict, logo_url: str,
+                                    product_image_url: str = None) -> dict:
     """
     Pre-generate recto + verso template for a product.
     Stores as PNG in static/tryme-cards/.
@@ -373,11 +391,16 @@ async def pregenerate_card_assets(product_id: str, product_title: str, product_h
         if url:
             note_images[key] = _download_image(url, (240, 240))
 
-    # Download logo
-    logo_img = _download_image(logo_url, (400, 134)) if logo_url else None
+    # Download product bottle image
+    product_img = None
+    if product_image_url:
+        product_img = _download_image(product_image_url, (400, 600))
 
-    # Generate recto
-    recto = generate_recto(product_title, notes, note_images)
+    # Download logo
+    logo_img = _download_image(logo_url, (500, 167)) if logo_url else None
+
+    # Generate recto (with bottle image)
+    recto = generate_recto(product_title, notes, note_images, product_img=product_img)
     recto_path = CARDS_DIR / f"recto_{product_id}.png"
     recto.save(str(recto_path), "PNG")
 

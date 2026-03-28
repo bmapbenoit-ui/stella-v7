@@ -580,6 +580,62 @@ const STELLA = {
         STELLA.showToast('Erreur sauvegarde', 'error');
       }
     }
+  },
+
+  // ═══════════════════════════════════════════════════════════════
+  // TAB 12: TRY ME
+  // ═══════════════════════════════════════════════════════════════
+  tryme: {
+    async load() {
+      const data = await STELLA.api('/api/tryme/dashboard');
+      if (data) {
+        // KPIs
+        document.getElementById('tryme-kpis').innerHTML = `
+          <div class="kpi-card"><div class="kpi-value gold">${data.total_codes || 0}</div><div class="kpi-label">Codes generes</div></div>
+          <div class="kpi-card"><div class="kpi-value">${data.active_codes || 0}</div><div class="kpi-label">Actifs</div></div>
+          <div class="kpi-card"><div class="kpi-value">${data.used_codes || 0}</div><div class="kpi-label">Utilises</div></div>
+          <div class="kpi-card"><div class="kpi-value">${data.expired_codes || 0}</div><div class="kpi-label">Expires</div></div>
+        `;
+
+        // Codes table
+        const tbody = document.getElementById('tryme-codes-tbody');
+        const codes = data.recent_codes || [];
+        tbody.innerHTML = codes.length ? codes.map(c => {
+          const statusClass = c.status === 'pending' ? 'success' : c.status === 'used' ? 'gold' : 'error';
+          const pdfLink = c.order_id ? `<a href="/api/tryme/card-pdf/${c.order_id}" target="_blank" style="color:var(--accent)">PDF</a>` : '--';
+          return `<tr>
+            <td><strong style="color:var(--accent)">${c.discount_code || '--'}</strong></td>
+            <td>${c.product_title || '--'}</td>
+            <td>-${c.tryme_price || 0}€</td>
+            <td>${c.customer_email || '--'}</td>
+            <td>${STELLA.shortTime(c.discount_expires_at)}</td>
+            <td><span class="badge-pill badge-${statusClass}">${c.status}</span></td>
+            <td>${pdfLink}</td>
+          </tr>`;
+        }).join('') : '<tr><td colspan="7" style="text-align:center;color:var(--text-muted)">Aucun code Try Me</td></tr>';
+
+        // Cards preview grid
+        const grid = document.getElementById('tryme-cards-grid');
+        const cards = data.pregenerated_cards || [];
+        grid.innerHTML = cards.length ? cards.map(c => `
+          <div style="text-align:center;width:140px">
+            <img src="/api/tryme/card-preview/${c.product_id}" style="width:130px;border-radius:8px;border:1px solid var(--border);cursor:pointer"
+                 onclick="window.open('/api/tryme/card-preview/${c.product_id}','_blank')" title="${c.title}">
+            <div style="font-size:0.7rem;color:var(--text-muted);margin-top:4px">${c.title}</div>
+          </div>
+        `).join('') : '<p style="color:var(--text-muted)">Aucune carte pre-generee</p>';
+      }
+    },
+    async regenerateCards() {
+      STELLA.showToast('Regeneration des cartes...', 'success');
+      const r = await STELLA.apiPost('/api/tryme/pregenerate-all', {});
+      if (r && r.ok) {
+        STELLA.showToast(`${r.generated} cartes regenerees`, 'success');
+        this.load();
+      } else {
+        STELLA.showToast('Erreur regeneration', 'error');
+      }
+    }
   }
 };
 

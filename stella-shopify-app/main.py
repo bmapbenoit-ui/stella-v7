@@ -1456,6 +1456,7 @@ async def _pregenerate_tryme_card(product_id: str, product_title: str, product_h
             img_tete: metafield(namespace: "parfum", key: "image_note_tete") {{ reference {{ ... on MediaImage {{ image {{ url }} }} }} }}
             img_coeur: metafield(namespace: "parfum", key: "image_note_coeur") {{ reference {{ ... on MediaImage {{ image {{ url }} }} }} }}
             img_fond: metafield(namespace: "parfum", key: "image_note_fond") {{ reference {{ ... on MediaImage {{ image {{ url }} }} }} }}
+            featuredImage {{ url }}
         }} }}"""
         async with httpx.AsyncClient(timeout=15) as c:
             r = await c.post(SHOPIFY_GRAPHQL_URL, json={"query": query},
@@ -1485,8 +1486,11 @@ async def _pregenerate_tryme_card(product_id: str, product_title: str, product_h
             "fond": ((data.get("img_fond") or {}).get("reference") or {}).get("image", {}).get("url"),
         }
 
+        product_image_url = (data.get("featuredImage") or {}).get("url")
+
         result = await pregenerate_card_assets(product_id, product_title, product_handle,
-                                                notes, note_image_urls, LOGO_PB_URL)
+                                                notes, note_image_urls, LOGO_PB_URL,
+                                                product_image_url=product_image_url)
         logger.info(f"Card assets generated for {product_title}: {result}")
         log_activity("tryme_card_gen", f"Visuels carte pré-générés : {product_title}",
                      {"product_id": product_id}, source="auto")
@@ -1704,40 +1708,67 @@ async def cron_tryme_expire():
 
 
 @app.get("/api/tryme/dashboard")
-async def tryme_dashboard(request: Request):
-    """Dashboard data for Try Me tab."""
+async def tryme_dashboard(request: Request = None):
+    """Dashboard data for Try Me tab — codes + KPIs + pre-generated cards list."""
+    result = {"total_codes": 0, "active_codes": 0, "used_codes": 0, "expired_codes": 0,
+              "recent_codes": [], "pregenerated_cards": []}
+
+    # DB data
     db = get_db()
-    if not db:
-        return {"total": 0, "pending": 0, "used": 0, "expired": 0, "recent": []}
+    if db:
+        try:
+            cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cur.execute("SELECT COUNT(*) as c FROM tryme_purchases")
+            result["total_codes"] = cur.fetchone()["c"]
+            cur.execute("SELECT COUNT(*) as c FROM tryme_purchases WHERE status='pending'")
+            result["active_codes"] = cur.fetchone()["c"]
+            cur.execute("SELECT COUNT(*) as c FROM tryme_purchases WHERE status='used' OR discount_used=true")
+            result["used_codes"] = cur.fetchone()["c"]
+            cur.execute("SELECT COUNT(*) as c FROM tryme_purchases WHERE status='expired'")
+            result["expired_codes"] = cur.fetchone()["c"]
 
+            cur.execute("""SELECT customer_email, product_title, product_id, discount_code,
+                           tryme_price, status, order_id, order_name,
+                           purchased_at, discount_expires_at
+                           FROM tryme_purchases ORDER BY purchased_at DESC LIMIT 30""")
+            recent = cur.fetchall()
+            for r in recent:
+                if r.get("purchased_at"): r["purchased_at"] = r["purchased_at"].isoformat()
+                if r.get("discount_expires_at"): r["discount_expires_at"] = r["discount_expires_at"].isoformat()
+            result["recent_codes"] = recent
+            cur.close(); db.close()
+        except Exception as e:
+            logger.error(f"Try Me dashboard DB error: {e}")
+            try: db.close()
+            except: pass
+
+    # Pre-generated cards list
     try:
-        cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute("SELECT COUNT(*) as c FROM tryme_purchases")
-        total = cur.fetchone()["c"]
-        cur.execute("SELECT COUNT(*) as c FROM tryme_purchases WHERE status='pending'")
-        pending = cur.fetchone()["c"]
-        cur.execute("SELECT COUNT(*) as c FROM tryme_purchases WHERE discount_used=true")
-        used = cur.fetchone()["c"]
-        cur.execute("SELECT COUNT(*) as c FROM tryme_purchases WHERE status='expired'")
-        expired = cur.fetchone()["c"]
-
-        cur.execute("""SELECT customer_email, product_title, discount_code, status,
-                       purchased_at, discount_expires_at, discount_used
-                       FROM tryme_purchases ORDER BY purchased_at DESC LIMIT 20""")
-        recent = cur.fetchall()
-        for r in recent:
-            if r.get("purchased_at"): r["purchased_at"] = r["purchased_at"].isoformat()
-            if r.get("discount_expires_at"): r["discount_expires_at"] = r["discount_expires_at"].isoformat()
-
-        conv_rate = round(used / total * 100, 1) if total > 0 else 0
-
-        cur.close(); db.close()
-        return {"total": total, "pending": pending, "used": used, "expired": expired,
-                "conversion_rate": conv_rate, "recent": recent}
+        CARDS_DIR.mkdir(parents=True, exist_ok=True)
+        recto_files = sorted(CARDS_DIR.glob("recto_*.png"))
+        cards_list = []
+        for f in recto_files:
+            pid = f.stem.replace("recto_", "")
+            cards_list.append({"product_id": pid, "title": pid})
+        # Enrich with product titles from Shopify
+        if cards_list:
+            ids = [f'"gid://shopify/Product/{c["product_id"]}"' for c in cards_list[:20]]
+            query = f"""{{ nodes(ids: [{','.join(ids)}]) {{ ... on Product {{ id title }} }} }}"""
+            try:
+                async with httpx.AsyncClient(timeout=10) as c:
+                    r = await c.post(SHOPIFY_GRAPHQL_URL, json={"query": query},
+                                   headers={"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"})
+                    nodes = r.json().get("data", {}).get("nodes", [])
+                    title_map = {n["id"].split("/")[-1]: n.get("title", "") for n in nodes if n}
+                    for card in cards_list:
+                        card["title"] = title_map.get(card["product_id"], card["product_id"])
+            except Exception:
+                pass
+        result["pregenerated_cards"] = cards_list
     except Exception as e:
-        try: db.close()
-        except: pass
-        return {"total": 0, "error": str(e)}
+        logger.error(f"Try Me cards list error: {e}")
+
+    return result
 
 
 # ══════════════════════ BACK IN STOCK (BIS) ══════════════════════
