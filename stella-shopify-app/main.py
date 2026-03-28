@@ -1231,15 +1231,27 @@ TRYME_SKU_PREFIX = "TRYME-"
 TRYME_VARIANT_TITLE = "2 ml"
 
 def is_tryme_item(line_item):
-    """Check if a line item is a Try Me product."""
+    """Check if a line item is a Try Me product (variant or legacy product)."""
     sku = (line_item.get("sku") or "").upper()
     title = (line_item.get("variant_title") or "").lower()
     name = (line_item.get("name") or "").lower()
     if sku.startswith(TRYME_SKU_PREFIX.upper()):
         return True
-    if title == "2 ml" or "try me" in name or "try me" in title:
+    if "try me" in title or "try le" in title or "try me" in name:
         return True
     return False
+
+
+def tryme_short_name(product_title: str) -> str:
+    """Extract short readable product name for Try Me code (ex: VANILLE, BOURBON)."""
+    import unicodedata as _ud
+    t = re.sub(r'(?i)\b(eau de parfum|extrait de parfum|le parfum|parfum|edp|edt)\b', '', product_title).strip()
+    for brand in ["Les Mignardises by Jousset", "Jousset Parfums", "Plume Impression", "Silona Paris"]:
+        t = re.sub(r'(?i)^' + re.escape(brand) + r'\s*', '', t).strip()
+    words = [w for w in re.findall(r'[A-Za-zÀ-ÿ]+', t) if len(w) > 2]
+    name = words[0][:8].upper() if words else "TRYME"
+    name = ''.join(c for c in _ud.normalize('NFD', name) if _ud.category(c) != 'Mn')
+    return name
 
 @app.post("/api/webhook/tryme-order")
 async def webhook_tryme_order(request: Request):
@@ -1292,8 +1304,9 @@ async def webhook_tryme_order(request: Request):
             results.append({"product": product_title, "skipped": True, "reason": "duplicate"})
             continue
 
-        # Generate unique discount code
-        code = f"TRYME-{uuid.uuid4().hex[:6].upper()}"
+        # Generate unique discount code: TM-[PRODUIT]-[HEX4]
+        short = tryme_short_name(product_title)
+        code = f"TM-{short}-{uuid.uuid4().hex[:4].upper()}"
         now = datetime.utcnow()
         expires = now + __import__('datetime').timedelta(days=TRYME_EXPIRY_DAYS)
 
