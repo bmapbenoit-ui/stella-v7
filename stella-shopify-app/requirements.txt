@@ -7,3 +7,5 @@ redis==5.2.1
 python-multipart==0.0.20
 aiosmtplib==3.0.2
 apscheduler==3.10.4
+Pillow==11.1.0
+qrcode==8.0

@@ -7,12 +7,13 @@ STELLA V7 — Shopify Embedded App (Full Version)
 - Auto-vectorization to Qdrant long-term memory
 """
 import os, time, hmac, hashlib, base64, json, logging, uuid, re
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, List
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import httpx
 import aiosmtplib
+from tryme_cards import pregenerate_card_assets, generate_order_pdf, get_card_paths, CARDS_DIR
 from fastapi import FastAPI, Request, HTTPException, Depends, UploadFile, File, Form
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
@@ -1228,6 +1229,7 @@ async def debug_shopify():
 TRYME_PRICE = 9.00
 TRYME_EXPIRY_DAYS = 30
 TRYME_SKU_PREFIX = "TRYME-"
+LOGO_PB_URL = "https://cdn.shopify.com/s/files/1/0491/5177/0773/files/Logo_PB_200725.png?v=1753038818"
 TRYME_VARIANT_TITLE = "2 ml"
 
 def is_tryme_item(line_item):
@@ -1308,7 +1310,7 @@ async def webhook_tryme_order(request: Request):
         short = tryme_short_name(product_title)
         code = f"TM-{short}-{uuid.uuid4().hex[:4].upper()}"
         now = datetime.utcnow()
-        expires = now + __import__('datetime').timedelta(days=TRYME_EXPIRY_DAYS)
+        expires = now + timedelta(days=TRYME_EXPIRY_DAYS)
 
         # Create discount code via Shopify Admin API
         discount_gid = None
@@ -1347,7 +1349,7 @@ async def webhook_tryme_order(request: Request):
                     },
                     "combinesWith": {
                         "shippingDiscounts": True,
-                        "productDiscounts": False,
+                        "productDiscounts": True,
                         "orderDiscounts": True
                     }
                 }
@@ -1417,9 +1419,126 @@ async def webhook_tryme_order(request: Request):
             except Exception as e:
                 logger.error(f"Try Me email error: {e}")
 
-        results.append({"product": product_title, "code": code, "email": customer_email, "discount_gid": discount_gid})
+        results.append({"product": product_title, "code": code, "email": customer_email,
+                        "discount_gid": discount_gid, "product_id": product_id})
+
+    # Generate PDF card for printing
+    if results:
+        try:
+            cards_data = [{"product_id": r["product_id"], "code": r["code"], "order_name": order_name}
+                          for r in results if r.get("code")]
+            if cards_data:
+                CARDS_DIR.mkdir(parents=True, exist_ok=True)
+                pdf_path = str(CARDS_DIR / f"order_{order_id}.pdf")
+                ok = generate_order_pdf(cards_data, pdf_path)
+                if ok:
+                    logger.info(f"Try Me card PDF generated: {pdf_path}")
+                    log_activity("tryme_card", f"PDF carte généré pour {order_name} ({len(cards_data)} cartes)",
+                                 {"order_id": order_id, "cards": len(cards_data)}, source="webhook")
+        except Exception as e:
+            logger.error(f"Try Me card PDF error: {e}")
 
     return {"ok": True, "tryme_count": len(results), "results": results}
+
+
+# ── Try Me Card Generation Helpers ──
+
+async def _pregenerate_tryme_card(product_id: str, product_title: str, product_handle: str):
+    """Fetch metafields and pre-generate card assets for a product with Try Me variant."""
+    try:
+        query = f"""{{ product(id: "gid://shopify/Product/{product_id}") {{
+            metafield_tete: metafield(namespace: "parfum", key: "note_tete_principale") {{ value }}
+            metafield_coeur: metafield(namespace: "parfum", key: "note_coeur_principale") {{ value }}
+            metafield_fond: metafield(namespace: "parfum", key: "note_fond_principale") {{ value }}
+            metafield_tete_sec: metafield(namespace: "parfum", key: "notes_tete_secondaires") {{ value }}
+            metafield_coeur_sec: metafield(namespace: "parfum", key: "notes_coeur_secondaires") {{ value }}
+            metafield_fond_sec: metafield(namespace: "parfum", key: "notes_fond_secondaires") {{ value }}
+            img_tete: metafield(namespace: "parfum", key: "image_note_tete") {{ reference {{ ... on MediaImage {{ image {{ url }} }} }} }}
+            img_coeur: metafield(namespace: "parfum", key: "image_note_coeur") {{ reference {{ ... on MediaImage {{ image {{ url }} }} }} }}
+            img_fond: metafield(namespace: "parfum", key: "image_note_fond") {{ reference {{ ... on MediaImage {{ image {{ url }} }} }} }}
+        }} }}"""
+        async with httpx.AsyncClient(timeout=15) as c:
+            r = await c.post(SHOPIFY_GRAPHQL_URL, json={"query": query},
+                           headers={"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"})
+            data = r.json().get("data", {}).get("product", {})
+
+        if not data:
+            logger.warning(f"No product data for card generation: {product_id}")
+            return
+
+        def _parse_list(val):
+            if not val: return []
+            try: return json.loads(val)
+            except: return []
+
+        notes = {
+            "tete": (data.get("metafield_tete") or {}).get("value", "—"),
+            "coeur": (data.get("metafield_coeur") or {}).get("value", "—"),
+            "fond": (data.get("metafield_fond") or {}).get("value", "—"),
+            "tete_sec": _parse_list((data.get("metafield_tete_sec") or {}).get("value")),
+            "coeur_sec": _parse_list((data.get("metafield_coeur_sec") or {}).get("value")),
+            "fond_sec": _parse_list((data.get("metafield_fond_sec") or {}).get("value")),
+        }
+        note_image_urls = {
+            "tete": ((data.get("img_tete") or {}).get("reference") or {}).get("image", {}).get("url"),
+            "coeur": ((data.get("img_coeur") or {}).get("reference") or {}).get("image", {}).get("url"),
+            "fond": ((data.get("img_fond") or {}).get("reference") or {}).get("image", {}).get("url"),
+        }
+
+        result = await pregenerate_card_assets(product_id, product_title, product_handle,
+                                                notes, note_image_urls, LOGO_PB_URL)
+        logger.info(f"Card assets generated for {product_title}: {result}")
+        log_activity("tryme_card_gen", f"Visuels carte pré-générés : {product_title}",
+                     {"product_id": product_id}, source="auto")
+    except Exception as e:
+        logger.error(f"Card pregeneration error for {product_id}: {e}")
+
+
+@app.post("/api/tryme/pregenerate-all")
+async def tryme_pregenerate_all(request: Request):
+    """Pre-generate card assets for ALL products with Try Me variants."""
+    import asyncio
+    query = """{ products(first: 100, query: "variant_title:*Try*") {
+        edges { node { id title handle variants(first: 10) {
+            edges { node { title } }
+        } } }
+    } }"""
+    async with httpx.AsyncClient(timeout=15) as c:
+        r = await c.post(SHOPIFY_GRAPHQL_URL, json={"query": query},
+                       headers={"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"})
+        products = r.json().get("data", {}).get("products", {}).get("edges", [])
+
+    count = 0
+    for edge in products:
+        p = edge["node"]
+        pid = p["id"].split("/")[-1]
+        has_tryme = any("try me" in (v["node"]["title"] or "").lower() for v in p["variants"]["edges"])
+        if has_tryme:
+            await _pregenerate_tryme_card(pid, p["title"], p["handle"])
+            count += 1
+
+    return {"ok": True, "generated": count}
+
+
+@app.get("/api/tryme/card-pdf/{order_id}")
+async def tryme_card_pdf(order_id: str):
+    """Download card PDF for an order."""
+    from starlette.responses import FileResponse
+    pdf_path = CARDS_DIR / f"order_{order_id}.pdf"
+    if not pdf_path.exists():
+        raise HTTPException(404, "PDF not found for this order")
+    return FileResponse(str(pdf_path), media_type="application/pdf",
+                       filename=f"tryme-cards-{order_id}.pdf")
+
+
+@app.get("/api/tryme/card-preview/{product_id}")
+async def tryme_card_preview(product_id: str):
+    """Preview recto card for a product."""
+    from starlette.responses import FileResponse
+    recto_path = CARDS_DIR / f"recto_{product_id}.png"
+    if not recto_path.exists():
+        raise HTTPException(404, "Card not pre-generated for this product")
+    return FileResponse(str(recto_path), media_type="image/png")
 
 
 @app.post("/api/tryme/create-variants")
@@ -2901,6 +3020,18 @@ async def webhook_product_change(request: Request):
     asyncio.create_task(quiz_regenerate())
     logger.info("Quiz data regeneration triggered by product webhook")
     log_activity("product_change", f"Produit modifié : {ptitle}", {"product_title": ptitle}, source="webhook", product_title=ptitle)
+
+    # Check if product has a Try Me variant → pre-generate card assets
+    try:
+        variants = pdata.get("variants", [])
+        has_tryme = any("try me" in (v.get("title") or "").lower() for v in variants)
+        if has_tryme:
+            pid = str(pdata.get("id", ""))
+            handle = pdata.get("handle", "")
+            asyncio.create_task(_pregenerate_tryme_card(pid, ptitle, handle))
+    except Exception as e:
+        logger.warning(f"Try Me card pregeneration check: {e}")
+
     return {"ok": True, "regenerating": True}
 
 # ══════════════════════ CASHBACK FIDÉLITÉ (Crédit Magasin) ══════════════════════
