@@ -120,75 +120,89 @@ def _draw_circle_note(card: Image.Image, draw: ImageDraw.Draw, cx: int, cy: int,
 
 # ── RECTO GENERATION ──
 
+def _clean_product_title(product_title: str) -> str:
+    """Remove brand prefix and concentration suffix for card display."""
+    import re
+    short = product_title
+    for brand in ["Les Mignardises by Jousset ", "Jousset Parfums ", "Plume Impression ", "Silona Paris "]:
+        if short.lower().startswith(brand.lower()):
+            short = short[len(brand):]
+            break
+    short = re.sub(r'\s+(eau de parfum|extrait de parfum|le parfum|edp|edt)\s*$', '', short, flags=re.IGNORECASE).strip()
+    short = re.sub(r'\s+parfum\s*$', '', short, flags=re.IGNORECASE).strip()
+    return short
+
+
 def generate_recto(product_title: str, notes: dict, note_images: dict) -> Image.Image:
     """
-    Generate recto card with pyramid olfactive.
+    Generate recto card with pyramid olfactive — FULL SIZE layout.
     notes: {"tete": "Vanille", "coeur": "Santal", "fond": "Musc", "tete_sec": [...], "coeur_sec": [...], "fond_sec": [...]}
     note_images: {"tete": Image, "coeur": Image, "fond": Image}
     """
     card = Image.new("RGB", (CARD_W, CARD_H), BG_COLOR)
     draw = ImageDraw.Draw(card)
 
-    # Title
-    font_title = _get_font(36, bold=True)
-    font_subtitle = _get_font(22)
+    short_title = _clean_product_title(product_title)
 
-    # Clean product title (remove brand prefix for card)
-    short_title = product_title
-    for brand in ["Les Mignardises by Jousset ", "Jousset Parfums ", "Plume Impression ", "Silona Paris "]:
-        if short_title.lower().startswith(brand.lower()):
-            short_title = short_title[len(brand):]
-            break
+    # Header: brand + title
+    _text_center(draw, "PLANÈTEBEAUTY", 20, _get_font(16), ACCENT_COLOR)
+    _text_center(draw, short_title, 50, _get_font(38, bold=True), TEXT_COLOR)
 
-    # Remove concentration suffix (whole words only, at end of string)
-    import re
-    short_title = re.sub(r'\s+(eau de parfum|extrait de parfum|Extrait de Parfum|le parfum|edp|edt)\s*$', '', short_title, flags=re.IGNORECASE).strip()
-    # Also remove standalone "parfum" only at end (not inside words like "Vanille parfum")
-    short_title = re.sub(r'\s+parfum\s*$', '', short_title, flags=re.IGNORECASE).strip()
-
-    _text_center(draw, "PLANÈTEBEAUTY", 30, _get_font(18), ACCENT_COLOR)
-    _text_center(draw, short_title, 65, font_title, TEXT_COLOR)
-
-    # Divider
-    draw.line([(CARD_W // 4, 120), (3 * CARD_W // 4, 120)], fill=LINE_COLOR, width=2)
+    # Thin divider
+    draw.line([(80, 100), (CARD_W - 80, 100)], fill=LINE_COLOR, width=1)
 
     # "Pyramide Olfactive" label
-    _text_center(draw, "Pyramide Olfactive", 140, _get_font(24), MUTED_COLOR)
+    _text_center(draw, "PYRAMIDE OLFACTIVE", 112, _get_font(18), MUTED_COLOR)
 
-    # Three note circles in pyramid layout
-    circle_r = 80  # radius
-    top_y = 310     # tête
-    mid_y = 530     # coeur
-    bot_y = 750     # fond
+    # Three BIG note circles in pyramid layout
+    circle_r = 120  # radius — was 80, now 50% bigger
+
+    # Pyramid positions: tête top-center, coeur left, fond right
+    tete_y = 280
+    coeur_y = 545
+    fond_y = 545
 
     # Tête (center top)
-    _draw_circle_note(card, draw, CARD_W // 2, top_y, circle_r,
+    _draw_circle_note(card, draw, CARD_W // 2, tete_y, circle_r,
                        notes.get("tete", "—"), note_images.get("tete"), "TÊTE")
 
-    # Coeur (left-center)
-    _draw_circle_note(card, draw, CARD_W // 3, mid_y, circle_r,
+    # Coeur (left)
+    _draw_circle_note(card, draw, CARD_W // 4 + 20, coeur_y, circle_r,
                        notes.get("coeur", "—"), note_images.get("coeur"), "CŒUR")
 
-    # Fond (right-center)
-    _draw_circle_note(card, draw, 2 * CARD_W // 3, bot_y, circle_r,
+    # Fond (right)
+    _draw_circle_note(card, draw, 3 * CARD_W // 4 - 20, fond_y, circle_r,
                        notes.get("fond", "—"), note_images.get("fond"), "FOND")
 
-    # Secondary notes as small text
-    font_sec = _get_font(16)
-    sec_y = 900
-    sec_parts = []
-    for key, label in [("tete_sec", "Tête"), ("coeur_sec", "Cœur"), ("fond_sec", "Fond")]:
+    # Pyramid connecting lines (subtle)
+    tete_cx, tete_cy = CARD_W // 2, tete_y
+    coeur_cx, coeur_cy = CARD_W // 4 + 20, coeur_y
+    fond_cx, fond_cy = 3 * CARD_W // 4 - 20, fond_y
+    line_c = (230, 225, 215)
+    draw.line([(tete_cx, tete_cy + circle_r + 30), (coeur_cx + circle_r - 10, coeur_cy - circle_r - 30)], fill=line_c, width=1)
+    draw.line([(tete_cx, tete_cy + circle_r + 30), (fond_cx - circle_r + 10, fond_cy - circle_r - 30)], fill=line_c, width=1)
+    draw.line([(coeur_cx + circle_r + 10, coeur_cy), (fond_cx - circle_r - 10, fond_cy)], fill=line_c, width=1)
+
+    # Secondary notes below
+    font_sec = _get_font(18)
+    sec_y = 730
+    for key, label, yoff in [("tete_sec", "Tête", 0), ("coeur_sec", "Cœur", 24), ("fond_sec", "Fond", 48)]:
         secs = notes.get(key, [])
         if secs:
-            sec_parts.append(f"{label}: {', '.join(secs)}")
-    if sec_parts:
-        sec_text = " · ".join(sec_parts)
-        if len(sec_text) > 70:
-            sec_text = sec_text[:67] + "..."
-        _text_center(draw, sec_text, sec_y, font_sec, MUTED_COLOR)
+            text = f"{label} : {', '.join(secs[:3])}"
+            _text_center(draw, text, sec_y + yoff, font_sec, MUTED_COLOR)
 
-    # "TRY ME" badge at bottom
-    _text_center(draw, "TRY ME", 950, _get_font(20, bold=True), ACCENT_COLOR)
+    # Divider before footer
+    draw.line([(120, 860), (CARD_W - 120, 860)], fill=LINE_COLOR, width=1)
+
+    # Footer: TRY ME badge
+    _text_center(draw, "✦  TRY ME  ✦", 885, _get_font(26, bold=True), ACCENT_COLOR)
+
+    # Tagline
+    _text_center(draw, "Découvrez avant de craquer", 930, _get_font(18), MUTED_COLOR)
+
+    # planetebeauty.com
+    _text_center(draw, "planetebeauty.com", 965, _get_font(16), ACCENT_COLOR)
 
     return card
 
@@ -197,76 +211,78 @@ def generate_recto(product_title: str, notes: dict, note_images: dict) -> Image.
 
 def generate_verso_template(product_title: str, product_handle: str, logo_img: Optional[Image.Image] = None) -> Image.Image:
     """
-    Generate verso template with logo, QR code, and placeholder for discount code.
+    Generate verso template — FULL SIZE layout with big QR + code placeholder.
     """
     card = Image.new("RGB", (CARD_W, CARD_H), BG_COLOR)
     draw = ImageDraw.Draw(card)
 
-    # Logo at top
+    short_title = _clean_product_title(product_title)
+
+    # Logo at top (big)
     if logo_img:
-        logo_w = 400
+        logo_w = 500
         ratio = logo_w / logo_img.width
         logo_h = int(logo_img.height * ratio)
         resized_logo = logo_img.resize((logo_w, logo_h), Image.LANCZOS)
         paste_x = (CARD_W - logo_w) // 2
         if resized_logo.mode == "RGBA":
-            card.paste(resized_logo, (paste_x, 40), resized_logo)
+            card.paste(resized_logo, (paste_x, 30), resized_logo)
         else:
-            card.paste(resized_logo, (paste_x, 40))
+            card.paste(resized_logo, (paste_x, 30))
+        logo_bottom = 30 + logo_h + 10
     else:
-        _text_center(draw, "PLANÈTEBEAUTY", 60, _get_font(30, bold=True), TEXT_COLOR)
+        _text_center(draw, "PLANÈTEBEAUTY", 50, _get_font(34, bold=True), TEXT_COLOR)
+        logo_bottom = 100
 
     # Product name
-    font_product = _get_font(24, bold=True)
-    _text_center(draw, product_title[:45], 200, font_product, TEXT_COLOR)
+    _text_center(draw, short_title, logo_bottom + 10, _get_font(28, bold=True), TEXT_COLOR)
 
     # Divider
-    draw.line([(CARD_W // 4, 250), (3 * CARD_W // 4, 250)], fill=LINE_COLOR, width=2)
+    div_y = logo_bottom + 55
+    draw.line([(80, div_y), (CARD_W - 80, div_y)], fill=LINE_COLOR, width=1)
 
-    # "Votre code Try Me" label
-    _text_center(draw, "Votre code Try Me", 280, _get_font(22), MUTED_COLOR)
+    # "VOTRE CODE TRY ME" label
+    _text_center(draw, "VOTRE CODE TRY ME", div_y + 18, _get_font(20), MUTED_COLOR)
 
-    # Code placeholder (will be stamped at order time)
-    # Draw a dashed box where the code goes
-    code_box_y = 320
-    code_box_h = 80
-    box_x0 = CARD_W // 4
-    box_x1 = 3 * CARD_W // 4
-    draw.rectangle([box_x0, code_box_y, box_x1, code_box_y + code_box_h],
-                    fill=(250, 247, 240), outline=ACCENT_COLOR, width=2)
-    _text_center(draw, "CODE", code_box_y + 25, _get_font(28, bold=True), MUTED_COLOR)
+    # Code placeholder box (BIG)
+    code_box_y = div_y + 55
+    code_box_h = 90
+    box_margin = 120
+    draw.rounded_rectangle([box_margin, code_box_y, CARD_W - box_margin, code_box_y + code_box_h],
+                            radius=12, fill=(250, 247, 240), outline=ACCENT_COLOR, width=2)
+    _text_center(draw, "CODE PROMO", code_box_y + 28, _get_font(30, bold=True), (200, 195, 185))
 
-    # Instructions
-    font_instr = _get_font(18)
-    y_instr = 430
-    instructions = [
-        "Utilisez ce code sur planetebeauty.com",
-        "pour déduire le montant de votre Try Me",
+    # Instructions (compact)
+    font_instr = _get_font(19)
+    y_i = code_box_y + code_box_h + 25
+    for text in [
+        "Déduisez le montant de votre Try Me",
         "de l'achat du format standard.",
         "",
-        "Valable 30 jours · Usage unique",
-        "Cumulable avec le code PB5",
-    ]
-    for line in instructions:
-        _text_center(draw, line, y_instr, font_instr, MUTED_COLOR if line else TEXT_COLOR)
-        y_instr += 28
+        "✓ Valable 30 jours",
+        "✓ Usage unique",
+        "✓ Cumulable avec le code PB5",
+    ]:
+        if text:
+            _text_center(draw, text, y_i, font_instr, TEXT_COLOR if text.startswith("✓") else MUTED_COLOR)
+        y_i += 30
 
-    # QR Code
+    # QR Code (BIG — 280px)
     product_url = f"https://planetebeauty.com/products/{product_handle}"
-    qr = qrcode.QRCode(version=1, error_correction=qrcode.constants.ERROR_CORRECT_M, box_size=5, border=2)
+    qr = qrcode.QRCode(version=1, error_correction=qrcode.constants.ERROR_CORRECT_M, box_size=8, border=2)
     qr.add_data(product_url)
     qr.make(fit=True)
     qr_img = qr.make_image(fill_color=(30, 30, 30), back_color=(255, 253, 248)).convert("RGB")
-    qr_size = 200
+    qr_size = 280
     qr_img = qr_img.resize((qr_size, qr_size), Image.LANCZOS)
-    card.paste(qr_img, ((CARD_W - qr_size) // 2, 680))
+    qr_y = y_i + 15
+    card.paste(qr_img, ((CARD_W - qr_size) // 2, qr_y))
 
     # QR label
-    _text_center(draw, "Scanner pour découvrir", 890, _get_font(16), MUTED_COLOR)
-    _text_center(draw, "le format complet", 912, _get_font(16), MUTED_COLOR)
+    _text_center(draw, "Scannez pour commander", qr_y + qr_size + 10, _get_font(18), MUTED_COLOR)
 
     # Footer
-    _text_center(draw, "planetebeauty.com", 960, _get_font(18, bold=True), ACCENT_COLOR)
+    _text_center(draw, "planetebeauty.com", 965, _get_font(18, bold=True), ACCENT_COLOR)
 
     return card
 
@@ -274,25 +290,38 @@ def generate_verso_template(product_title: str, product_handle: str, logo_img: O
 # ── STAMP CODE ON VERSO ──
 
 def stamp_code_on_verso(verso_template: Image.Image, code: str, order_name: str = "") -> Image.Image:
-    """Stamp the actual discount code onto the verso template."""
+    """Stamp the actual discount code onto the verso template.
+    Finds the code placeholder box by scanning for the beige rectangle area."""
     card = verso_template.copy()
     draw = ImageDraw.Draw(card)
 
-    # Overwrite the code placeholder area
-    code_box_y = 320
-    code_box_h = 80
-    box_x0 = CARD_W // 4
-    box_x1 = 3 * CARD_W // 4
-    draw.rectangle([box_x0, code_box_y, box_x1, code_box_y + code_box_h],
-                    fill=(250, 247, 240), outline=ACCENT_COLOR, width=2)
+    # The code box position depends on logo height, so we search for it
+    # by looking for the "CODE PROMO" placeholder text area
+    # Safe approach: clear and redraw the box region
+    # Box is at ~120px margin, somewhere between y=200-350
+    # We scan for the beige-colored box
+    box_margin = 120
+    # Find the box by checking pixel colors
+    box_y = None
+    for y in range(150, 400):
+        px = card.getpixel((box_margin + 5, y))
+        if px[0] >= 248 and px[1] >= 245 and px[2] >= 238:  # beige fill
+            box_y = y
+            break
 
-    font_code = _get_font(34, bold=True)
-    _text_center(draw, code, code_box_y + 20, font_code, ACCENT_COLOR)
+    if box_y is None:
+        box_y = 250  # fallback
 
-    # Order reference (small, bottom)
+    box_h = 90
+    draw.rounded_rectangle([box_margin, box_y, CARD_W - box_margin, box_y + box_h],
+                            radius=12, fill=(250, 247, 240), outline=ACCENT_COLOR, width=2)
+
+    font_code = _get_font(38, bold=True)
+    _text_center(draw, code, box_y + 22, font_code, ACCENT_COLOR)
+
+    # Order reference
     if order_name:
-        font_ref = _get_font(14)
-        _text_center(draw, f"Réf: {order_name}", 940, font_ref, MUTED_COLOR)
+        _text_center(draw, f"Réf: {order_name}", 940, _get_font(14), MUTED_COLOR)
 
     return card
 
@@ -342,7 +371,7 @@ async def pregenerate_card_assets(product_id: str, product_title: str, product_h
     for key in ["tete", "coeur", "fond"]:
         url = note_image_urls.get(key)
         if url:
-            note_images[key] = _download_image(url, (160, 160))
+            note_images[key] = _download_image(url, (240, 240))
 
     # Download logo
     logo_img = _download_image(logo_url, (400, 134)) if logo_url else None
