@@ -13,7 +13,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import httpx
 import aiosmtplib
-from tryme_cards import pregenerate_card_assets, generate_order_pdf, get_card_paths, CARDS_DIR
+from tryme_cards import pregenerate_card_assets, generate_order_pdf, get_card_paths, generate_single_card_pdf, stamp_code_on_verso, CARDS_DIR
 from fastapi import FastAPI, Request, HTTPException, Depends, UploadFile, File, Form
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse

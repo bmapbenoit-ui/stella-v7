@@ -135,15 +135,16 @@ def generate_recto(product_title: str, notes: dict, note_images: dict) -> Image.
 
     # Clean product title (remove brand prefix for card)
     short_title = product_title
-    for brand in ["Jousset Parfums ", "Plume Impression ", "Silona Paris ",
-                   "Les Mignardises by Jousset "]:
-        if short_title.startswith(brand):
+    for brand in ["Les Mignardises by Jousset ", "Jousset Parfums ", "Plume Impression ", "Silona Paris "]:
+        if short_title.lower().startswith(brand.lower()):
             short_title = short_title[len(brand):]
             break
 
-    # Remove concentration suffix
+    # Remove concentration suffix (whole words only, at end of string)
     import re
-    short_title = re.sub(r'\s*(eau de parfum|extrait de parfum|le parfum|parfum|edp).*$', '', short_title, flags=re.IGNORECASE).strip()
+    short_title = re.sub(r'\s+(eau de parfum|extrait de parfum|Extrait de Parfum|le parfum|edp|edt)\s*$', '', short_title, flags=re.IGNORECASE).strip()
+    # Also remove standalone "parfum" only at end (not inside words like "Vanille parfum")
+    short_title = re.sub(r'\s+parfum\s*$', '', short_title, flags=re.IGNORECASE).strip()
 
     _text_center(draw, "PLANÈTEBEAUTY", 30, _get_font(18), ACCENT_COLOR)
     _text_center(draw, short_title, 65, font_title, TEXT_COLOR)
@@ -296,85 +297,33 @@ def stamp_code_on_verso(verso_template: Image.Image, code: str, order_name: str 
     return card
 
 
-# ── A4 PDF GENERATION ──
+# ── INDIVIDUAL CARD PDF (pre-cut cards, printed from top tray) ──
 
-def generate_a4_pdf(cards: list[tuple[Image.Image, Image.Image]], output_path: str):
+def generate_single_card_pdf(recto: Image.Image, verso: Image.Image, output_path: str):
     """
-    Generate A4 PDF with cards (recto/verso).
-    cards: list of (recto_img, verso_img) tuples.
-    Fills 6 cards per page. Recto on page 1, verso on page 2 (mirrored for double-sided).
+    Generate PDF with 1 card: page 1 = recto, page 2 = verso.
+    Card is printed on pre-cut cardstock (~90x85mm) from printer top tray.
+    """
+    recto.save(output_path, "PDF", resolution=DPI, save_all=True, append_images=[verso])
+    logger.info(f"Single card PDF: {output_path}")
+
+
+def generate_multi_card_pdf(cards: list[tuple[Image.Image, Image.Image]], output_path: str):
+    """
+    Generate PDF with multiple cards: alternating recto/verso pages.
+    Each card = 2 pages (recto then verso). Printer does auto recto/verso.
     """
     if not cards:
         return
 
-    # Pad to multiple of 6
-    while len(cards) % 6 != 0:
-        cards.append(cards[-1])  # duplicate last card to fill
-
     pages = []
-    for batch_start in range(0, len(cards), 6):
-        batch = cards[batch_start:batch_start + 6]
+    for recto, verso in cards:
+        pages.append(recto)
+        pages.append(verso)
 
-        # Recto page
-        recto_page = Image.new("RGB", (A4_W, A4_H), (255, 255, 255))
-        recto_draw = ImageDraw.Draw(recto_page)
-
-        # Verso page (mirrored horizontally for double-sided printing)
-        verso_page = Image.new("RGB", (A4_W, A4_H), (255, 255, 255))
-        verso_draw = ImageDraw.Draw(verso_page)
-
-        for idx, (recto, verso) in enumerate(batch):
-            row = idx // COLS
-            col = idx % COLS
-            x = MARGIN_X + col * (CARD_W + MARGIN_X)
-            y = MARGIN_Y + row * (CARD_H + MARGIN_Y)
-
-            # Recto: normal order
-            recto_page.paste(recto, (x, y))
-
-            # Verso: mirror columns (col 0 → col 1, col 1 → col 0) for double-sided
-            mirror_col = (COLS - 1) - col
-            vx = MARGIN_X + mirror_col * (CARD_W + MARGIN_X)
-            verso_page.paste(verso, (vx, y))
-
-            # Crop marks on both pages
-            mark_len = 30
-            for page_draw, px, py in [(recto_draw, x, y), (verso_draw, vx if page_draw == verso_draw else x, y)]:
-                pass  # Skip complex crop marks for now
-
-        # Draw crop marks (simple corner marks)
-        for page, page_draw in [(recto_page, recto_draw), (verso_page, verso_draw)]:
-            for idx in range(len(batch)):
-                row = idx // COLS
-                col = idx % COLS
-                if page == recto_page:
-                    x = MARGIN_X + col * (CARD_W + MARGIN_X)
-                else:
-                    mirror_col = (COLS - 1) - (idx % COLS)
-                    x = MARGIN_X + mirror_col * (CARD_W + MARGIN_X)
-                y = MARGIN_Y + row * (CARD_H + MARGIN_Y)
-                m = 20  # mark length
-                c = (180, 180, 180)
-                # Top-left
-                page_draw.line([(x - 10, y), (x - 10 - m, y)], fill=c, width=1)
-                page_draw.line([(x, y - 10), (x, y - 10 - m)], fill=c, width=1)
-                # Top-right
-                page_draw.line([(x + CARD_W + 10, y), (x + CARD_W + 10 + m, y)], fill=c, width=1)
-                page_draw.line([(x + CARD_W, y - 10), (x + CARD_W, y - 10 - m)], fill=c, width=1)
-                # Bottom-left
-                page_draw.line([(x - 10, y + CARD_H), (x - 10 - m, y + CARD_H)], fill=c, width=1)
-                page_draw.line([(x, y + CARD_H + 10), (x, y + CARD_H + 10 + m)], fill=c, width=1)
-                # Bottom-right
-                page_draw.line([(x + CARD_W + 10, y + CARD_H), (x + CARD_W + 10 + m, y + CARD_H)], fill=c, width=1)
-                page_draw.line([(x + CARD_W, y + CARD_H + 10), (x + CARD_W, y + CARD_H + 10 + m)], fill=c, width=1)
-
-        pages.append(recto_page)
-        pages.append(verso_page)
-
-    # Save as PDF
     if pages:
         pages[0].save(output_path, "PDF", resolution=DPI, save_all=True, append_images=pages[1:])
-        logger.info(f"A4 PDF generated: {output_path} ({len(pages)} pages, {len(cards)} cards)")
+        logger.info(f"Multi-card PDF: {output_path} ({len(cards)} cards, {len(pages)} pages)")
 
 
 # ── PRE-GENERATION ──
@@ -423,8 +372,9 @@ def get_card_paths(product_id: str) -> tuple[Optional[str], Optional[str]]:
 
 def generate_order_pdf(cards_data: list[dict], output_path: str):
     """
-    Generate A4 PDF for an order.
+    Generate PDF for an order (individual pre-cut cards, recto/verso auto).
     cards_data: [{"product_id": "...", "code": "TM-...", "order_name": "#1234"}]
+    Each card = 2 pages (recto + verso). Printer handles double-sided auto.
     """
     cards = []
     for cd in cards_data:
@@ -438,6 +388,6 @@ def generate_order_pdf(cards_data: list[dict], output_path: str):
         cards.append((recto, verso))
 
     if cards:
-        generate_a4_pdf(cards, output_path)
+        generate_multi_card_pdf(cards, output_path)
         return True
     return False
