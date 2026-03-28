@@ -602,17 +602,19 @@ const STELLA = {
         const codes = data.recent_codes || [];
         tbody.innerHTML = codes.length ? codes.map(c => {
           const statusClass = c.status === 'pending' ? 'success' : c.status === 'used' ? 'gold' : 'error';
-          const pdfLink = c.order_id ? `<a href="/api/tryme/card-pdf/${c.order_id}" target="_blank" style="color:var(--accent)">PDF</a>` : '--';
+          const pdfLink = (c.order_id && c.discount_code) ? `<a href="/api/tryme/card-pdf/${c.order_id}" target="_blank" class="btn-gold" style="font-size:0.75rem;padding:4px 10px;text-decoration:none">Imprimer</a>` : '<span style="color:var(--text-muted)">En attente</span>';
+          const orderName = c.order_name || (c.order_id ? `#${c.order_id}` : '--');
           return `<tr>
+            <td>${orderName}</td>
             <td><strong style="color:var(--accent)">${c.discount_code || '--'}</strong></td>
             <td>${c.product_title || '--'}</td>
-            <td>-${c.tryme_price || 0}€</td>
+            <td>-${c.tryme_price || 0}\u20AC</td>
             <td>${c.customer_email || '--'}</td>
             <td>${STELLA.shortTime(c.discount_expires_at)}</td>
             <td><span class="badge-pill badge-${statusClass}">${c.status}</span></td>
             <td>${pdfLink}</td>
           </tr>`;
-        }).join('') : '<tr><td colspan="7" style="text-align:center;color:var(--text-muted)">Aucun code Try Me</td></tr>';
+        }).join('') : '<tr><td colspan="8" style="text-align:center;color:var(--text-muted)">Aucun code Try Me</td></tr>';
 
         // Cards preview grid
         const grid = document.getElementById('tryme-cards-grid');

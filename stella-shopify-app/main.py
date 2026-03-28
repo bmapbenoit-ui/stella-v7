@@ -1536,13 +1536,16 @@ async def tryme_card_pdf(order_id: str):
 
 
 @app.get("/api/tryme/card-preview/{product_id}")
-async def tryme_card_preview(product_id: str):
-    """Preview recto card for a product."""
+async def tryme_card_preview(product_id: str, side: str = "recto"):
+    """Preview recto or verso card for a product."""
     from starlette.responses import FileResponse
-    recto_path = CARDS_DIR / f"recto_{product_id}.png"
-    if not recto_path.exists():
-        raise HTTPException(404, "Card not pre-generated for this product")
-    return FileResponse(str(recto_path), media_type="image/png")
+    if side == "verso":
+        path = CARDS_DIR / f"verso_{product_id}.png"
+    else:
+        path = CARDS_DIR / f"recto_{product_id}.png"
+    if not path.exists():
+        raise HTTPException(404, f"Card {side} not pre-generated for product {product_id}")
+    return FileResponse(str(path), media_type="image/png")
 
 
 @app.post("/api/tryme/create-variants")
