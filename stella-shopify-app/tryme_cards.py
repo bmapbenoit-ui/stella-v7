@@ -471,12 +471,12 @@ async def pregenerate_card_assets(product_id: str, product_title: str, product_h
 
     # Generate recto
     recto = generate_recto(product_title, notes, note_images, product_img)
-    recto_path = CARDS_DIR / f"{product_id}_recto.png"
+    recto_path = CARDS_DIR / f"recto_{product_id}.png"
     recto.save(str(recto_path), "PNG")
 
     # Generate verso template
     verso = generate_verso_template(product_title, product_handle, logo_img)
-    verso_path = CARDS_DIR / f"{product_id}_verso.png"
+    verso_path = CARDS_DIR / f"verso_{product_id}.png"
     verso.save(str(verso_path), "PNG")
 
     logger.info(f"Pre-generated cards for {product_title} ({product_id})")
@@ -485,3 +485,48 @@ async def pregenerate_card_assets(product_id: str, product_title: str, product_h
         "recto": str(recto_path),
         "verso": str(verso_path),
     }
+
+
+def get_card_paths(product_id: str) -> dict:
+    """Get paths for pre-generated card assets."""
+    recto = CARDS_DIR / f"recto_{product_id}.png"
+    verso = CARDS_DIR / f"verso_{product_id}.png"
+    return {
+        "recto": str(recto) if recto.exists() else None,
+        "verso": str(verso) if verso.exists() else None,
+    }
+
+
+def generate_order_pdf(cards_data: list, output_path: str) -> bool:
+    """Generate PDF for an order with all Try Me cards.
+    cards_data = list of {"recto": path, "verso": path, "code": str, "order_name": str}
+    """
+    try:
+        card_pairs = []
+        for cd in cards_data:
+            recto_path = cd.get("recto")
+            verso_path = cd.get("verso")
+            code = cd.get("code", "")
+            order_name = cd.get("order_name", "")
+
+            if not recto_path or not verso_path:
+                continue
+            if not Path(recto_path).exists() or not Path(verso_path).exists():
+                continue
+
+            recto = Image.open(recto_path).convert("RGB")
+            verso_tpl = Image.open(verso_path).convert("RGB")
+            verso = stamp_code_on_verso(verso_tpl, code, order_name)
+            card_pairs.append((recto, verso))
+
+        if not card_pairs:
+            return False
+
+        if len(card_pairs) == 1:
+            generate_single_card_pdf(card_pairs[0][0], card_pairs[0][1], output_path)
+        else:
+            generate_a4_pdf(card_pairs, output_path)
+        return True
+    except Exception as e:
+        logger.error(f"Error generating order PDF: {e}")
+        return False
