@@ -1422,6 +1422,31 @@ async def webhook_tryme_order(request: Request):
         results.append({"product": product_title, "code": code, "email": customer_email,
                         "discount_gid": discount_gid, "product_id": product_id})
 
+    # Write Try Me codes as metafield on order (for Order Printer invoice)
+    codes_for_invoice = [r for r in results if r.get("code")]
+    if codes_for_invoice:
+        try:
+            # Format: "CODE | Produit\nCODE2 | Produit2"
+            tryme_text = "\n".join([f"{r['code']} | -{float(item_price):.0f}€ sur {r['product']}" for r in codes_for_invoice])
+            mf_mutation = """mutation($metafields: [MetafieldsSetInput!]!) {
+              metafieldsSet(metafields: $metafields) {
+                metafields { id } userErrors { field message }
+              }
+            }"""
+            mf_vars = {"metafields": [{
+                "ownerId": f"gid://shopify/Order/{order_id}",
+                "namespace": "planete-beaute",
+                "key": "tryme-codes",
+                "type": "multi_line_text_field",
+                "value": tryme_text,
+            }]}
+            async with httpx.AsyncClient(timeout=10) as c:
+                await c.post(SHOPIFY_GRAPHQL_URL, json={"query": mf_mutation, "variables": mf_vars},
+                           headers={"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"})
+            logger.info(f"Try Me metafield written on order {order_id}: {tryme_text}")
+        except Exception as e:
+            logger.error(f"Try Me metafield write error: {e}")
+
     # Generate PDF card for printing
     if results:
         try:
