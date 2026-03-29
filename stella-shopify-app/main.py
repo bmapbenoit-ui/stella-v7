@@ -3875,8 +3875,23 @@ async def save_promo_settings(request: Request):
             if errors:
                 return {"success": False, "errors": errors}
 
+        # Also sync to SHOP metafield so Liquid can read it
+        shop_r = await c.post(SHOPIFY_GRAPHQL_URL, json={"query": "{ shop { id } }"},
+                             headers={"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"})
+        shop_id = shop_r.json().get("data", {}).get("shop", {}).get("id", "")
+        if shop_id:
+            shop_mf_vars = {"metafields": [{
+                "ownerId": shop_id,
+                "namespace": "planete-beaute",
+                "key": "promo-codes",
+                "type": "json",
+                "value": config_json,
+            }]}
+            await c.post(SHOPIFY_GRAPHQL_URL, json={"query": mutation, "variables": shop_mf_vars},
+                        headers={"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"})
+
         code_count = len(codes)
-        log_activity("promo_config", f"Codes promo mis à jour: {code_count} codes actifs",
+        log_activity("promo_config", f"Codes promo mis à jour: {code_count} codes actifs (shop metafield synced)",
                      {"codes": list(codes.keys())}, source="api")
         return {"success": True, "codes_count": code_count}
     except Exception as e:
