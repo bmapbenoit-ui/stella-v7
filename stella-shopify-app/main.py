@@ -1420,14 +1420,14 @@ async def webhook_tryme_order(request: Request):
                 logger.error(f"Try Me email error: {e}")
 
         results.append({"product": product_title, "code": code, "email": customer_email,
-                        "discount_gid": discount_gid, "product_id": product_id})
+                        "discount_gid": discount_gid, "product_id": product_id, "price": item_price})
 
     # Write Try Me codes as metafield on order (for Order Printer invoice)
     codes_for_invoice = [r for r in results if r.get("code")]
     if codes_for_invoice:
         try:
             # Format: "CODE | Produit\nCODE2 | Produit2"
-            tryme_text = "\n".join([f"{r['code']} | -{float(item_price):.0f}€ sur {r['product']}" for r in codes_for_invoice])
+            tryme_text = "\n".join([f"{r['code']} | -{float(r['price']):.0f}€ sur {r['product']}" for r in codes_for_invoice])
             mf_mutation = """mutation($metafields: [MetafieldsSetInput!]!) {
               metafieldsSet(metafields: $metafields) {
                 metafields { id } userErrors { field message }
