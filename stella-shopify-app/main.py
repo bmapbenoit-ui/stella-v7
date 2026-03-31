@@ -288,7 +288,7 @@ async def _run_cron(name, endpoint):
     try:
         async with httpx.AsyncClient(timeout=120) as client:
             r = await client.post(f"http://localhost:{os.getenv('PORT', '8000')}{endpoint}",
-                                  headers={"X-Cron-Key": os.getenv("RAILWAY_CRON_KEY", "stella-internal")})
+                                  headers={"X-API-Key": "stella-mem-2026-planetebeauty"})
             logger.info(f"Scheduler {name}: {r.status_code}")
             status = "success" if r.status_code == 200 else "error"
             log_activity("cron_run", f"Cron {name} exécuté ({r.status_code})",
