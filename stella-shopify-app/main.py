@@ -3245,12 +3245,15 @@ async def _process_cashback_inner(body):
     tryme_total = 0.0
     for li in body.get("line_items", []):
         title = (li.get("title") or "").lower()
+        variant_title = (li.get("variant_title") or "").lower()
         li_tags = li.get("tags") or []
         if isinstance(li_tags, str):
             li_tags = [t.strip() for t in li_tags.split(",") if t.strip()]
         product_type = (li.get("product_type") or "").lower()
-        # Exclude Try Me, gifts, samples by title or product_type
-        if any(kw in title for kw in ["try me", "tryme", "échantillon", "echantillon", "mystère", "mystere", "cadeau", "gift", "shipping", "livraison"]) or product_type in ["try me", "gift"]:
+        # Exclude Try Me (check BOTH product title AND variant title), gifts, samples
+        is_tryme = "try me" in title or "tryme" in title or "try me" in variant_title or "tryme" in variant_title
+        is_excluded = any(kw in title for kw in ["échantillon", "echantillon", "mystère", "mystere", "cadeau", "gift", "shipping", "livraison"]) or product_type in ["try me", "gift"]
+        if is_tryme or is_excluded:
             tryme_total += float(li.get("price", "0")) * int(li.get("quantity", 1))
 
     # Detect store credit used in this order (payment gateway = "gift_card" or "store_credit")
@@ -3290,7 +3293,9 @@ async def _process_cashback_inner(body):
             }, headers={"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"})
             order_data = r.json().get("data", {}).get("order", {})
             if order_data:
-                cashback_base = float(order_data.get("currentSubtotalPriceSet", {}).get("shopMoney", {}).get("amount", cashback_base))
+                api_subtotal = float(order_data.get("currentSubtotalPriceSet", {}).get("shopMoney", {}).get("amount", cashback_base))
+                # Subtract Try Me total from API subtotal (API includes everything)
+                cashback_base = api_subtotal - tryme_total
                 # Check transactions for store credit / gift card usage
                 for edge in order_data.get("transactions", {}).get("edges", []):
                     txn = edge["node"]
