@@ -2668,7 +2668,7 @@ async def quiz_regenerate():
             query = '''{
               products(first: 50%s, query: "product_type:'Extrait de Parfum' OR product_type:'Eau de Parfum' OR product_type:'Eau de Parfum Intense' OR product_type:'Eau de Toilette'") {
                 edges { node {
-                  handle title vendor productType
+                  handle title vendor productType createdAt
                   priceRangeV2 { minVariantPrice { amount } }
                   metafields(first: 20, keys: ["parfum.genre","parfum.famille_olfactive","parfum.accord_principal","parfum.accords_secondaires","parfum.saison","parfum.occasions","parfum.moment","parfum.intensite","parfum.sillage_level","parfum.note_tete_principale","parfum.note_coeur_principale","parfum.note_fond_principale","parfum.notes_cles","parfum.concentration","parfum.contenance_ml"]) {
                     edges { node { key value } }
@@ -2713,7 +2713,8 @@ async def quiz_regenerate():
                     "int": int(mf.get("intensite", "3")), "sil": int(mf.get("sillage_level", "2")),
                     "nt": mf.get("note_tete_principale", ""), "nc": mf.get("note_coeur_principale", ""),
                     "nf": mf.get("note_fond_principale", ""), "nk": parse_list(mf.get("notes_cles", "")),
-                    "conc": mf.get("concentration", p["productType"]), "var": variants
+                    "conc": mf.get("concentration", p["productType"]), "var": variants,
+                    "ca": p.get("createdAt", "")[:10]
                 })
             pi = products.get("pageInfo", {})
             if not pi.get("hasNextPage"): break
