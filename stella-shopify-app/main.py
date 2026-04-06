@@ -3049,7 +3049,7 @@ async def get_pending_reviews(request: Request):
             try: db.rollback()
             except: pass
         cur.execute("""SELECT id, title, body, rating, reviewer_name, reviewer_email, product_handle,
-                        order_number, review_date, created_at
+                        order_number, source, review_date, created_at
                     FROM product_reviews WHERE curated = 'pending'
                     ORDER BY created_at DESC LIMIT 100""")
         rows = cur.fetchall()
@@ -3103,6 +3103,10 @@ async def submit_review(request: Request):
         title = body.get("title", "").strip()
         review_body = body.get("body", "").strip()
         order_number = body.get("order_number", "").strip()
+        # source: "site" (direct from product page) or "flow-email" (from post-delivery email)
+        source = body.get("source", "site").strip()
+        if source not in ("site", "flow-email"):
+            source = "site"
 
         # Validation
         if not handle or not name or not rating or not review_body:
@@ -3143,15 +3147,43 @@ async def submit_review(request: Request):
         # Insert with curated='pending'
         cur.execute("""INSERT INTO product_reviews
             (title, body, rating, review_date, source, curated, reviewer_name, reviewer_email, product_handle, order_number)
-            VALUES (%s, %s, %s, NOW(), 'site', 'pending', %s, %s, %s, %s)
+            VALUES (%s, %s, %s, NOW(), %s, 'pending', %s, %s, %s, %s)
             ON CONFLICT (product_handle, reviewer_name, rating, title) DO NOTHING""",
-            (title, review_body, rating, name, email, handle, order_number or None))
+            (title, review_body, rating, source, name, email, handle, order_number or None))
         db.commit()
         inserted = cur.rowcount > 0
         cur.close(); db.close()
 
         if inserted:
-            log_activity("review_submit", f"Nouvel avis ({rating}★) pour {handle} par {name}", {"handle": handle, "rating": rating})
+            log_activity("review_submit", f"Nouvel avis ({rating}★) pour {handle} par {name} [source:{source}]", {"handle": handle, "rating": rating, "source": source})
+            # Send email notification to info@planetebeauty.com
+            try:
+                if SMTP_HOST:
+                    from email.mime.multipart import MIMEMultipart
+                    source_label = "page produit" if source == "site" else "email post-livraison"
+                    msg = MIMEMultipart("alternative")
+                    msg["Subject"] = f"Nouvel avis ({rating}★) - {handle} par {name}"
+                    msg["From"] = f"{SMTP_FROM_NAME} <{SMTP_FROM_EMAIL}>"
+                    msg["To"] = "info@planetebeauty.com"
+                    notif_html = f"""<div style="font-family:Arial,sans-serif;max-width:500px">
+                        <h3 style="color:#C8984E">Nouvel avis client en attente</h3>
+                        <p><strong>Produit :</strong> {handle}</p>
+                        <p><strong>Client :</strong> {name} ({email or 'pas d\\'email'})</p>
+                        <p><strong>Note :</strong> {'⭐' * rating}</p>
+                        <p><strong>Source :</strong> {source_label}</p>
+                        {f'<p><strong>Commande :</strong> {order_number}</p>' if order_number else ''}
+                        {f'<p><strong>Titre :</strong> {title}</p>' if title else ''}
+                        <p><strong>Avis :</strong><br>{review_body}</p>
+                        <hr>
+                        <p style="font-size:12px;color:#888">Rendez-vous dans l'onglet <strong>Avis</strong> du dashboard STELLA V8 pour modérer.</p>
+                    </div>"""
+                    msg.attach(MIMEText(notif_html, "html", "utf-8"))
+                    await aiosmtplib.send(msg, hostname=SMTP_HOST, port=SMTP_PORT,
+                                          username=SMTP_USER, password=SMTP_PASS, use_tls=False, start_tls=True)
+                    logger.info(f"Review notification sent to info@planetebeauty.com for {handle}")
+            except Exception as mail_err:
+                logger.warning(f"Review notification email failed: {mail_err}")
+
             return {"success": True, "message": "Merci pour votre avis ! Il sera publié après vérification."}
         else:
             return {"success": True, "message": "Merci ! Vous avez déjà laissé un avis similaire."}
@@ -3162,13 +3194,14 @@ async def submit_review(request: Request):
 
 @app.post("/api/reviews/approve")
 async def approve_review(request: Request):
-    """Dashboard: approve a review + credit 5€ store credit (30 days) to customer."""
+    """Dashboard: approve a review. Optionally credit 5€ store credit (30 days) if with_credit=true."""
     api_key = request.headers.get("x-api-key", "")
     if api_key != "stella-mem-2026-planetebeauty":
         return {"success": False, "error": "Unauthorized"}
     try:
         body = await request.json()
         review_id = body.get("review_id")
+        with_credit = body.get("with_credit", False)
         if not review_id:
             return {"success": False, "error": "review_id requis"}
 
@@ -3190,74 +3223,74 @@ async def approve_review(request: Request):
         # 1. Publish the review
         cur.execute("UPDATE product_reviews SET curated = 'ok' WHERE id = %s", (review_id,))
         db.commit()
+        cur.close(); db.close()
 
-        # 2. Credit 5€ store credit (30 days) if email exists
+        # 2. Credit 5€ store credit (30 days) ONLY if with_credit=true
         credit_ok = False
         credit_error = None
-        email = (review.get("reviewer_email") or "").strip()
 
-        if email:
-            gql_url = f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/{SHOPIFY_API_VERSION}/graphql.json"
-            headers_gql = {"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"}
+        if with_credit:
+            email = (review.get("reviewer_email") or "").strip()
+            if email:
+                gql_url = f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/{SHOPIFY_API_VERSION}/graphql.json"
+                headers_gql = {"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"}
 
-            # Find customer by email
-            async with httpx.AsyncClient(timeout=10) as c:
-                search_r = await c.post(gql_url, json={
-                    "query": '{ customers(first:1, query:"email:%s") { edges { node { id } } } }' % email
-                }, headers=headers_gql)
-                edges = search_r.json().get("data", {}).get("customers", {}).get("edges", [])
-
-                if edges:
-                    customer_gid = edges[0]["node"]["id"]
-
-                    # Get or create store credit account
-                    acc_r = await c.post(gql_url, json={
-                        "query": '{customer(id: "%s") { storeCreditAccounts(first:1) { edges { node { id } } } }}' % customer_gid
+                async with httpx.AsyncClient(timeout=10) as c:
+                    search_r = await c.post(gql_url, json={
+                        "query": '{ customers(first:1, query:"email:%s") { edges { node { id } } } }' % email
                     }, headers=headers_gql)
-                    acc_edges = acc_r.json().get("data", {}).get("customer", {}).get("storeCreditAccounts", {}).get("edges", [])
-                    target_id = acc_edges[0]["node"]["id"] if acc_edges else customer_gid
+                    edges = search_r.json().get("data", {}).get("customers", {}).get("edges", [])
 
-                    # Credit 5€ with 30 day expiry
-                    from datetime import timedelta
-                    expires_at = (datetime.utcnow() + timedelta(days=30)).strftime("%Y-%m-%dT23:59:59Z")
+                    if edges:
+                        customer_gid = edges[0]["node"]["id"]
+                        acc_r = await c.post(gql_url, json={
+                            "query": '{customer(id: "%s") { storeCreditAccounts(first:1) { edges { node { id } } } }}' % customer_gid
+                        }, headers=headers_gql)
+                        acc_edges = acc_r.json().get("data", {}).get("customer", {}).get("storeCreditAccounts", {}).get("edges", [])
+                        target_id = acc_edges[0]["node"]["id"] if acc_edges else customer_gid
 
-                    credit_mutation = """mutation($id: ID!, $creditInput: StoreCreditAccountCreditInput!) {
-                        storeCreditAccountCredit(id: $id, creditInput: $creditInput) {
-                            storeCreditAccountTransaction { id amount { amount currencyCode } }
-                            userErrors { field message }
-                        }
-                    }"""
-                    cr = await c.post(gql_url, json={
-                        "query": credit_mutation,
-                        "variables": {
-                            "id": target_id,
-                            "creditInput": {
-                                "creditAmount": {"amount": "5.00", "currencyCode": "EUR"},
-                                "expiresAt": expires_at
+                        from datetime import timedelta
+                        expires_at = (datetime.utcnow() + timedelta(days=30)).strftime("%Y-%m-%dT23:59:59Z")
+
+                        credit_mutation = """mutation($id: ID!, $creditInput: StoreCreditAccountCreditInput!) {
+                            storeCreditAccountCredit(id: $id, creditInput: $creditInput) {
+                                storeCreditAccountTransaction { id amount { amount currencyCode } }
+                                userErrors { field message }
                             }
-                        }
-                    }, headers=headers_gql)
-                    cr_data = cr.json()
-                    u_errors = cr_data.get("data", {}).get("storeCreditAccountCredit", {}).get("userErrors", [])
-                    if not u_errors and cr_data.get("data", {}).get("storeCreditAccountCredit", {}).get("storeCreditAccountTransaction"):
-                        credit_ok = True
-                        log_activity("review_credit", f"Avis approuve: 5€ credite a {email} pour {review['product_handle']}",
-                                     {"email": email, "review_id": review_id, "amount": 5.00, "expires": expires_at},
-                                     source="dashboard", customer_email=email)
+                        }"""
+                        cr = await c.post(gql_url, json={
+                            "query": credit_mutation,
+                            "variables": {
+                                "id": target_id,
+                                "creditInput": {
+                                    "creditAmount": {"amount": "5.00", "currencyCode": "EUR"},
+                                    "expiresAt": expires_at
+                                }
+                            }
+                        }, headers=headers_gql)
+                        cr_data = cr.json()
+                        u_errors = cr_data.get("data", {}).get("storeCreditAccountCredit", {}).get("userErrors", [])
+                        if not u_errors and cr_data.get("data", {}).get("storeCreditAccountCredit", {}).get("storeCreditAccountTransaction"):
+                            credit_ok = True
+                            log_activity("review_credit", f"Avis approuve: 5€ credite a {email} pour {review['product_handle']}",
+                                         {"email": email, "review_id": review_id, "amount": 5.00, "expires": expires_at},
+                                         source="dashboard", customer_email=email)
+                        else:
+                            credit_error = u_errors[0].get("message", "Erreur credit") if u_errors else "Erreur mutation"
                     else:
-                        credit_error = u_errors[0].get("message", "Erreur credit") if u_errors else "Erreur mutation"
-                else:
-                    credit_error = f"Client non trouve pour {email}"
-        else:
-            credit_error = "Pas d'email — credit non attribue"
+                        credit_error = f"Client non trouve pour {email}"
+            else:
+                credit_error = "Pas d'email — credit non attribue"
 
-        cur.close(); db.close()
+        msg = "Avis publie"
+        if with_credit:
+            msg += " + 5€ credite (30j)" if credit_ok else f" (credit: {credit_error})"
         return {
             "success": True,
             "published": True,
             "credit_ok": credit_ok,
             "credit_error": credit_error,
-            "message": f"Avis publie" + (" + 5€ credite (30j)" if credit_ok else f" (credit: {credit_error})")
+            "message": msg
         }
     except Exception as e:
         logger.error(f"Review approve error: {e}")

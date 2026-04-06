@@ -370,13 +370,20 @@ const STELLA = {
         list.innerHTML = '<div class="empty-state"><p>Aucun avis en attente</p></div>';
         return;
       }
-      list.innerHTML = data.reviews.map(r => `
+      list.innerHTML = data.reviews.map(r => {
+        const isFromEmail = r.source === 'flow-email';
+        const sourceLabel = isFromEmail ? '<span style="background:#C8984E;color:#fff;font-size:10px;padding:2px 6px;border-radius:4px;margin-left:8px">Via email</span>' : '<span style="background:var(--border);color:var(--text-secondary);font-size:10px;padding:2px 6px;border-radius:4px;margin-left:8px">Page produit</span>';
+        const approveBtn = isFromEmail
+          ? `<button class="btn-primary" onclick="STELLA.reviews.approve(${r.id}, true)">Publier + 5\u20ac credit (30j)</button>`
+          : `<button class="btn-primary" onclick="STELLA.reviews.approve(${r.id}, false)">Publier</button>`;
+        return `
         <div class="activity-item" id="pending-review-${r.id}" style="flex-wrap:wrap;gap:8px;padding:12px;border-radius:8px;background:var(--bg-card);border:1px solid var(--border)">
           <div style="width:100%;display:flex;justify-content:space-between;align-items:center">
             <div>
               <strong>${r.reviewer_name || 'Anonyme'}</strong>
               <span style="color:var(--text-muted);font-size:12px;margin-left:8px">${r.reviewer_email || 'pas d\'email'}</span>
               ${r.order_number ? '<span style="color:var(--gold);font-size:12px;margin-left:8px">Commande: ' + r.order_number + '</span>' : ''}
+              ${sourceLabel}
             </div>
             <span style="font-size:12px;color:var(--text-muted)">${STELLA.shortTime(r.created_at)}</span>
           </div>
@@ -387,22 +394,22 @@ const STELLA = {
           </div>
           <div style="width:100%;display:flex;gap:8px;justify-content:flex-end;margin-top:4px">
             <button class="btn-outline" style="color:#EA4335;border-color:#EA4335" onclick="STELLA.reviews.reject(${r.id})">Rejeter</button>
-            <button class="btn-primary" onclick="STELLA.reviews.approve(${r.id})">Publier + 5\u20ac credit (30j)</button>
+            ${approveBtn}
           </div>
-        </div>
-      `).join('');
+        </div>`;
+      }).join('');
     },
-    async approve(reviewId) {
-      if (!confirm('Publier cet avis et crediter 5\u20ac au client ?')) return;
+    async approve(reviewId, withCredit) {
+      const msg = withCredit ? 'Publier cet avis et crediter 5\u20ac au client ?' : 'Publier cet avis ?';
+      if (!confirm(msg)) return;
       const btn = event.target;
       btn.disabled = true;
       btn.textContent = 'En cours...';
-      const r = await STELLA.apiPost('/api/reviews/approve', { review_id: reviewId });
+      const r = await STELLA.apiPost('/api/reviews/approve', { review_id: reviewId, with_credit: withCredit });
       if (r && r.success) {
-        STELLA.showToast(r.message || 'Avis publie + credit', 'success');
+        STELLA.showToast(r.message || 'Avis publie', 'success');
         const el = document.getElementById('pending-review-' + reviewId);
         if (el) el.remove();
-        // Check if empty
         const list = document.getElementById('reviews-pending-list');
         if (!list.querySelector('.activity-item')) {
           list.innerHTML = '<div class="empty-state"><p>Aucun avis en attente</p></div>';
@@ -411,7 +418,7 @@ const STELLA = {
       } else {
         STELLA.showToast(r ? r.error : 'Erreur', 'error');
         btn.disabled = false;
-        btn.textContent = 'Publier + 5\u20ac credit (30j)';
+        btn.textContent = withCredit ? 'Publier + 5\u20ac credit (30j)' : 'Publier';
       }
     },
     async reject(reviewId) {
