@@ -3346,6 +3346,68 @@ async def reject_review(request: Request):
         return {"success": False, "error": str(e)}
 
 
+@app.get("/google-optin")
+async def google_optin_page(request: Request):
+    """Public: render Google Customer Reviews opt-in module.
+    Called from checkout UI extension on thank-you page.
+    Accepts ?order_id=X&email=X&country=XX&delivery_date=YYYY-MM-DD"""
+    order_id = request.query_params.get("order_id", "")
+    email = request.query_params.get("email", "")
+    country = request.query_params.get("country", "FR")
+    delivery_date = request.query_params.get("delivery_date", "")
+
+    if not delivery_date:
+        from datetime import timedelta
+        delivery_date = (datetime.utcnow() + timedelta(days=10)).strftime("%Y-%m-%d")
+
+    html = f"""<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Avis Google - PlaneteBeauty</title>
+    <style>
+        body {{ font-family: 'Outfit', -apple-system, sans-serif; background: #FAF7F2; margin: 0; padding: 0; display: flex; justify-content: center; align-items: center; min-height: 100vh; }}
+        .container {{ max-width: 480px; padding: 40px 24px; text-align: center; }}
+        .logo {{ font-family: 'Cormorant Garamond', serif; font-size: 28px; color: #C8984E; margin-bottom: 24px; }}
+        h1 {{ font-size: 20px; font-weight: 400; color: #1A1A1A; margin-bottom: 12px; font-family: 'Cormorant Garamond', serif; }}
+        p {{ font-size: 14px; color: #6B6560; line-height: 1.6; margin-bottom: 24px; }}
+        .thanks {{ display: none; font-size: 16px; color: #34A853; margin-top: 24px; }}
+        .loading {{ font-size: 13px; color: #9B9590; }}
+    </style>
+    <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@400;600&family=Outfit:wght@300;400;500&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="container">
+        <div class="logo">PlaneteBeauty</div>
+        <h1>Merci pour votre commande !</h1>
+        <p>Nous souhaitons vous offrir la meilleure experience possible.<br>
+        Acceptez de recevoir un court questionnaire Google pour nous aider.</p>
+        <div class="loading">Chargement du formulaire Google...</div>
+        <div class="thanks" id="thanks-msg">Merci ! Vous pouvez fermer cette page.</div>
+    </div>
+
+    <script src="https://apis.google.com/js/platform.js?onload=renderOptIn" async defer></script>
+    <script>
+    window.renderOptIn = function() {{
+        document.querySelector('.loading').style.display = 'none';
+        window.gapi.load('surveyoptin', function() {{
+            window.gapi.surveyoptin.render({{
+                "merchant_id": 277377202,
+                "order_id": "{order_id}",
+                "email": "{email}",
+                "delivery_country": "{country}",
+                "estimated_delivery_date": "{delivery_date}"
+            }});
+        }});
+    }};
+    window.___gcfg = {{ lang: 'fr' }};
+    </script>
+</body>
+</html>"""
+    return HTMLResponse(content=html)
+
+
 @app.get("/review-redirect")
 async def review_redirect(request: Request):
     """Public: redirect from Flow email to product page with ?review=email.
