@@ -3039,21 +3039,31 @@ async def get_pending_reviews(request: Request):
     try:
         db = get_db()
         if not db:
-            return {"reviews": []}
+            return {"reviews": [], "count": 0}
         cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        # Ensure order_number column exists
+        try:
+            cur.execute("ALTER TABLE product_reviews ADD COLUMN IF NOT EXISTS order_number TEXT")
+            db.commit()
+        except Exception:
+            try: db.rollback()
+            except: pass
         cur.execute("""SELECT id, title, body, rating, reviewer_name, reviewer_email, product_handle,
                         order_number, review_date, created_at
                     FROM product_reviews WHERE curated = 'pending'
                     ORDER BY created_at DESC LIMIT 100""")
         rows = cur.fetchall()
-        cur.close(); db.close()
+        result = []
         for r in rows:
-            if r.get("review_date"): r["review_date"] = r["review_date"].isoformat()
-            if r.get("created_at"): r["created_at"] = r["created_at"].isoformat()
-        return {"reviews": rows, "count": len(rows)}
+            d = dict(r)
+            if d.get("review_date"): d["review_date"] = str(d["review_date"])
+            if d.get("created_at"): d["created_at"] = str(d["created_at"])
+            result.append(d)
+        cur.close(); db.close()
+        return {"reviews": result, "count": len(result)}
     except Exception as e:
         logger.error(f"Pending reviews error: {e}")
-        return {"reviews": [], "error": str(e)}
+        return {"reviews": [], "count": 0, "error": str(e)}
 
 
 @app.get("/api/reviews/{product_handle}")
@@ -3113,6 +3123,13 @@ async def submit_review(request: Request):
         if not db:
             return {"success": False, "error": "Service temporairement indisponible"}
         cur = db.cursor()
+        # Ensure order_number column exists
+        try:
+            cur.execute("ALTER TABLE product_reviews ADD COLUMN IF NOT EXISTS order_number TEXT")
+            db.commit()
+        except Exception:
+            try: db.rollback()
+            except: pass
         if email:
             cur.execute("""SELECT COUNT(*) FROM product_reviews
                 WHERE reviewer_email = %s AND created_at > NOW() - INTERVAL '24 hours'""", (email,))
