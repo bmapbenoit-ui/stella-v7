@@ -3355,9 +3355,10 @@ async def review_redirect(request: Request):
                 line_items = edges[0]["node"]["lineItems"]["edges"]
                 for li in line_items:
                     handle = li.get("node", {}).get("product", {}).get("handle", "")
-                    if handle:
+                    # Skip free gifts and non-product items
+                    if handle and not handle.startswith("docapp-free-gift"):
                         product_url = f"https://planetebeauty.com/products/{handle}?review=email"
-                        logger.info(f"Review redirect: {order_name} → {handle}")
+                        logger.info(f"Review redirect: {order_name} -> {handle}")
                         return RedirectResponse(url=product_url)
 
         # Fallback: no product found
