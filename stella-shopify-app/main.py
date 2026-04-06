@@ -3165,17 +3165,21 @@ async def submit_review(request: Request):
                     msg["Subject"] = f"Nouvel avis ({rating}★) - {handle} par {name}"
                     msg["From"] = f"{SMTP_FROM_NAME} <{SMTP_FROM_EMAIL}>"
                     msg["To"] = "info@planetebeauty.com"
+                    email_display = email or "pas d'email"
+                    order_line = f"<p><strong>Commande :</strong> {order_number}</p>" if order_number else ""
+                    title_line = f"<p><strong>Titre :</strong> {title}</p>" if title else ""
+                    stars = "\u2B50" * rating
                     notif_html = f"""<div style="font-family:Arial,sans-serif;max-width:500px">
                         <h3 style="color:#C8984E">Nouvel avis client en attente</h3>
                         <p><strong>Produit :</strong> {handle}</p>
-                        <p><strong>Client :</strong> {name} ({email or 'pas d\\'email'})</p>
-                        <p><strong>Note :</strong> {'⭐' * rating}</p>
+                        <p><strong>Client :</strong> {name} ({email_display})</p>
+                        <p><strong>Note :</strong> {stars}</p>
                         <p><strong>Source :</strong> {source_label}</p>
-                        {f'<p><strong>Commande :</strong> {order_number}</p>' if order_number else ''}
-                        {f'<p><strong>Titre :</strong> {title}</p>' if title else ''}
+                        {order_line}
+                        {title_line}
                         <p><strong>Avis :</strong><br>{review_body}</p>
                         <hr>
-                        <p style="font-size:12px;color:#888">Rendez-vous dans l'onglet <strong>Avis</strong> du dashboard STELLA V8 pour modérer.</p>
+                        <p style="font-size:12px;color:#888">Rendez-vous dans l'onglet Avis du dashboard STELLA V8 pour moderer.</p>
                     </div>"""
                     msg.attach(MIMEText(notif_html, "html", "utf-8"))
                     await aiosmtplib.send(msg, hostname=SMTP_HOST, port=SMTP_PORT,
