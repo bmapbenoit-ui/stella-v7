@@ -3053,6 +3053,65 @@ async def get_product_reviews(product_handle: str):
         return {"reviews": [], "count": 0, "average": 0, "error": str(e)}
 
 
+@app.post("/api/reviews/submit")
+async def submit_review(request: Request):
+    """Public endpoint: customers submit reviews from product page. Curated='pending' until approved."""
+    try:
+        body = await request.json()
+        handle = body.get("product_handle", "").strip()
+        name = body.get("name", "").strip()
+        email = body.get("email", "").strip()
+        rating = int(body.get("rating", 0))
+        title = body.get("title", "").strip()
+        review_body = body.get("body", "").strip()
+
+        # Validation
+        if not handle or not name or not rating or not review_body:
+            return {"success": False, "error": "Champs obligatoires manquants"}
+        if rating < 1 or rating > 5:
+            return {"success": False, "error": "Note entre 1 et 5"}
+        if len(review_body) < 10:
+            return {"success": False, "error": "Votre avis doit contenir au moins 10 caractères"}
+        if len(name) < 2:
+            return {"success": False, "error": "Nom trop court"}
+
+        # Anti-spam: check honeypot field
+        if body.get("website", ""):
+            return {"success": True, "message": "Merci pour votre avis !"}  # Silent reject
+
+        # Rate limit: max 3 reviews per email per day
+        db = get_db()
+        if not db:
+            return {"success": False, "error": "Service temporairement indisponible"}
+        cur = db.cursor()
+        if email:
+            cur.execute("""SELECT COUNT(*) FROM product_reviews
+                WHERE reviewer_email = %s AND created_at > NOW() - INTERVAL '24 hours'""", (email,))
+            count = cur.fetchone()[0]
+            if count >= 3:
+                cur.close(); db.close()
+                return {"success": False, "error": "Vous avez déjà laissé plusieurs avis récemment"}
+
+        # Insert with curated='pending'
+        cur.execute("""INSERT INTO product_reviews
+            (title, body, rating, review_date, source, curated, reviewer_name, reviewer_email, product_handle)
+            VALUES (%s, %s, %s, NOW(), 'site', 'pending', %s, %s, %s)
+            ON CONFLICT (product_handle, reviewer_name, rating, title) DO NOTHING""",
+            (title, review_body, rating, name, email, handle))
+        db.commit()
+        inserted = cur.rowcount > 0
+        cur.close(); db.close()
+
+        if inserted:
+            log_activity("review_submit", f"Nouvel avis ({rating}★) pour {handle} par {name}", {"handle": handle, "rating": rating})
+            return {"success": True, "message": "Merci pour votre avis ! Il sera publié après vérification."}
+        else:
+            return {"success": True, "message": "Merci ! Vous avez déjà laissé un avis similaire."}
+    except Exception as e:
+        logger.error(f"Review submit error: {e}")
+        return {"success": False, "error": "Erreur lors de l'envoi. Veuillez réessayer."}
+
+
 @app.get("/api/nouveautes")
 async def get_nouveautes():
     """Real-time: fetch products with tag Nouveauté from Shopify."""
