@@ -237,6 +237,7 @@ CREATE TABLE IF NOT EXISTS product_reviews (
     created_at TIMESTAMP DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_reviews_handle ON product_reviews(product_handle);
+ALTER TABLE product_reviews ADD COLUMN IF NOT EXISTS order_number TEXT;
 
 CREATE TABLE IF NOT EXISTS cron_results (
     id SERIAL PRIMARY KEY,
@@ -3064,6 +3065,7 @@ async def submit_review(request: Request):
         rating = int(body.get("rating", 0))
         title = body.get("title", "").strip()
         review_body = body.get("body", "").strip()
+        order_number = body.get("order_number", "").strip()
 
         # Validation
         if not handle or not name or not rating or not review_body:
@@ -3094,10 +3096,10 @@ async def submit_review(request: Request):
 
         # Insert with curated='pending'
         cur.execute("""INSERT INTO product_reviews
-            (title, body, rating, review_date, source, curated, reviewer_name, reviewer_email, product_handle)
-            VALUES (%s, %s, %s, NOW(), 'site', 'pending', %s, %s, %s)
+            (title, body, rating, review_date, source, curated, reviewer_name, reviewer_email, product_handle, order_number)
+            VALUES (%s, %s, %s, NOW(), 'site', 'pending', %s, %s, %s, %s)
             ON CONFLICT (product_handle, reviewer_name, rating, title) DO NOTHING""",
-            (title, review_body, rating, name, email, handle))
+            (title, review_body, rating, name, email, handle, order_number or None))
         db.commit()
         inserted = cur.rowcount > 0
         cur.close(); db.close()
@@ -3110,6 +3112,161 @@ async def submit_review(request: Request):
     except Exception as e:
         logger.error(f"Review submit error: {e}")
         return {"success": False, "error": "Erreur lors de l'envoi. Veuillez réessayer."}
+
+
+@app.get("/api/reviews/pending")
+async def get_pending_reviews(request: Request):
+    """Dashboard: list all pending reviews for moderation."""
+    api_key = request.headers.get("x-api-key", "")
+    if api_key != API_KEY:
+        return {"error": "Unauthorized"}
+    try:
+        db = get_db()
+        if not db:
+            return {"reviews": []}
+        cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("""SELECT id, title, body, rating, reviewer_name, reviewer_email, product_handle,
+                        order_number, review_date, created_at
+                    FROM product_reviews WHERE curated = 'pending'
+                    ORDER BY created_at DESC LIMIT 100""")
+        rows = cur.fetchall()
+        cur.close(); db.close()
+        for r in rows:
+            if r.get("review_date"): r["review_date"] = r["review_date"].isoformat()
+            if r.get("created_at"): r["created_at"] = r["created_at"].isoformat()
+        return {"reviews": rows, "count": len(rows)}
+    except Exception as e:
+        logger.error(f"Pending reviews error: {e}")
+        return {"reviews": [], "error": str(e)}
+
+
+@app.post("/api/reviews/approve")
+async def approve_review(request: Request):
+    """Dashboard: approve a review + credit 5€ store credit (30 days) to customer."""
+    api_key = request.headers.get("x-api-key", "")
+    if api_key != API_KEY:
+        return {"success": False, "error": "Unauthorized"}
+    try:
+        body = await request.json()
+        review_id = body.get("review_id")
+        if not review_id:
+            return {"success": False, "error": "review_id requis"}
+
+        db = get_db()
+        if not db:
+            return {"success": False, "error": "DB indisponible"}
+        cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+        # Get the review
+        cur.execute("SELECT * FROM product_reviews WHERE id = %s", (review_id,))
+        review = cur.fetchone()
+        if not review:
+            cur.close(); db.close()
+            return {"success": False, "error": "Avis introuvable"}
+        if review["curated"] == "ok":
+            cur.close(); db.close()
+            return {"success": False, "error": "Avis deja publie"}
+
+        # 1. Publish the review
+        cur.execute("UPDATE product_reviews SET curated = 'ok' WHERE id = %s", (review_id,))
+        db.commit()
+
+        # 2. Credit 5€ store credit (30 days) if email exists
+        credit_ok = False
+        credit_error = None
+        email = (review.get("reviewer_email") or "").strip()
+
+        if email:
+            gql_url = f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/{SHOPIFY_API_VERSION}/graphql.json"
+            headers_gql = {"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"}
+
+            # Find customer by email
+            async with httpx.AsyncClient(timeout=10) as c:
+                search_r = await c.post(gql_url, json={
+                    "query": '{ customers(first:1, query:"email:%s") { edges { node { id } } } }' % email
+                }, headers=headers_gql)
+                edges = search_r.json().get("data", {}).get("customers", {}).get("edges", [])
+
+                if edges:
+                    customer_gid = edges[0]["node"]["id"]
+
+                    # Get or create store credit account
+                    acc_r = await c.post(gql_url, json={
+                        "query": '{customer(id: "%s") { storeCreditAccounts(first:1) { edges { node { id } } } }}' % customer_gid
+                    }, headers=headers_gql)
+                    acc_edges = acc_r.json().get("data", {}).get("customer", {}).get("storeCreditAccounts", {}).get("edges", [])
+                    target_id = acc_edges[0]["node"]["id"] if acc_edges else customer_gid
+
+                    # Credit 5€ with 30 day expiry
+                    from datetime import timedelta
+                    expires_at = (datetime.utcnow() + timedelta(days=30)).strftime("%Y-%m-%dT23:59:59Z")
+
+                    credit_mutation = """mutation($id: ID!, $creditInput: StoreCreditAccountCreditInput!) {
+                        storeCreditAccountCredit(id: $id, creditInput: $creditInput) {
+                            storeCreditAccountTransaction { id amount { amount currencyCode } }
+                            userErrors { field message }
+                        }
+                    }"""
+                    cr = await c.post(gql_url, json={
+                        "query": credit_mutation,
+                        "variables": {
+                            "id": target_id,
+                            "creditInput": {
+                                "creditAmount": {"amount": "5.00", "currencyCode": "EUR"},
+                                "expiresAt": expires_at
+                            }
+                        }
+                    }, headers=headers_gql)
+                    cr_data = cr.json()
+                    u_errors = cr_data.get("data", {}).get("storeCreditAccountCredit", {}).get("userErrors", [])
+                    if not u_errors and cr_data.get("data", {}).get("storeCreditAccountCredit", {}).get("storeCreditAccountTransaction"):
+                        credit_ok = True
+                        log_activity("review_credit", f"Avis approuve: 5€ credite a {email} pour {review['product_handle']}",
+                                     {"email": email, "review_id": review_id, "amount": 5.00, "expires": expires_at},
+                                     source="dashboard", customer_email=email)
+                    else:
+                        credit_error = u_errors[0].get("message", "Erreur credit") if u_errors else "Erreur mutation"
+                else:
+                    credit_error = f"Client non trouve pour {email}"
+        else:
+            credit_error = "Pas d'email — credit non attribue"
+
+        cur.close(); db.close()
+        return {
+            "success": True,
+            "published": True,
+            "credit_ok": credit_ok,
+            "credit_error": credit_error,
+            "message": f"Avis publie" + (" + 5€ credite (30j)" if credit_ok else f" (credit: {credit_error})")
+        }
+    except Exception as e:
+        logger.error(f"Review approve error: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/api/reviews/reject")
+async def reject_review(request: Request):
+    """Dashboard: reject/delete a pending review."""
+    api_key = request.headers.get("x-api-key", "")
+    if api_key != API_KEY:
+        return {"success": False, "error": "Unauthorized"}
+    try:
+        body = await request.json()
+        review_id = body.get("review_id")
+        if not review_id:
+            return {"success": False, "error": "review_id requis"}
+        db = get_db()
+        if not db:
+            return {"success": False, "error": "DB indisponible"}
+        cur = db.cursor()
+        cur.execute("DELETE FROM product_reviews WHERE id = %s AND curated = 'pending'", (review_id,))
+        deleted = cur.rowcount > 0
+        db.commit()
+        cur.close(); db.close()
+        return {"success": True, "deleted": deleted}
+    except Exception as e:
+        logger.error(f"Review reject error: {e}")
+        return {"success": False, "error": str(e)}
 
 
 @app.get("/api/nouveautes")

@@ -145,11 +145,13 @@
 <section class="tab-panel" id="panel-reviews">
   <div class="kpi-grid" id="reviews-kpis"></div>
   <div class="card">
-    <div class="card-header"><span>Credits Trustpilot</span><button class="btn-outline" onclick="STELLA.reviews.forceScan()">Forcer scan</button></div>
-    <div class="card-body" id="trustpilot-list"></div>
+    <div class="card-header"><span>Avis en attente de moderation</span><button class="btn-outline" onclick="STELLA.reviews.loadPending()">Rafraichir</button></div>
+    <div class="card-body" id="reviews-pending-list">
+      <div class="empty-state"><p>Chargement...</p></div>
+    </div>
   </div>
   <div class="card">
-    <div class="card-header"><span>Derniers avis</span></div>
+    <div class="card-header"><span>Derniers avis publies</span></div>
     <div class="card-body"><table class="data-table" id="reviews-table"><thead><tr><th>Produit</th><th>Note</th><th>Source</th><th>Date</th></tr></thead><tbody></tbody></table></div>
   </div>
 </section>

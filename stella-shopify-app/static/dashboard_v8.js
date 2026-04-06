@@ -341,44 +341,93 @@ const STELLA = {
   // ═══════════════════════════════════════════════════════════════
   reviews: {
     async load() {
-      const [reviews, trustpilot] = await Promise.all([
-        STELLA.api('/api/reviews/dashboard'),
-        STELLA.api('/api/trustpilot/dashboard')
-      ]);
+      const reviews = await STELLA.api('/api/reviews/dashboard');
       if (reviews) {
+        const pending = await STELLA.api('/api/reviews/pending');
+        const pendingCount = pending ? (pending.count || 0) : 0;
         document.getElementById('reviews-kpis').innerHTML = `
           <div class="kpi-card"><div class="kpi-value gold">${reviews.total || 0}</div><div class="kpi-label">Total avis</div></div>
           <div class="kpi-card"><div class="kpi-value">${reviews.avg_rating || 0}/5</div><div class="kpi-label">Note moyenne</div></div>
-          <div class="kpi-card"><div class="kpi-value">${trustpilot ? trustpilot.total_credits : 0}</div><div class="kpi-label">Credits Trustpilot</div></div>
-          <div class="kpi-card"><div class="kpi-value">${trustpilot ? STELLA.eur(trustpilot.total_amount) : '--'}</div><div class="kpi-label">Montant credite</div></div>
+          <div class="kpi-card"><div class="kpi-value" style="color:${pendingCount > 0 ? '#EA4335' : 'var(--text-muted)'}">${pendingCount}</div><div class="kpi-label">En attente</div></div>
+          <div class="kpi-card"><div class="kpi-value">${Object.keys(reviews.by_source || {}).length}</div><div class="kpi-label">Sources</div></div>
         `;
         const tbody = document.querySelector('#reviews-table tbody');
         const recent = reviews.recent || [];
         tbody.innerHTML = recent.length ? recent.map(r => `
           <tr><td>${r.product_handle || r.product_title || '--'}</td><td>${'\u2B50'.repeat(Math.round(r.rating || 0))}</td><td>${r.source || '--'}</td><td>${STELLA.shortTime(r.created_at)}</td></tr>
         `).join('') : '<tr><td colspan="4" style="text-align:center;color:var(--text-muted)">Aucun avis</td></tr>';
-      }
-      if (trustpilot) {
-        const list = document.getElementById('trustpilot-list');
-        const recent = trustpilot.recent || [];
-        if (recent.length === 0) {
-          list.innerHTML = '<div class="empty-state"><p>Aucun credit Trustpilot</p></div>';
-        } else {
-          list.innerHTML = recent.map(t => `
-            <div class="activity-item">
-              <span class="activity-icon">\u2B50</span>
-              <div class="activity-content"><div class="activity-action">${t.customer_email || '--'} — ${STELLA.eur(t.amount)}</div></div>
-              <span class="activity-time">${STELLA.shortTime(t.credited_at)}</span>
-            </div>
-          `).join('');
-        }
+        // Load pending
+        this.renderPending(pending);
       }
     },
-    async forceScan() {
-      STELLA.showToast('Scan Trustpilot en cours...', 'success');
-      const r = await STELLA.apiPost('/api/cron/trustpilot-scan', {});
-      STELLA.showToast(r ? 'Scan termine' : 'Erreur', r ? 'success' : 'error');
-      this.load();
+    async loadPending() {
+      const pending = await STELLA.api('/api/reviews/pending');
+      this.renderPending(pending);
+    },
+    renderPending(data) {
+      const list = document.getElementById('reviews-pending-list');
+      if (!data || !data.reviews || data.reviews.length === 0) {
+        list.innerHTML = '<div class="empty-state"><p>Aucun avis en attente</p></div>';
+        return;
+      }
+      list.innerHTML = data.reviews.map(r => `
+        <div class="activity-item" id="pending-review-${r.id}" style="flex-wrap:wrap;gap:8px;padding:12px;border-radius:8px;background:var(--bg-card);border:1px solid var(--border)">
+          <div style="width:100%;display:flex;justify-content:space-between;align-items:center">
+            <div>
+              <strong>${r.reviewer_name || 'Anonyme'}</strong>
+              <span style="color:var(--text-muted);font-size:12px;margin-left:8px">${r.reviewer_email || 'pas d\'email'}</span>
+              ${r.order_number ? '<span style="color:var(--gold);font-size:12px;margin-left:8px">Commande: ' + r.order_number + '</span>' : ''}
+            </div>
+            <span style="font-size:12px;color:var(--text-muted)">${STELLA.shortTime(r.created_at)}</span>
+          </div>
+          <div style="width:100%">
+            <div>${'\u2B50'.repeat(Math.round(r.rating || 0))} <span style="font-size:12px;color:var(--text-muted)">${r.product_handle}</span></div>
+            ${r.title ? '<div style="font-weight:600;font-size:13px;margin-top:4px">' + r.title + '</div>' : ''}
+            <div style="font-size:13px;color:var(--text-secondary);margin-top:4px;line-height:1.5">${r.body || ''}</div>
+          </div>
+          <div style="width:100%;display:flex;gap:8px;justify-content:flex-end;margin-top:4px">
+            <button class="btn-outline" style="color:#EA4335;border-color:#EA4335" onclick="STELLA.reviews.reject(${r.id})">Rejeter</button>
+            <button class="btn-primary" onclick="STELLA.reviews.approve(${r.id})">Publier + 5\u20ac credit (30j)</button>
+          </div>
+        </div>
+      `).join('');
+    },
+    async approve(reviewId) {
+      if (!confirm('Publier cet avis et crediter 5\u20ac au client ?')) return;
+      const btn = event.target;
+      btn.disabled = true;
+      btn.textContent = 'En cours...';
+      const r = await STELLA.apiPost('/api/reviews/approve', { review_id: reviewId });
+      if (r && r.success) {
+        STELLA.showToast(r.message || 'Avis publie + credit', 'success');
+        const el = document.getElementById('pending-review-' + reviewId);
+        if (el) el.remove();
+        // Check if empty
+        const list = document.getElementById('reviews-pending-list');
+        if (!list.querySelector('.activity-item')) {
+          list.innerHTML = '<div class="empty-state"><p>Aucun avis en attente</p></div>';
+        }
+        this.load();
+      } else {
+        STELLA.showToast(r ? r.error : 'Erreur', 'error');
+        btn.disabled = false;
+        btn.textContent = 'Publier + 5\u20ac credit (30j)';
+      }
+    },
+    async reject(reviewId) {
+      if (!confirm('Supprimer cet avis ?')) return;
+      const r = await STELLA.apiPost('/api/reviews/reject', { review_id: reviewId });
+      if (r && r.success) {
+        STELLA.showToast('Avis rejete', 'success');
+        const el = document.getElementById('pending-review-' + reviewId);
+        if (el) el.remove();
+        const list = document.getElementById('reviews-pending-list');
+        if (!list.querySelector('.activity-item')) {
+          list.innerHTML = '<div class="empty-state"><p>Aucun avis en attente</p></div>';
+        }
+      } else {
+        STELLA.showToast(r ? r.error : 'Erreur', 'error');
+      }
     }
   },
 
