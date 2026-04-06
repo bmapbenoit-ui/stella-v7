@@ -3118,9 +3118,29 @@ async def submit_review(request: Request):
         if len(name) < 2:
             return {"success": False, "error": "Nom trop court"}
 
+        # Order number is REQUIRED
+        if not order_number:
+            return {"success": False, "error": "Le numéro de commande est obligatoire pour laisser un avis."}
+
         # Anti-spam: check honeypot field
         if body.get("website", ""):
             return {"success": True, "message": "Merci pour votre avis !"}  # Silent reject
+
+        # Verify order exists in Shopify
+        try:
+            clean_order = order_number.lstrip("#").strip()
+            gql_url = f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/{SHOPIFY_API_VERSION}/graphql.json"
+            headers_gql = {"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"}
+            async with httpx.AsyncClient(timeout=8) as c:
+                oq = await c.post(gql_url, json={
+                    "query": '{ orders(first:1, query:"name:%s") { edges { node { name } } } }' % clean_order.replace('"', '')
+                }, headers=headers_gql)
+                o_edges = oq.json().get("data", {}).get("orders", {}).get("edges", [])
+                if not o_edges:
+                    return {"success": False, "error": "Numéro de commande introuvable. Vérifiez votre email de confirmation."}
+        except Exception as ve:
+            logger.warning(f"Order verification failed for {order_number}: {ve}")
+            # Allow submission if API is temporarily unavailable (don't block customer)
 
         # Rate limit: max 3 reviews per email per day
         db = get_db()
