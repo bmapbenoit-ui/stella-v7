@@ -4421,11 +4421,11 @@ async def bis_dashboard(request: Request):
         """)
         products = cur.fetchall()
 
-        # Recent 10
+        # Recent 50
         cur.execute("""
             SELECT email, product_title, product_handle, subscribed_at, status
             FROM bis_subscriptions
-            ORDER BY subscribed_at DESC LIMIT 10
+            ORDER BY subscribed_at DESC LIMIT 50
         """)
         recent = cur.fetchall()
 
