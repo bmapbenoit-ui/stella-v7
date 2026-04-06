@@ -3123,9 +3123,11 @@ async def submit_review(request: Request):
         if not db:
             return {"success": False, "error": "Service temporairement indisponible"}
         cur = db.cursor()
-        # Ensure order_number column exists
+        # Ensure order_number column + unique index exist
         try:
             cur.execute("ALTER TABLE product_reviews ADD COLUMN IF NOT EXISTS order_number TEXT")
+            cur.execute("""CREATE UNIQUE INDEX IF NOT EXISTS idx_reviews_unique
+                ON product_reviews(product_handle, reviewer_name, rating, title)""")
             db.commit()
         except Exception:
             try: db.rollback()
