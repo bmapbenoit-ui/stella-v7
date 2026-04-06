@@ -3322,6 +3322,48 @@ async def reject_review(request: Request):
         return {"success": False, "error": str(e)}
 
 
+@app.get("/review-redirect")
+async def review_redirect(request: Request):
+    """Public: redirect from Flow email to product page with ?review=email.
+    Accepts ?order=PB-1234 — looks up the order, gets first product handle, redirects."""
+    from fastapi.responses import RedirectResponse
+    fallback = "https://planetebeauty.com?review=email"
+    order_name = request.query_params.get("order", "").strip()
+    if not order_name:
+        return RedirectResponse(url=fallback)
+
+    try:
+        gql_url = f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/{SHOPIFY_API_VERSION}/graphql.json"
+        headers_gql = {"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"}
+
+        # Search order by name
+        query = """{ orders(first: 1, query: "name:%s") {
+            edges { node { lineItems(first: 5) {
+                edges { node { product { handle } } }
+            } } }
+        } }""" % order_name.replace('"', '\\"')
+
+        async with httpx.AsyncClient(timeout=8) as c:
+            r = await c.post(gql_url, json={"query": query}, headers=headers_gql)
+            data = r.json()
+            edges = data.get("data", {}).get("orders", {}).get("edges", [])
+            if edges:
+                line_items = edges[0]["node"]["lineItems"]["edges"]
+                for li in line_items:
+                    handle = li.get("node", {}).get("product", {}).get("handle", "")
+                    if handle:
+                        product_url = f"https://planetebeauty.com/products/{handle}?review=email"
+                        logger.info(f"Review redirect: {order_name} → {handle}")
+                        return RedirectResponse(url=product_url)
+
+        # Fallback: no product found
+        logger.warning(f"Review redirect: no product found for order {order_name}")
+        return RedirectResponse(url=fallback)
+    except Exception as e:
+        logger.error(f"Review redirect error: {e}")
+        return RedirectResponse(url=fallback)
+
+
 @app.get("/api/nouveautes")
 async def get_nouveautes():
     """Real-time: fetch products with tag Nouveauté from Shopify."""
