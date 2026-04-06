@@ -3154,8 +3154,8 @@ async def submit_review(request: Request):
         else:
             return {"success": True, "message": "Merci ! Vous avez déjà laissé un avis similaire."}
     except Exception as e:
-        logger.error(f"Review submit error: {e}")
-        return {"success": False, "error": "Erreur lors de l'envoi. Veuillez réessayer."}
+        logger.error(f"Review submit error: {e}", exc_info=True)
+        return {"success": False, "error": f"Erreur: {str(e)}"}
 
 
 @app.post("/api/reviews/approve")
