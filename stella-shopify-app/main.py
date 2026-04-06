@@ -3034,7 +3034,7 @@ async def deduplicate_reviews(request: Request):
 async def get_pending_reviews(request: Request):
     """Dashboard: list all pending reviews for moderation."""
     api_key = request.headers.get("x-api-key", "")
-    if api_key != API_KEY:
+    if api_key != "stella-mem-2026-planetebeauty":
         return {"error": "Unauthorized"}
     try:
         db = get_db()
@@ -3162,7 +3162,7 @@ async def submit_review(request: Request):
 async def approve_review(request: Request):
     """Dashboard: approve a review + credit 5€ store credit (30 days) to customer."""
     api_key = request.headers.get("x-api-key", "")
-    if api_key != API_KEY:
+    if api_key != "stella-mem-2026-planetebeauty":
         return {"success": False, "error": "Unauthorized"}
     try:
         body = await request.json()
@@ -3266,7 +3266,7 @@ async def approve_review(request: Request):
 async def reject_review(request: Request):
     """Dashboard: reject/delete a pending review."""
     api_key = request.headers.get("x-api-key", "")
-    if api_key != API_KEY:
+    if api_key != "stella-mem-2026-planetebeauty":
         return {"success": False, "error": "Unauthorized"}
     try:
         body = await request.json()
