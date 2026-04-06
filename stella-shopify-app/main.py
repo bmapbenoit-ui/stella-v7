@@ -335,12 +335,13 @@ async def startup():
                       args=["audit-qualite", "/api/cron/audit-qualite"])
     scheduler.add_job(_run_cron, 'cron', hour=4, minute=30, id='tryme_expire',
                       args=["tryme-expire", "/api/cron/tryme-expire"])
-    scheduler.add_job(_run_cron, 'interval', hours=6, id='trustpilot_scan',
-                      args=["trustpilot-scan", "/api/cron/trustpilot-scan"])
+    # trustpilot_scan DISABLED 06/04/2026 — migrated to Google Avis clients
+    # scheduler.add_job(_run_cron, 'interval', hours=6, id='trustpilot_scan',
+    #                   args=["trustpilot-scan", "/api/cron/trustpilot-scan"])
     scheduler.add_job(_run_cron, 'cron', hour=9, minute=15, id='cashback_reminder',
                       args=["cashback-reminder", "/api/cron/cashback-reminder"])
     scheduler.start()
-    logger.info("Scheduler started: stock(1h), tags(3h15), nouveautes(3h45), audit(lun 7h), tryme(4h30), trustpilot(6h), cashback-reminder(9h15)")
+    logger.info("Scheduler started: stock(1h), tags(3h15), nouveautes(3h45), audit(lun 7h), tryme(4h30), cashback-reminder(9h15) — trustpilot DISABLED")
 
 # ══════════════════════ 3-LAYER MEMORY ══════════════════════
 def save_to_redis(conv_id, role, content):
