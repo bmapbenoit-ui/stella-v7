@@ -3029,6 +3029,32 @@ async def deduplicate_reviews(request: Request):
         return {"error": str(e)}
 
 
+@app.get("/api/reviews/pending")
+async def get_pending_reviews(request: Request):
+    """Dashboard: list all pending reviews for moderation."""
+    api_key = request.headers.get("x-api-key", "")
+    if api_key != API_KEY:
+        return {"error": "Unauthorized"}
+    try:
+        db = get_db()
+        if not db:
+            return {"reviews": []}
+        cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("""SELECT id, title, body, rating, reviewer_name, reviewer_email, product_handle,
+                        order_number, review_date, created_at
+                    FROM product_reviews WHERE curated = 'pending'
+                    ORDER BY created_at DESC LIMIT 100""")
+        rows = cur.fetchall()
+        cur.close(); db.close()
+        for r in rows:
+            if r.get("review_date"): r["review_date"] = r["review_date"].isoformat()
+            if r.get("created_at"): r["created_at"] = r["created_at"].isoformat()
+        return {"reviews": rows, "count": len(rows)}
+    except Exception as e:
+        logger.error(f"Pending reviews error: {e}")
+        return {"reviews": [], "error": str(e)}
+
+
 @app.get("/api/reviews/{product_handle}")
 async def get_product_reviews(product_handle: str):
     """Get reviews for a specific product."""
@@ -3112,32 +3138,6 @@ async def submit_review(request: Request):
     except Exception as e:
         logger.error(f"Review submit error: {e}")
         return {"success": False, "error": "Erreur lors de l'envoi. Veuillez réessayer."}
-
-
-@app.get("/api/reviews/pending")
-async def get_pending_reviews(request: Request):
-    """Dashboard: list all pending reviews for moderation."""
-    api_key = request.headers.get("x-api-key", "")
-    if api_key != API_KEY:
-        return {"error": "Unauthorized"}
-    try:
-        db = get_db()
-        if not db:
-            return {"reviews": []}
-        cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute("""SELECT id, title, body, rating, reviewer_name, reviewer_email, product_handle,
-                        order_number, review_date, created_at
-                    FROM product_reviews WHERE curated = 'pending'
-                    ORDER BY created_at DESC LIMIT 100""")
-        rows = cur.fetchall()
-        cur.close(); db.close()
-        for r in rows:
-            if r.get("review_date"): r["review_date"] = r["review_date"].isoformat()
-            if r.get("created_at"): r["created_at"] = r["created_at"].isoformat()
-        return {"reviews": rows, "count": len(rows)}
-    except Exception as e:
-        logger.error(f"Pending reviews error: {e}")
-        return {"reviews": [], "error": str(e)}
 
 
 @app.post("/api/reviews/approve")
