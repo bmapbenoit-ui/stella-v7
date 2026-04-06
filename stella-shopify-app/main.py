@@ -309,8 +309,9 @@ async def startup():
             cur = db.cursor(); cur.execute(CHAT_MIGRATION)
             cur.execute("""INSERT INTO cashback_settings (shop) SELECT 'planetemode.myshopify.com'
                            WHERE NOT EXISTS (SELECT 1 FROM cashback_settings WHERE shop = 'planetemode.myshopify.com')""")
-            # Cashback rewards migration: add tracking columns
+            # Reviews migration: add order_number column
             for col_sql in [
+                "ALTER TABLE product_reviews ADD COLUMN IF NOT EXISTS order_number TEXT",
                 "ALTER TABLE cashback_rewards ADD COLUMN IF NOT EXISTS email_sent BOOLEAN DEFAULT FALSE",
                 "ALTER TABLE cashback_rewards ADD COLUMN IF NOT EXISTS reminder_sent_at TIMESTAMP",
             ]:
