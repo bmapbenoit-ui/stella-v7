@@ -1453,6 +1453,17 @@ async def webhook_tryme_order(request: Request):
     if not tryme_items:
         return {"ok": True, "skipped": True, "reason": "no_tryme_items"}
 
+    # Redis lock to prevent duplicate webhook processing
+    rc = get_redis()
+    lock_key = f"tryme_lock:{order_id}"
+    if rc:
+        try:
+            if not rc.set(lock_key, "1", nx=True, ex=120):
+                logger.info(f"Try Me webhook already processing for order {order_id} — skipping duplicate")
+                return {"ok": True, "skipped": True, "reason": "duplicate_webhook"}
+        except Exception:
+            pass
+
     results = []
     for item in tryme_items:
         product_id = str(item.get("product_id", ""))
@@ -1601,8 +1612,34 @@ async def webhook_tryme_order(request: Request):
     codes_for_invoice = [r for r in results if r.get("code")]
     if codes_for_invoice:
         try:
+            # Read existing metafield to accumulate (don't overwrite)
+            existing_text = ""
+            try:
+                async with httpx.AsyncClient(timeout=10) as c:
+                    r_mf = await c.post(SHOPIFY_GRAPHQL_URL,
+                        json={"query": f'{{ order(id: "gid://shopify/Order/{order_id}") {{ metafield(namespace: "planete-beaute", key: "tryme-codes") {{ value }} }} }}'},
+                        headers={"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"})
+                    mf_data = r_mf.json().get("data", {}).get("order", {}).get("metafield")
+                    if mf_data and mf_data.get("value"):
+                        existing_text = mf_data["value"].strip()
+            except Exception:
+                pass
             # Format: "CODE | Produit\nCODE2 | Produit2"
-            tryme_text = "\n".join([f"{r['code']} | -{float(r['price']):.0f}€ sur {r['product']}" for r in codes_for_invoice])
+            new_lines = [f"{r['code']} | -{float(r['price']):.0f}€ sur {r['product']}" for r in codes_for_invoice]
+            # Merge: existing + new, deduplicate by code
+            existing_codes = set()
+            if existing_text:
+                for line in existing_text.split("\n"):
+                    code_part = line.split("|")[0].strip()
+                    if code_part:
+                        existing_codes.add(code_part)
+            final_lines = existing_text.split("\n") if existing_text else []
+            for line in new_lines:
+                code_part = line.split("|")[0].strip()
+                if code_part not in existing_codes:
+                    final_lines.append(line)
+                    existing_codes.add(code_part)
+            tryme_text = "\n".join(final_lines)
             mf_mutation = """mutation($metafields: [MetafieldsSetInput!]!) {
               metafieldsSet(metafields: $metafields) {
                 metafields { id } userErrors { field message }
