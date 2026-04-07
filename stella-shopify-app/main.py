@@ -6714,6 +6714,117 @@ async def ops_suggestions():
     suggestions.sort(key=lambda s: priority_order.get(s["priority"], 9))
     return {"suggestions": suggestions, "count": len(suggestions)}
 
+@app.post("/api/ops/context")
+async def ops_context(request: Request):
+    """Analyse le message utilisateur et retourne le contexte pertinent (regles, playbook, etat)."""
+    body = await request.json()
+    message = (body.get("message", "") or "").lower()
+
+    # Mapping mots-cles → sections regles metier + playbook
+    KEYWORD_MAP = {
+        "images": {"rules": "images", "section": "1. IMAGES PRODUITS"},
+        "image": {"rules": "images", "section": "1. IMAGES PRODUITS"},
+        "photo": {"rules": "images", "section": "1. IMAGES PRODUITS"},
+        "webp": {"rules": "images", "section": "1. IMAGES PRODUITS"},
+        "code promo": {"rules": "codes_promo", "playbook": "operation_promo", "section": "2. CODES PROMO"},
+        "promo": {"rules": "codes_promo", "playbook": "operation_promo", "section": "2. CODES PROMO"},
+        "pb580": {"rules": "codes_promo", "section": "2. CODES PROMO"},
+        "pb10180": {"rules": "codes_promo", "section": "2. CODES PROMO"},
+        "discount": {"rules": "codes_promo", "section": "2. CODES PROMO"},
+        "try me": {"rules": "tryme", "section": "3. TRY ME"},
+        "tryme": {"rules": "tryme", "section": "3. TRY ME"},
+        "echantillon": {"rules": "tryme", "section": "3. TRY ME"},
+        "cashback": {"rules": "cashback", "section": "4. CASHBACK"},
+        "store credit": {"rules": "cashback", "section": "4. CASHBACK"},
+        "credit": {"rules": "cashback", "section": "4. CASHBACK"},
+        "livraison": {"rules": "livraison", "section": "5. LIVRAISON"},
+        "shipping": {"rules": "livraison", "section": "5. LIVRAISON"},
+        "frais de port": {"rules": "livraison", "section": "5. LIVRAISON"},
+        "mondial relay": {"rules": "livraison", "section": "5. LIVRAISON"},
+        "cadeau": {"rules": "cadeaux", "section": "6. CADEAUX AUTOMATIQUES"},
+        "free gift": {"rules": "cadeaux", "section": "6. CADEAUX AUTOMATIQUES"},
+        "mystere": {"rules": "cadeaux", "section": "6. CADEAUX AUTOMATIQUES"},
+        "coffret": {"rules": "cadeaux", "section": "6. CADEAUX AUTOMATIQUES"},
+        "tag": {"rules": "tags", "section": "7. TAGS SHOPIFY"},
+        "collection": {"rules": "tags", "section": "7. TAGS SHOPIFY"},
+        "filtre": {"rules": "tags", "section": "7. TAGS SHOPIFY"},
+        "metafield": {"rules": "metafields", "section": "8. METAFIELDS"},
+        "seo": {"rules": "seo", "section": "9. SEO"},
+        "title": {"rules": "seo", "section": "9. SEO"},
+        "meta description": {"rules": "seo", "section": "9. SEO"},
+        "produit": {"rules": "pipeline_produit", "playbook": "creation_produit", "section": "10. PIPELINE CREATION PRODUIT"},
+        "enrichir": {"rules": "pipeline_produit", "playbook": "creation_produit", "section": "10. PIPELINE CREATION PRODUIT"},
+        "enrichissement": {"rules": "pipeline_produit", "playbook": "creation_produit", "section": "10. PIPELINE CREATION PRODUIT"},
+        "creer un produit": {"rules": "pipeline_produit", "playbook": "creation_produit", "section": "10. PIPELINE CREATION PRODUIT"},
+        "nouveau produit": {"rules": "pipeline_produit", "playbook": "creation_produit", "section": "10. PIPELINE CREATION PRODUIT"},
+        "marque": {"rules": "pipeline_marque", "playbook": "creation_marque", "section": "11. PIPELINE NOUVELLE MARQUE"},
+        "nouvelle marque": {"rules": "pipeline_marque", "playbook": "creation_marque", "section": "11. PIPELINE NOUVELLE MARQUE"},
+        "theme": {"rules": "modification_theme", "playbook": "modification_theme", "section": "14. MODIFICATIONS THEME"},
+        "liquid": {"rules": "modification_theme", "playbook": "modification_theme", "section": "14. MODIFICATIONS THEME"},
+        "template": {"rules": "modification_theme", "playbook": "modification_theme", "section": "14. MODIFICATIONS THEME"},
+        "section": {"rules": "modification_theme", "playbook": "modification_theme", "section": "14. MODIFICATIONS THEME"},
+        "snippet": {"rules": "modification_theme", "playbook": "modification_theme", "section": "14. MODIFICATIONS THEME"},
+        "deploy": {"playbook": "deploy_railway", "section": "DEPLOY"},
+        "railway": {"playbook": "deploy_railway", "section": "DEPLOY"},
+        "function": {"playbook": "deploy_shopify_function", "section": "SHOPIFY FUNCTION"},
+        "rust": {"playbook": "deploy_shopify_function", "section": "SHOPIFY FUNCTION"},
+        "wasm": {"playbook": "deploy_shopify_function", "section": "SHOPIFY FUNCTION"},
+        "avis": {"section": "AVIS / REVIEWS"},
+        "review": {"section": "AVIS / REVIEWS"},
+        "bis": {"section": "BACK IN STOCK"},
+        "back in stock": {"section": "BACK IN STOCK"},
+        "rupture": {"section": "BACK IN STOCK"},
+        "quiz": {"section": "QUIZ OLFACTIF"},
+        "dashboard": {"section": "DASHBOARD"},
+        "facture": {"section": "ORDER PRINTER"},
+        "order printer": {"section": "ORDER PRINTER"},
+        "email": {"section": "12. EMAILS AUTOMATIQUES"},
+        "newsletter": {"section": "12. EMAILS AUTOMATIQUES"},
+        "panier abandonn": {"section": "12. EMAILS AUTOMATIQUES"},
+    }
+
+    # Identifier les sujets pertinents
+    matched = {}
+    for keyword, config in KEYWORD_MAP.items():
+        if keyword in message:
+            section = config.get("section", "")
+            if section not in matched:
+                matched[section] = config
+
+    # Construire la reponse
+    result = {
+        "subjects_detected": list(matched.keys()),
+        "rules": [],
+        "playbooks": [],
+    }
+
+    # Recuperer les regles du playbook si applicable
+    for section, config in matched.items():
+        playbook_name = config.get("playbook")
+        if playbook_name and playbook_name in PROCESS_RULES:
+            result["playbooks"].append({
+                "process": playbook_name,
+                "rules": PROCESS_RULES[playbook_name]
+            })
+
+    # Ajouter le briefing ops
+    db = get_db()
+    if db:
+        try:
+            cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cur.execute("SELECT COUNT(*) as c FROM operations WHERE status='active'")
+            result["active_ops"] = cur.fetchone()["c"]
+            cur.execute("SELECT COUNT(*) as c FROM scheduled_actions WHERE status='pending'")
+            result["pending_actions"] = cur.fetchone()["c"]
+            cur.execute("SELECT COUNT(*) as c FROM ops_audit_log WHERE severity IN ('warning','error','critical') AND timestamp >= NOW() - INTERVAL '24 hours'")
+            result["alerts_24h"] = cur.fetchone()["c"]
+            cur.close(); db.close()
+        except Exception as e:
+            try: db.close()
+            except: pass
+
+    return result
+
 @app.get("/api/ops/health")
 async def ops_health():
     """Santé globale du système."""
