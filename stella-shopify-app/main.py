@@ -1959,6 +1959,7 @@ FAMILLE_MAP = {
     "aromatique": "Aromatique", "aromatique fruité": "Aromatique", "aromatique épicée": "Aromatique",
     "fougère": "Aromatique", "aldéhydé": "Aldéhydé", "aldéhydée": "Aldéhydé",
     "musqué": "Musqué", "poudré": "Gourmand",
+    "épicé": "Épicé", "épicée": "Épicé",
 }
 
 TOP_OCCASIONS = {"Quotidien", "Soirée", "Bureau", "Rendez-vous", "Occasion spéciale",
@@ -1986,11 +1987,21 @@ def compute_auto_tags(product_data, cutoff_iso):
     if sai and sai.get("value"):
         val = sai["value"]
         items = json.loads(val) if val.startswith("[") else [val]
+        seasons_found = set()
         for s in items:
-            for part in s.split("/"):
-                part = part.strip()
-                if part in ("Printemps", "Été", "Automne", "Hiver"):
-                    new_tags.add(f"Saison:{part}")
+            s_clean = s.strip()
+            if s_clean.lower() in ("toutes saisons", "toutes"):
+                new_tags.add("Saison:Toutes saisons")
+                seasons_found = {"Printemps", "Été", "Automne", "Hiver"}
+            else:
+                for part in s_clean.split("/"):
+                    part = part.strip()
+                    if part in ("Printemps", "Été", "Automne", "Hiver"):
+                        new_tags.add(f"Saison:{part}")
+                        seasons_found.add(part)
+        # Si les 4 saisons sont presentes, ajouter "Toutes saisons"
+        if len(seasons_found) >= 4:
+            new_tags.add("Saison:Toutes saisons")
 
     # Genre
     gen = product_data.get("genre")
@@ -2114,6 +2125,11 @@ async def cron_audit_qualite(request: Request):
                 p = edge["node"]
                 cursor = edge["cursor"]
                 if p.get("status") != "ACTIVE":
+                    continue
+                # Exclure les produits non-parfum de l'audit parfumerie
+                title_lower = (p.get("title") or "").lower()
+                skip_keywords = ("coffret", "cadeau", "mystère", "mystere", "échantillon", "echantillon", "gift", "card")
+                if any(kw in title_lower for kw in skip_keywords):
                     continue
                 product_issues = []
                 seo = p.get("seo") or {}
@@ -5072,7 +5088,7 @@ async def catalogue_dashboard():
                 if isinstance(audit_data, str):
                     try: audit_data = json.loads(audit_data)
                     except: audit_data = {}
-                result["products_with_issues"] = audit_data.get("issues_count", 0)
+                result["products_with_issues"] = audit_data.get("total_issues", audit_data.get("issues_count", len(audit_data.get("issues", []))))
                 result["issues"] = audit_data.get("issues", [])[:50]
             cur.close(); db.close()
         except Exception as e:
