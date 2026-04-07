@@ -280,8 +280,8 @@ const STELLA = {
         const statusClass = c.status === 'used' ? 'gold' : c.status === 'expired' ? 'error' : 'warning';
         return `<tr>
           <td>${c.order_name || ''}</td><td style="font-weight:600">${c.discount_code || ''}</td>
-          <td>${c.product_title || ''}</td><td>${STELLA.eur(c.amount)}</td>
-          <td>${c.customer_email || ''}</td><td>${STELLA.shortTime(c.expires_at)}</td>
+          <td>${c.product_title || ''}</td><td>${STELLA.eur(c.tryme_price || c.amount || 0)}</td>
+          <td>${c.customer_email || ''}</td><td>${STELLA.shortTime(c.discount_expires_at || c.expires_at)}</td>
           <td><span class="badge-pill badge-${statusClass}">${c.status}</span></td>
           <td>${c.order_id ? `<a href="/api/tryme/card-pdf/${c.order_id}" target="_blank" class="btn-outline btn-sm">PDF</a>` : ''}</td>
         </tr>`;
