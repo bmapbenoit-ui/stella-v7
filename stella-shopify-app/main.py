@@ -514,8 +514,12 @@ async def startup():
                       args=["drift-detector", "/api/cron/drift-detector"])
     scheduler.add_job(_run_cron, 'cron', hour=6, minute=0, id='daily_briefing',
                       args=["daily-briefing", "/api/cron/daily-briefing"])
+    scheduler.add_job(_run_cron, 'cron', hour='*/6', minute=17, id='coherence_check',
+                      args=["coherence-check", "/api/cron/coherence-check"])
+    scheduler.add_job(_run_cron, 'cron', day_of_week='mon', hour=7, minute=33, id='memory_audit',
+                      args=["memory-audit", "/api/cron/memory-audit"])
     scheduler.start()
-    logger.info("Scheduler started: stock(1h), tags(3h15), nouveautes(3h45), audit(lun 7h), tryme(4h30), cashback(9h15), action-executor(5min), drift(5h), briefing(6h)")
+    logger.info("Scheduler started: stock(1h), tags(3h15), nouveautes(3h45), audit(lun 7h), tryme(4h30), cashback(9h15), action-executor(5min), drift(5h), briefing(6h), coherence(6h), memory-audit(lun)")
 
 # ══════════════════════ 3-LAYER MEMORY ══════════════════════
 def save_to_redis(conv_id, role, content):
@@ -7198,6 +7202,188 @@ async def cron_daily_briefing():
         try: db.close()
         except: pass
         return {"status": "error", "error": str(e)}
+
+@app.post("/api/cron/coherence-check")
+async def cron_coherence_check():
+    """Toutes les 6h — vérifie la cohérence site + mémoire + systèmes."""
+    results = {"checks": [], "errors": [], "warnings": []}
+
+    # 1. Vérifier cohérence metafield promo-codes vs discounts Shopify actifs
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            # Lire le metafield
+            gql = '{ shop { metafield(namespace:"planete-beaute", key:"promo-codes") { value } } }'
+            r = await client.post(f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/{SHOPIFY_API_VERSION}/graphql.json",
+                headers={"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"},
+                json={"query": gql})
+            mf = r.json().get("data", {}).get("shop", {}).get("metafield", {})
+            if mf:
+                codes_in_mf = list(json.loads(mf.get("value", "{}")).get("codes", {}).keys())
+                # Vérifier chaque code existe dans Shopify
+                for code_name in codes_in_mf:
+                    gql2 = '{ discountNodes(first:1, query:"%s") { nodes { id discount { ... on DiscountCodeBasic { status } } } } }' % code_name
+                    r2 = await client.post(f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/{SHOPIFY_API_VERSION}/graphql.json",
+                        headers={"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"},
+                        json={"query": gql2})
+                    nodes = r2.json().get("data", {}).get("discountNodes", {}).get("nodes", [])
+                    if not nodes:
+                        results["errors"].append(f"Code {code_name} dans metafield promo-codes mais AUCUN discount Shopify — client voit un code inutilisable")
+                    else:
+                        results["checks"].append(f"Code {code_name} : OK")
+    except Exception as e:
+        results["warnings"].append(f"Erreur check promo-codes: {e}")
+
+    # 2. Vérifier SMTP fonctionnel
+    try:
+        import aiosmtplib
+        smtp_host = os.getenv("SMTP_HOST", "smtp.gmail.com")
+        smtp_port = int(os.getenv("SMTP_PORT", "587"))
+        smtp_user = os.getenv("SMTP_USER", "")
+        if smtp_user:
+            smtp = aiosmtplib.SMTP(hostname=smtp_host, port=smtp_port)
+            await smtp.connect()
+            await smtp.starttls()
+            await smtp.login(smtp_user, os.getenv("SMTP_PASS", ""))
+            await smtp.quit()
+            results["checks"].append("SMTP: OK")
+        else:
+            results["warnings"].append("SMTP non configuré")
+    except Exception as e:
+        results["errors"].append(f"SMTP DOWN: {e}")
+
+    # 3. Vérifier que site_state reflète la réalité
+    db = get_db()
+    if db:
+        try:
+            cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            # Promos expirées encore dans site_state
+            cur.execute("SELECT key FROM site_state WHERE category='promo_active' AND expires_at IS NOT NULL AND expires_at < NOW()")
+            expired = cur.fetchall()
+            for exp in expired:
+                results["errors"].append(f"Promo expirée encore dans site_state: {exp['key']}")
+                cur.execute("DELETE FROM site_state WHERE category='promo_active' AND key=%s", (exp['key'],))
+
+            # Actions échouées non traitées
+            cur.execute("SELECT COUNT(*) as c FROM scheduled_actions WHERE status='failed'")
+            failed = cur.fetchone()["c"]
+            if failed > 0:
+                results["errors"].append(f"{failed} action(s) planifiée(s) en échec non traitée(s)")
+
+            # Crons — vérifier que chaque cron a tourné dans les délais
+            cur.execute("SELECT cron_name, MAX(executed_at) as last FROM cron_results GROUP BY cron_name")
+            crons = cur.fetchall()
+            from datetime import timezone, timedelta
+            now = datetime.now(timezone.utc)
+            expected = {"stock-check": 2, "sync-tags": 26, "audit-qualite": 170, "tryme-expire": 26, "cashback-reminder": 26}
+            for c in crons:
+                name = c["cron_name"]
+                last = c["last"]
+                if name in expected and last:
+                    hours_ago = (now - last.replace(tzinfo=timezone.utc)).total_seconds() / 3600
+                    if hours_ago > expected[name]:
+                        results["warnings"].append(f"Cron {name} en retard: dernier run il y a {hours_ago:.0f}h (attendu < {expected[name]}h)")
+                    else:
+                        results["checks"].append(f"Cron {name}: OK ({hours_ago:.0f}h)")
+
+            db.commit(); cur.close(); db.close()
+        except Exception as e:
+            results["warnings"].append(f"Erreur check DB: {e}")
+            try: db.close()
+            except: pass
+
+    # Logger les résultats
+    ops_log("bhtc_fr", "cron:coherence-check", "coherence_check_complete",
+            severity="error" if results["errors"] else "info",
+            details={"checks": len(results["checks"]), "errors": len(results["errors"]), "warnings": len(results["warnings"])})
+
+    # Email si erreurs
+    if results["errors"]:
+        error_text = "\n".join(f"❌ {e}" for e in results["errors"])
+        warning_text = "\n".join(f"⚠️ {w}" for w in results["warnings"])
+        await _send_ops_email("info@planetebeauty.com",
+            f"STELLA OS — {len(results['errors'])} incohérence(s) détectée(s)",
+            f"Contrôle de cohérence automatique :\n\n{error_text}\n\n{warning_text}")
+
+    # Sauvegarder dans cron_results
+    db2 = get_db()
+    if db2:
+        try:
+            cur2 = db2.cursor()
+            cur2.execute("INSERT INTO cron_results (cron_name, result_data) VALUES (%s,%s)",
+                        ("coherence-check", json.dumps(results)))
+            db2.commit(); cur2.close(); db2.close()
+        except: pass
+
+    return results
+
+@app.post("/api/cron/memory-audit")
+async def cron_memory_audit():
+    """Hebdo lundi — vérifie la cohérence des couches mémoire."""
+    results = {"checks": [], "issues": []}
+
+    db = get_db()
+    if not db: return {"error": "No database"}
+    try:
+        cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+        # 1. Vérifier que des opérations récentes existent (signe de vie)
+        cur.execute("SELECT COUNT(*) as c FROM operations WHERE created_at >= NOW() - INTERVAL '7 days'")
+        ops_week = cur.fetchone()["c"]
+        if ops_week == 0:
+            results["issues"].append("Aucune opération tracée cette semaine — les actions sont-elles enregistrées ?")
+        else:
+            results["checks"].append(f"{ops_week} opérations tracées cette semaine")
+
+        # 2. Vérifier que l'audit trail a des entrées
+        cur.execute("SELECT COUNT(*) as c FROM ops_audit_log WHERE timestamp >= NOW() - INTERVAL '7 days'")
+        audit_week = cur.fetchone()["c"]
+        results["checks"].append(f"{audit_week} entrées audit trail cette semaine")
+
+        # 3. Vérifier site_state n'est pas vide
+        cur.execute("SELECT COUNT(*) as c FROM site_state")
+        state_count = cur.fetchone()["c"]
+        if state_count == 0:
+            results["issues"].append("site_state est vide — l'état du site n'est pas suivi")
+        else:
+            results["checks"].append(f"{state_count} éléments dans site_state")
+
+        # 4. Vérifier que le RAG a des entrées récentes
+        cur.execute("SELECT COUNT(*) as c FROM claude_memories WHERE created_at >= NOW() - INTERVAL '7 days'")
+        rag_week = cur.fetchone()["c"]
+        if rag_week == 0:
+            results["issues"].append("Aucune mémoire RAG sauvegardée cette semaine — la mémoire sémantique stagne")
+        else:
+            results["checks"].append(f"{rag_week} mémoires RAG ajoutées cette semaine")
+
+        # 5. Vérifier playbook à jour
+        cur.execute("SELECT COUNT(*) as c FROM process_playbook")
+        playbook_count = cur.fetchone()["c"]
+        results["checks"].append(f"{playbook_count} processus dans le playbook")
+
+        cur.close(); db.close()
+    except Exception as e:
+        results["issues"].append(f"Erreur audit: {e}")
+        try: db.close()
+        except: pass
+
+    # Email rapport
+    checks_text = "\n".join(f"✅ {c}" for c in results["checks"])
+    issues_text = "\n".join(f"⚠️ {i}" for i in results["issues"]) if results["issues"] else "Aucun problème détecté."
+    await _send_ops_email("info@planetebeauty.com",
+        "STELLA OS — Audit mémoire hebdomadaire",
+        f"Rapport santé mémoire STELLA :\n\n{checks_text}\n\nProblèmes :\n{issues_text}")
+
+    # Sauvegarder
+    db2 = get_db()
+    if db2:
+        try:
+            cur2 = db2.cursor()
+            cur2.execute("INSERT INTO cron_results (cron_name, result_data) VALUES (%s,%s)",
+                        ("memory-audit", json.dumps(results)))
+            db2.commit(); cur2.close(); db2.close()
+        except: pass
+
+    return results
 
 # ══════ FIN STELLA OS ══════
 
