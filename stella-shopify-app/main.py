@@ -1711,6 +1711,26 @@ async def webhook_tryme_order(request: Request):
                     logger.info(f"Try Me Upsell code created: {upsell_code} for {customer_email}")
                     log_activity("tryme_upsell", f"Code upsell -5% {upsell_code} créé pour {customer_email} (commande {order_name})",
                                  {"code": upsell_code, "order": order_name, "customer": customer_email}, source="webhook")
+                    # Écrire le code upsell dans le metafield tryme-codes (pour Order Printer facture)
+                    try:
+                        upsell_line = f"{upsell_code} | -5% sur votre prochaine commande (Try Me Découverte)"
+                        # Lire existant et accumuler
+                        existing_mf = ""
+                        async with httpx.AsyncClient(timeout=10) as c_mf:
+                            r_mf2 = await c_mf.post(SHOPIFY_GRAPHQL_URL,
+                                json={"query": f'{{ order(id: "gid://shopify/Order/{order_id}") {{ metafield(namespace: "planete-beaute", key: "tryme-codes") {{ value }} }} }}'},
+                                headers={"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"})
+                            mf2 = r_mf2.json().get("data", {}).get("order", {}).get("metafield")
+                            if mf2 and mf2.get("value"):
+                                existing_mf = mf2["value"].strip()
+                        final_mf = (existing_mf + "\n" + upsell_line).strip() if existing_mf else upsell_line
+                        mf_mut = """mutation($mf: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $mf) { metafields { id } userErrors { message } } }"""
+                        await httpx.AsyncClient(timeout=10).post(SHOPIFY_GRAPHQL_URL,
+                            json={"query": mf_mut, "variables": {"mf": [{"ownerId": f"gid://shopify/Order/{order_id}", "namespace": "planete-beaute", "key": "tryme-codes", "type": "multi_line_text_field", "value": final_mf}]}},
+                            headers={"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"})
+                        logger.info(f"Try Me Upsell code written to order metafield: {upsell_code}")
+                    except Exception as e:
+                        logger.error(f"Try Me Upsell metafield write error: {e}")
                     # Email au client
                     try:
                         html_upsell = f"""<div style="font-family:Georgia,serif;max-width:520px;margin:0 auto;padding:32px 20px;background:#FAF7F2">
