@@ -6484,6 +6484,141 @@ async def ops_playbook_detail(name: str):
     except Exception as e:
         return {"error": str(e)}
 
+@app.get("/api/ops/suggestions")
+async def ops_suggestions():
+    """Intelligence STELLA — suggestions automatiques basees sur les donnees."""
+    suggestions = []
+    db = get_db()
+    if not db: return {"suggestions": []}
+    try:
+        cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+        # 1. Cashback expirant bientot sans relance
+        cur.execute("""SELECT COUNT(*) as c FROM cashback_rewards
+            WHERE status='active' AND expires_at BETWEEN NOW() AND NOW() + INTERVAL '3 days'
+            AND (reminder_sent_at IS NULL)""")
+        cb_expiring = cur.fetchone()["c"]
+        if cb_expiring > 0:
+            suggestions.append({
+                "type": "action", "priority": "high", "system": "cashback",
+                "message": f"{cb_expiring} cashback(s) expirent dans 3 jours sans relance envoyee",
+                "action": "Envoyer les relances",
+                "action_tab": "cashback"
+            })
+
+        # 2. Avis en attente de moderation
+        cur.execute("SELECT COUNT(*) as c FROM product_reviews WHERE curated='pending'")
+        pending_reviews = cur.fetchone()["c"]
+        if pending_reviews > 0:
+            suggestions.append({
+                "type": "action", "priority": "medium", "system": "reviews",
+                "message": f"{pending_reviews} avis en attente de moderation",
+                "action": "Moderer les avis",
+                "action_tab": "reviews"
+            })
+
+        # 3. Try Me non convertis qui expirent bientot
+        cur.execute("""SELECT COUNT(*) as c FROM tryme_purchases
+            WHERE status='pending' AND expires_at BETWEEN NOW() AND NOW() + INTERVAL '5 days'""")
+        tryme_expiring = cur.fetchone()["c"]
+        if tryme_expiring > 0:
+            suggestions.append({
+                "type": "insight", "priority": "medium", "system": "tryme",
+                "message": f"{tryme_expiring} code(s) Try Me expirent dans 5 jours sans conversion",
+                "action": "Voir les codes",
+                "action_tab": "tryme"
+            })
+
+        # 4. Produits avec beaucoup de demandes BIS
+        cur.execute("""SELECT product_handle, COUNT(*) as cnt FROM bis_subscriptions
+            WHERE status='active' GROUP BY product_handle HAVING COUNT(*) >= 3 ORDER BY cnt DESC LIMIT 5""")
+        hot_bis = cur.fetchall()
+        for p in hot_bis:
+            suggestions.append({
+                "type": "insight", "priority": "high", "system": "bis",
+                "message": f"{p['product_handle']} : {p['cnt']} clients attendent le retour en stock",
+                "action": "Contacter le fournisseur",
+                "action_tab": "bis"
+            })
+
+        # 5. Problemes catalogue non resolus
+        cur.execute("SELECT result_data FROM cron_results WHERE cron_name='audit-qualite' ORDER BY executed_at DESC LIMIT 1")
+        audit = cur.fetchone()
+        if audit:
+            audit_data = audit["result_data"]
+            if isinstance(audit_data, str):
+                try: audit_data = json.loads(audit_data)
+                except: audit_data = {}
+            issues = audit_data.get("issues", [])
+            seo_issues = [i for i in issues if any("SEO" in p for p in (i.get("issues") or i.get("problems") or []))]
+            if seo_issues:
+                suggestions.append({
+                    "type": "action", "priority": "high", "system": "catalogue",
+                    "message": f"{len(seo_issues)} produit(s) avec SEO manquant — impact referencement Google",
+                    "action": "Corriger le SEO",
+                    "action_tab": "catalogue"
+                })
+            other_issues = [i for i in issues if not any("SEO" in p for p in (i.get("issues") or i.get("problems") or []))]
+            if other_issues:
+                suggestions.append({
+                    "type": "insight", "priority": "low", "system": "catalogue",
+                    "message": f"{len(other_issues)} produit(s) avec metafields incomplets (parfumeur, famille, accord)",
+                    "action": "Enrichir les produits",
+                    "action_tab": "catalogue"
+                })
+
+        # 6. Rollbacks en attente ou echoues
+        cur.execute("SELECT COUNT(*) as c FROM scheduled_actions WHERE status='failed'")
+        failed_actions = cur.fetchone()["c"]
+        if failed_actions > 0:
+            suggestions.append({
+                "type": "alert", "priority": "critical", "system": "ops",
+                "message": f"{failed_actions} action(s) planifiee(s) en echec — intervention requise",
+                "action": "Voir les operations",
+                "action_tab": "ops"
+            })
+
+        # 7. Cashback taux d'utilisation faible
+        cur.execute("SELECT COUNT(*) FILTER (WHERE status='used') as used, COUNT(*) FILTER (WHERE status IN ('expired','revoked')) as lost FROM cashback_rewards")
+        usage = cur.fetchone()
+        total_closed = (usage["used"] or 0) + (usage["lost"] or 0)
+        if total_closed > 10:
+            rate = round((usage["used"] or 0) / total_closed * 100)
+            if rate < 30:
+                suggestions.append({
+                    "type": "insight", "priority": "medium", "system": "cashback",
+                    "message": f"Taux d'utilisation cashback : {rate}% — beaucoup de cashback expirent inutilises",
+                    "action": "Ameliorer les relances",
+                    "action_tab": "cashback"
+                })
+
+        cur.close(); db.close()
+    except Exception as e:
+        logger.error(f"suggestions error: {e}")
+        try: db.close()
+        except: pass
+
+    # Quiz - faible taux de conversion
+    rc = get_redis()
+    if rc:
+        try:
+            today_key = datetime.now().strftime("%Y-%m-%d")
+            views = int(rc.get(f"quiz:quiz_view:{today_key}") or 0)
+            atc = int(rc.get(f"quiz:quiz_add_to_cart:{today_key}") or 0)
+            if views > 10 and atc == 0:
+                suggestions.append({
+                    "type": "insight", "priority": "low", "system": "quiz",
+                    "message": f"{views} vues quiz aujourd'hui mais 0 ajout au panier",
+                    "action": "Verifier le scoring quiz",
+                    "action_tab": "quiz"
+                })
+        except: pass
+
+    # Sort by priority
+    priority_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+    suggestions.sort(key=lambda s: priority_order.get(s["priority"], 9))
+    return {"suggestions": suggestions, "count": len(suggestions)}
+
 @app.get("/api/ops/health")
 async def ops_health():
     """Santé globale du système."""

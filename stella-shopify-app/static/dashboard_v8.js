@@ -138,14 +138,18 @@ const STELLA = {
         if (bOps) bOps.textContent = count || '';
       }
 
-      // Quick actions
+      // Suggestions STELLA (intelligence)
+      const suggestions = await STELLA.api('/api/ops/suggestions');
       const qa = document.getElementById('quick-actions');
-      if (qa && kpis) {
-        let btns = '';
-        if ((kpis.reviews_pending || 0) > 0) btns += `<button class="quick-action-btn" onclick="STELLA.switchTab('reviews')">Moderer les avis <span class="count">${kpis.reviews_pending}</span></button>`;
-        if ((kpis.cashback_expiring_soon || 0) > 0) btns += `<button class="quick-action-btn" onclick="STELLA.switchTab('cashback')">Cashback expirant <span class="count">${kpis.cashback_expiring_soon}</span></button>`;
-        if ((kpis.catalogue_issues || 0) > 0) btns += `<button class="quick-action-btn" onclick="STELLA.switchTab('catalogue')">Problemes catalogue <span class="count">${kpis.catalogue_issues}</span></button>`;
-        qa.innerHTML = btns || '<span style="font-size:0.8rem;color:var(--text-muted)">Aucune action prioritaire</span>';
+      if (qa && suggestions && suggestions.suggestions && suggestions.suggestions.length > 0) {
+        const priorityIcon = { critical: '🔴', high: '🟠', medium: '🟡', low: '🔵' };
+        qa.innerHTML = suggestions.suggestions.map(s =>
+          `<button class="quick-action-btn" onclick="STELLA.switchTab('${s.action_tab}')">
+            ${priorityIcon[s.priority] || '⚪'} ${s.message}
+          </button>`
+        ).join('');
+      } else if (qa) {
+        qa.innerHTML = '<span style="font-size:0.8rem;color:var(--success)">&#10003; Aucune action requise — tout est sous controle</span>';
       }
 
       // Global status
