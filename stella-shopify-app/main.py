@@ -6979,6 +6979,8 @@ async def tryme_available():
                         "variant_title": v["title"],
                         "price": v["price"]
                     })
+        # Trier par nom de produit (regroupe les marques ensemble)
+        available.sort(key=lambda x: x["product_title"])
         return {"available": available, "count": len(available)}
     except Exception as e:
         logger.error(f"tryme_available error: {e}")
