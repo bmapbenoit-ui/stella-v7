@@ -287,17 +287,6 @@ const STELLA = {
         </tr>`;
       }).join('') || '<tr><td colspan="8" class="empty-state">Aucun code</td></tr>';
 
-      // Cards grid
-      const grid = document.getElementById('tryme-cards-grid');
-      if (grid && data.cards) {
-        grid.innerHTML = data.cards.map(c => `<div style="width:140px;cursor:pointer" onclick="window.open('/api/tryme/card-preview/${c.product_id}','_blank')">
-          <img src="/api/tryme/card-preview/${c.product_id}" style="width:130px;border-radius:8px;border:1px solid var(--border)" loading="lazy">
-        </div>`).join('') || '<div class="empty-state"><p>Aucune carte</p></div>';
-      }
-    },
-    async regenerateCards() {
-      const r = await STELLA.apiPost('/api/tryme/pregenerate-all', {});
-      if (r) { STELLA.showToast('Cartes regenerees'); this.load(); }
     }
   },
 
