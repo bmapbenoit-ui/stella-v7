@@ -6108,7 +6108,7 @@ async def ops_active(entity: str = None):
         logger.error(f"ops_active error: {e}")
         return {"error": str(e)}
 
-@app.get("/api/ops/{op_id}")
+@app.get("/api/ops/detail/{op_id}")
 async def ops_detail(op_id: int):
     """Détails d'une opération avec ses fichiers et audit."""
     db = get_db()
@@ -6130,7 +6130,7 @@ async def ops_detail(op_id: int):
         logger.error(f"ops_detail error: {e}")
         return {"error": str(e)}
 
-@app.post("/api/ops/{op_id}/complete")
+@app.post("/api/ops/complete/{op_id}")
 async def ops_complete(op_id: int):
     """Marquer une opération comme terminée."""
     db = get_db()
@@ -6145,7 +6145,7 @@ async def ops_complete(op_id: int):
         logger.error(f"ops_complete error: {e}")
         return {"error": str(e)}
 
-@app.post("/api/ops/{op_id}/schedule")
+@app.post("/api/ops/schedule/{op_id}")
 async def ops_schedule(op_id: int, request: Request):
     """Planifier une action (rollback, notification, check)."""
     body = await request.json()
