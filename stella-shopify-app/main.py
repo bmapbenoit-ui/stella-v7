@@ -1665,6 +1665,78 @@ async def webhook_tryme_order(request: Request):
         except Exception as e:
             logger.error(f"Try Me metafield write error: {e}")
 
+    # Try Me Upsell : si un item a la propriété _tryme_upsell, générer un code -5% prochaine commande
+    upsell_items = [li for li in line_items if is_tryme_item(li) and any(
+        (p.get("name") == "_tryme_upsell" and p.get("value") == "true")
+        for p in (li.get("properties") or [])
+    )]
+    if upsell_items and customer_email:
+        try:
+            upsell_code = f"TU-{uuid.uuid4().hex[:6].upper()}"
+            now_u = datetime.utcnow()
+            expires_u = now_u + timedelta(days=30)
+            # Créer un code -5% valable sur TOUS les produits (format standard)
+            # Exclusions : Try Me, cadeaux, etc. gérées par la Function Rust via variant title
+            gql_upsell = """mutation discountCodeBasicCreate($basicCodeDiscount: DiscountCodeBasicInput!) {
+              discountCodeBasicCreate(basicCodeDiscount: $basicCodeDiscount) {
+                codeDiscountNode { id }
+                userErrors { field message }
+              }
+            }"""
+            upsell_vars = {
+                "basicCodeDiscount": {
+                    "title": f"Try Me Upsell -5% — {order_name}",
+                    "code": upsell_code,
+                    "startsAt": now_u.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "endsAt": expires_u.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "usageLimit": 1,
+                    "appliesOncePerCustomer": True,
+                    "customerSelection": {"customers": {"add": [f"gid://shopify/Customer/{customer_id}"]}} if customer_id else {"all": True},
+                    "customerGets": {
+                        "items": {"all": True},
+                        "value": {"percentage": 0.05}
+                    },
+                    "combinesWith": {"orderDiscounts": True, "productDiscounts": True, "shippingDiscounts": True}
+                }
+            }
+            async with httpx.AsyncClient(timeout=15) as c:
+                r_u = await c.post(SHOPIFY_GRAPHQL_URL,
+                    json={"query": gql_upsell, "variables": upsell_vars},
+                    headers={"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"})
+                u_data = r_u.json()
+                u_errors = u_data.get("data", {}).get("discountCodeBasicCreate", {}).get("userErrors", [])
+                if u_errors:
+                    logger.error(f"Try Me Upsell code error: {u_errors}")
+                else:
+                    logger.info(f"Try Me Upsell code created: {upsell_code} for {customer_email}")
+                    log_activity("tryme_upsell", f"Code upsell -5% {upsell_code} créé pour {customer_email} (commande {order_name})",
+                                 {"code": upsell_code, "order": order_name, "customer": customer_email}, source="webhook")
+                    # Email au client
+                    try:
+                        html_upsell = f"""<div style="font-family:Georgia,serif;max-width:520px;margin:0 auto;padding:32px 20px;background:#FAF7F2">
+                        <h2 style="text-align:center;color:#1a1a1a;font-weight:300;font-style:italic">Merci pour votre Try Me !</h2>
+                        <p style="color:#666;text-align:center">En remerciement, voici votre code de r&eacute;duction de 5% valable sur votre prochaine commande :</p>
+                        <div style="text-align:center;margin:24px 0">
+                          <span style="display:inline-block;border:2px dashed #C4956A;padding:12px 32px;font-size:20px;font-weight:700;letter-spacing:3px;color:#1a1a1a">{upsell_code}</span>
+                        </div>
+                        <p style="color:#888;font-size:13px;text-align:center">Valable 30 jours sur tous les parfums format standard<br>Cumulable avec vos autres codes promo</p>
+                        <p style="color:#aaa;font-size:11px;text-align:center;margin-top:24px">Planètebeauty · Parfumerie de niche</p>
+                        </div>"""
+                        from email.mime.text import MIMEText
+                        from email.mime.multipart import MIMEMultipart
+                        msg = MIMEMultipart("alternative")
+                        msg["From"] = f"{SMTP_FROM_NAME} <{SMTP_FROM_EMAIL}>"
+                        msg["To"] = customer_email
+                        msg["Subject"] = f"Votre code -5% Try Me — {upsell_code}"
+                        msg.attach(MIMEText(html_upsell, "html"))
+                        await aiosmtplib.send(msg, hostname=SMTP_HOST, port=SMTP_PORT,
+                                              username=SMTP_USER, password=SMTP_PASS, use_tls=False, start_tls=True)
+                        logger.info(f"Try Me Upsell email sent to {customer_email}: {upsell_code}")
+                    except Exception as e:
+                        logger.error(f"Try Me Upsell email error: {e}")
+        except Exception as e:
+            logger.error(f"Try Me Upsell error: {e}")
+
     # Generate PDF card for printing
     if results:
         try:
@@ -6874,6 +6946,42 @@ async def ops_context(request: Request):
         logger.debug(f"Context RAG search: {e}")
 
     return result
+
+@app.get("/api/tryme/available")
+async def tryme_available():
+    """Retourne les variantes Try Me disponibles en stock 24H pour l'upsell panier."""
+    try:
+        gql = """{
+          products(first: 250, query: "status:active") {
+            nodes {
+              id title handle
+              variants(first: 10) {
+                nodes {
+                  id title price availableForSale quantityAvailable
+                }
+              }
+            }
+          }
+        }"""
+        data = await shopify_graphql(gql)
+        products = data.get("data", {}).get("products", {}).get("nodes", [])
+        available = []
+        for p in products:
+            for v in p.get("variants", {}).get("nodes", []):
+                vt = (v.get("title") or "").lower()
+                if "try me" in vt and v.get("availableForSale") and (v.get("quantityAvailable") or 0) > 0:
+                    available.append({
+                        "product_id": p["id"].split("/")[-1],
+                        "product_title": p["title"],
+                        "product_handle": p["handle"],
+                        "variant_id": v["id"].split("/")[-1],
+                        "variant_title": v["title"],
+                        "price": v["price"]
+                    })
+        return {"available": available, "count": len(available)}
+    except Exception as e:
+        logger.error(f"tryme_available error: {e}")
+        return {"available": [], "count": 0, "error": str(e)}
 
 @app.get("/api/ops/health")
 async def ops_health():
