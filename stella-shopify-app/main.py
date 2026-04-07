@@ -4532,9 +4532,6 @@ PROMO_MF_KEY = "discount-codes-config"
 DEFAULT_PROMO_CONFIG = {
     "codes": {
         "PB580": {"percent": 5.0, "minSubtotal": 80.0, "message": "-5% avec le code PB580"},
-        "PB10180": {"percent": 10.0, "minSubtotal": 180.0, "message": "-10% avec le code PB10180"},
-        "PB15300": {"percent": 15.0, "minSubtotal": 300.0, "message": "-15% avec le code PB15300"},
-        "PB20500": {"percent": 20.0, "minSubtotal": 500.0, "message": "-20% avec le code PB20500"},
     },
     "excludedVendors": ["Creed", "Roja Parfums", "Clive Christian"]
 }
