@@ -6508,7 +6508,7 @@ async def ops_playbook_list():
 
 @app.get("/api/ops/playbook/{name}")
 async def ops_playbook_detail(name: str):
-    """Recuperer les etapes d'un processus."""
+    """Recuperer les etapes d'un processus + regles metier associees."""
     db = get_db()
     if not db: return {"error": "No database"}
     try:
@@ -6517,9 +6517,67 @@ async def ops_playbook_detail(name: str):
         row = cur.fetchone()
         cur.close(); db.close()
         if not row: return {"error": f"Process '{name}' not found"}
-        return dict(row)
+        result = dict(row)
+        # Ajouter les regles metier pertinentes selon le type de processus
+        result["rules"] = PROCESS_RULES.get(name, [])
+        result["reminder"] = "AVANT DE CODER : verifier chaque regle ci-dessous. Si une regle contredit ce que tu fais, ARRETE et corrige."
+        return result
     except Exception as e:
         return {"error": str(e)}
+
+# Regles metier associees a chaque processus — source de verite
+PROCESS_RULES = {
+    "creation_produit": [
+        "Images : 3 images carre 2000x2000 WebP. Image 1 = flacon fond blanc zoom 80%. Image 2 = flacon+boite. Image 3 = lifestyle. Alt text SEO.",
+        "Description : 3 lignes obligatoires (accroche + citation parfumeur + note Fragrantica).",
+        "SEO : title max 70c format [Nom] – [MARQUE] | [Conc] [Vol]ml | PlaneteBeauty. Meta max 155c.",
+        "Vendor TOUJOURS en MAJUSCULES. productType = concentration exacte.",
+        "Tags format standardise : Famille:X, Saison:X, Genre:X, Concentration:X, Occasion:X, Accord:X.",
+        "Try Me : prix = 5% du format standard le plus cher arrondi euro sup. 1 par reference (EDP != Extrait).",
+        "Metafields : 32 champs namespace parfum. Valeurs standardisees sillage (1-4), intensite (1-5).",
+        "Sources : site officiel marque → Fragrantica Chrome MCP → Parfumo. JAMAIS inventer.",
+    ],
+    "creation_marque": [
+        "Creer la collection marque.",
+        "Enrichir chaque produit (pipeline 10 etapes — appeler playbook creation_produit).",
+        "Creer article de blog pour la marque.",
+        "Ajouter dans liste collections homepage + menu navigation.",
+        "Mettre a jour compteur 'Nos XX Marques' homepage.",
+        "Mettre a jour la page collection (description, image).",
+    ],
+    "operation_promo": [
+        "AVANT de modifier quoi que ce soit : POST /api/ops/create avec state_before de CHAQUE fichier.",
+        "Fichiers typiquement impactes : header-group.json, index.json, cart.json, pb-discount-code.liquid, metafield promo-codes.",
+        "PLANIFIER le rollback : POST /api/ops/schedule avec date d'expiration.",
+        "La carte Try Me est une SURPRISE — JAMAIS mentionnee dans une promo.",
+        "Codes promo = product discount. Exclusions : Try Me, echantillons, coffrets, Creed/Roja/Clive Christian.",
+        "Apres mise en place : verifier visuellement homepage, page produit, panier.",
+    ],
+    "modification_theme": [
+        "AVANT : lire la carte des dependances (registre §5). Identifier TOUS les systemes impactes.",
+        "APRES TOUTE modif : tester ATC sur 3 produits (formValid=true, bisEmailInForm=false).",
+        "Tester panier (produits, quantites, cadeaux auto, codes promo, sous-total).",
+        "Tester checkout (redirection, paiement).",
+        "REVERT IMMEDIAT si echec.",
+        "Le bloc BIS ne doit JAMAIS etre dans le form ATC (incident 03/04 = 23h ATC casse = ~2500€ perdu).",
+        "Les cartes Try Me sont generiques Vistaprint — PAS de cartes digitales dans le dashboard.",
+    ],
+    "deploy_railway": [
+        "Syntax check : python3 -c 'import py_compile; py_compile.compile(\"main.py\", doraise=True)'",
+        "git push origin main (auto-deploy Railway).",
+        "Attendre 45s puis verifier /api/ops/health.",
+        "Mettre a jour site_state (deploy commit).",
+        "Mettre a jour registre technique.",
+    ],
+    "deploy_shopify_function": [
+        "Build : cargo build --target wasm32-wasip1.",
+        "Deploy : shopify app deploy --force --no-release.",
+        "Release : shopify app release --version=stella-v8-XX --allow-updates.",
+        "Verifier Function ACTIVE dans Shopify Admin.",
+        "Tester parcours client complet (ATC, panier, checkout, codes promo).",
+        "Mettre a jour registre technique (version, IDs).",
+    ],
+}
 
 @app.get("/api/ops/suggestions")
 async def ops_suggestions():
