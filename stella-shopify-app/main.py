@@ -245,6 +245,91 @@ CREATE TABLE IF NOT EXISTS cron_results (
     result_data JSONB,
     executed_at TIMESTAMP DEFAULT NOW()
 );
+
+-- ══════ STELLA OS — Operations Management (07/04/2026) ══════
+
+CREATE TABLE IF NOT EXISTS entity_registry (
+    id SERIAL PRIMARY KEY,
+    code VARCHAR(20) UNIQUE NOT NULL,
+    name VARCHAR(200) NOT NULL,
+    country VARCHAR(3),
+    currency VARCHAR(3) DEFAULT 'EUR',
+    timezone VARCHAR(50) DEFAULT 'Europe/Paris',
+    shopify_domain VARCHAR(200),
+    platform VARCHAR(20) DEFAULT 'shopify',
+    active BOOLEAN DEFAULT TRUE,
+    metadata JSONB DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS operations (
+    id SERIAL PRIMARY KEY,
+    entity_code VARCHAR(20) DEFAULT 'bhtc_fr',
+    name VARCHAR(200) NOT NULL,
+    type VARCHAR(50) NOT NULL,
+    status VARCHAR(20) DEFAULT 'active',
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    expires_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ,
+    created_by VARCHAR(50) DEFAULT 'stella',
+    description TEXT,
+    metadata JSONB DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS operations_files (
+    id SERIAL PRIMARY KEY,
+    operation_id INT REFERENCES operations(id) ON DELETE CASCADE,
+    file_path VARCHAR(500) NOT NULL,
+    file_type VARCHAR(50),
+    state_before TEXT,
+    state_after TEXT,
+    rollback_action TEXT,
+    rolled_back BOOLEAN DEFAULT FALSE,
+    rolled_back_at TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS scheduled_actions (
+    id SERIAL PRIMARY KEY,
+    operation_id INT,
+    entity_code VARCHAR(20) DEFAULT 'bhtc_fr',
+    action_type VARCHAR(50) NOT NULL,
+    scheduled_at TIMESTAMPTZ NOT NULL,
+    status VARCHAR(20) DEFAULT 'pending',
+    executed_at TIMESTAMPTZ,
+    retry_count INT DEFAULT 0,
+    max_retries INT DEFAULT 3,
+    action_payload JSONB NOT NULL,
+    result JSONB,
+    error_message TEXT
+);
+
+CREATE TABLE IF NOT EXISTS site_state (
+    id SERIAL PRIMARY KEY,
+    entity_code VARCHAR(20) DEFAULT 'bhtc_fr',
+    category VARCHAR(50) NOT NULL,
+    key VARCHAR(200) NOT NULL,
+    value JSONB NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    expires_at TIMESTAMPTZ,
+    UNIQUE(entity_code, category, key)
+);
+
+CREATE TABLE IF NOT EXISTS ops_audit_log (
+    id SERIAL PRIMARY KEY,
+    entity_code VARCHAR(20) DEFAULT 'bhtc_fr',
+    timestamp TIMESTAMPTZ DEFAULT NOW(),
+    actor VARCHAR(50) NOT NULL,
+    action VARCHAR(100) NOT NULL,
+    operation_id INT,
+    severity VARCHAR(20) DEFAULT 'info',
+    details JSONB DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_operations_status ON operations(status);
+CREATE INDEX IF NOT EXISTS idx_operations_entity ON operations(entity_code);
+CREATE INDEX IF NOT EXISTS idx_scheduled_actions_status ON scheduled_actions(status, scheduled_at);
+CREATE INDEX IF NOT EXISTS idx_site_state_entity ON site_state(entity_code, category);
+CREATE INDEX IF NOT EXISTS idx_ops_audit_timestamp ON ops_audit_log(timestamp);
 """
 
 def log_activity(type: str, action: str, details: dict = None, source: str = "system",
@@ -317,8 +402,12 @@ async def startup():
             ]:
                 try: cur.execute(col_sql)
                 except Exception: pass
+            # Seed entity_registry
+            cur.execute("""INSERT INTO entity_registry (code, name, country, currency, timezone, shopify_domain, platform)
+                VALUES ('bhtc_fr', 'BHTC SARL', 'FR', 'EUR', 'Europe/Paris', 'planetemode.myshopify.com', 'shopify')
+                ON CONFLICT (code) DO NOTHING""")
             db.commit(); cur.close(); db.close()
-            logger.info("Chat tables ready (cashback_settings seeded, cashback columns migrated)")
+            logger.info("Chat tables ready + STELLA OS tables + entity_registry seeded")
         except Exception as e:
             logger.error(f"Migration: {e}")
             try: db.close()
@@ -342,8 +431,15 @@ async def startup():
     #                   args=["trustpilot-scan", "/api/cron/trustpilot-scan"])
     scheduler.add_job(_run_cron, 'cron', hour=9, minute=15, id='cashback_reminder',
                       args=["cashback-reminder", "/api/cron/cashback-reminder"])
+    # ══════ STELLA OS — Operations Management crons ══════
+    scheduler.add_job(_run_cron, 'interval', minutes=5, id='action_executor',
+                      args=["action-executor", "/api/cron/action-executor"])
+    scheduler.add_job(_run_cron, 'cron', hour=5, minute=0, id='drift_detector',
+                      args=["drift-detector", "/api/cron/drift-detector"])
+    scheduler.add_job(_run_cron, 'cron', hour=6, minute=0, id='daily_briefing',
+                      args=["daily-briefing", "/api/cron/daily-briefing"])
     scheduler.start()
-    logger.info("Scheduler started: stock(1h), tags(3h15), nouveautes(3h45), audit(lun 7h), tryme(4h30), cashback-reminder(9h15) — trustpilot DISABLED")
+    logger.info("Scheduler started: stock(1h), tags(3h15), nouveautes(3h45), audit(lun 7h), tryme(4h30), cashback(9h15), action-executor(5min), drift(5h), briefing(6h)")
 
 # ══════════════════════ 3-LAYER MEMORY ══════════════════════
 def save_to_redis(conv_id, role, content):
@@ -5942,6 +6038,619 @@ async def chat_page(request: Request):
     html = html.replace("__SHOPIFY_SHOP__", SHOPIFY_SHOP)
     html = html.replace("__SHOPIFY_HOST__", request.query_params.get("host", ""))
     return HTMLResponse(html)
+
+# ══════════════════════════════════════════════════════════════
+# STELLA OS — Operations Management System (07/04/2026)
+# Source de vérité : PostgreSQL. Rollbacks 24/7 via Railway.
+# ══════════════════════════════════════════════════════════════
+
+def ops_log(entity_code, actor, action, operation_id=None, severity="info", details=None):
+    """Log dans ops_audit_log."""
+    db = get_db()
+    if not db: return
+    try:
+        cur = db.cursor()
+        cur.execute("""INSERT INTO ops_audit_log (entity_code, actor, action, operation_id, severity, details)
+            VALUES (%s,%s,%s,%s,%s,%s)""", (entity_code, actor, action, operation_id, severity, json.dumps(details or {})))
+        db.commit(); cur.close(); db.close()
+    except Exception as e:
+        logger.error(f"ops_log error: {e}")
+        try: db.close()
+        except: pass
+
+# ── ENDPOINTS API /api/ops/* ──
+
+@app.post("/api/ops/create")
+async def ops_create(request: Request):
+    """Créer une opération (promo, deploy, feature, fix, config)."""
+    body = await request.json()
+    db = get_db()
+    if not db: return {"error": "No database"}
+    try:
+        cur = db.cursor()
+        cur.execute("""INSERT INTO operations (entity_code, name, type, status, expires_at, created_by, description, metadata)
+            VALUES (%s,%s,%s,'active',%s,%s,%s,%s) RETURNING id""",
+            (body.get("entity_code", "bhtc_fr"), body["name"], body["type"],
+             body.get("expires_at"), body.get("created_by", "stella"),
+             body.get("description", ""), json.dumps(body.get("metadata", {}))))
+        op_id = cur.fetchone()[0]
+        # Sauvegarder les fichiers modifiés
+        for f in body.get("files", []):
+            cur.execute("""INSERT INTO operations_files (operation_id, file_path, file_type, state_before, state_after, rollback_action)
+                VALUES (%s,%s,%s,%s,%s,%s)""",
+                (op_id, f["file_path"], f.get("file_type", ""),
+                 f.get("state_before", ""), f.get("state_after", ""), f.get("rollback_action", "")))
+        db.commit(); cur.close(); db.close()
+        ops_log(body.get("entity_code", "bhtc_fr"), body.get("created_by", "stella"),
+                "operation_created", op_id, "info", {"name": body["name"], "type": body["type"]})
+        return {"success": True, "operation_id": op_id}
+    except Exception as e:
+        logger.error(f"ops_create error: {e}")
+        try: db.close()
+        except: pass
+        return {"error": str(e)}
+
+@app.get("/api/ops/active")
+async def ops_active(entity: str = None):
+    """Lister les opérations actives."""
+    db = get_db()
+    if not db: return {"error": "No database"}
+    try:
+        cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        if entity:
+            cur.execute("SELECT * FROM operations WHERE status='active' AND entity_code=%s ORDER BY created_at DESC", (entity,))
+        else:
+            cur.execute("SELECT * FROM operations WHERE status='active' ORDER BY created_at DESC")
+        rows = cur.fetchall()
+        cur.close(); db.close()
+        return {"operations": [dict(r) for r in rows]}
+    except Exception as e:
+        logger.error(f"ops_active error: {e}")
+        return {"error": str(e)}
+
+@app.get("/api/ops/{op_id}")
+async def ops_detail(op_id: int):
+    """Détails d'une opération avec ses fichiers et audit."""
+    db = get_db()
+    if not db: return {"error": "No database"}
+    try:
+        cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("SELECT * FROM operations WHERE id=%s", (op_id,))
+        op = cur.fetchone()
+        if not op:
+            cur.close(); db.close()
+            return {"error": "Operation not found"}
+        cur.execute("SELECT * FROM operations_files WHERE operation_id=%s", (op_id,))
+        files = cur.fetchall()
+        cur.execute("SELECT * FROM ops_audit_log WHERE operation_id=%s ORDER BY timestamp DESC LIMIT 50", (op_id,))
+        audit = cur.fetchall()
+        cur.close(); db.close()
+        return {"operation": dict(op), "files": [dict(f) for f in files], "audit": [dict(a) for a in audit]}
+    except Exception as e:
+        logger.error(f"ops_detail error: {e}")
+        return {"error": str(e)}
+
+@app.post("/api/ops/{op_id}/complete")
+async def ops_complete(op_id: int):
+    """Marquer une opération comme terminée."""
+    db = get_db()
+    if not db: return {"error": "No database"}
+    try:
+        cur = db.cursor()
+        cur.execute("UPDATE operations SET status='completed', completed_at=NOW() WHERE id=%s", (op_id,))
+        db.commit(); cur.close(); db.close()
+        ops_log("bhtc_fr", "stella", "operation_completed", op_id)
+        return {"success": True}
+    except Exception as e:
+        logger.error(f"ops_complete error: {e}")
+        return {"error": str(e)}
+
+@app.post("/api/ops/{op_id}/schedule")
+async def ops_schedule(op_id: int, request: Request):
+    """Planifier une action (rollback, notification, check)."""
+    body = await request.json()
+    db = get_db()
+    if not db: return {"error": "No database"}
+    try:
+        cur = db.cursor()
+        cur.execute("""INSERT INTO scheduled_actions (operation_id, entity_code, action_type, scheduled_at, action_payload)
+            VALUES (%s,%s,%s,%s,%s) RETURNING id""",
+            (op_id, body.get("entity_code", "bhtc_fr"), body.get("action_type", "rollback"),
+             body["scheduled_at"], json.dumps(body.get("action_payload", {}))))
+        action_id = cur.fetchone()[0]
+        db.commit(); cur.close(); db.close()
+        ops_log(body.get("entity_code", "bhtc_fr"), "stella", "action_scheduled", op_id, "info",
+                {"action_id": action_id, "type": body.get("action_type"), "scheduled_at": body["scheduled_at"]})
+        return {"success": True, "action_id": action_id}
+    except Exception as e:
+        logger.error(f"ops_schedule error: {e}")
+        return {"error": str(e)}
+
+@app.get("/api/ops/scheduled")
+async def ops_scheduled_list():
+    """Lister les actions planifiées en attente."""
+    db = get_db()
+    if not db: return {"error": "No database"}
+    try:
+        cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("SELECT * FROM scheduled_actions WHERE status IN ('pending','failed') ORDER BY scheduled_at ASC")
+        rows = cur.fetchall()
+        cur.close(); db.close()
+        return {"scheduled_actions": [dict(r) for r in rows]}
+    except Exception as e:
+        logger.error(f"ops_scheduled error: {e}")
+        return {"error": str(e)}
+
+# ── ÉTAT DU SITE ──
+
+@app.get("/api/ops/state")
+async def ops_state(entity: str = "bhtc_fr"):
+    """État live complet du site."""
+    db = get_db()
+    if not db: return {"error": "No database"}
+    try:
+        cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("SELECT * FROM site_state WHERE entity_code=%s ORDER BY category, key", (entity,))
+        states = cur.fetchall()
+        cur.execute("SELECT * FROM operations WHERE entity_code=%s AND status='active' ORDER BY created_at DESC", (entity,))
+        active_ops = cur.fetchall()
+        cur.execute("""SELECT * FROM scheduled_actions WHERE entity_code=%s AND status='pending'
+            ORDER BY scheduled_at ASC""", (entity,))
+        pending = cur.fetchall()
+        cur.close(); db.close()
+        # Grouper par catégorie
+        grouped = {}
+        for s in states:
+            cat = s["category"]
+            if cat not in grouped: grouped[cat] = []
+            grouped[cat].append(dict(s))
+        return {"entity": entity, "state": grouped, "active_operations": [dict(o) for o in active_ops],
+                "pending_actions": [dict(p) for p in pending]}
+    except Exception as e:
+        logger.error(f"ops_state error: {e}")
+        return {"error": str(e)}
+
+@app.post("/api/ops/state/update")
+async def ops_state_update(request: Request):
+    """Mettre à jour un élément de l'état du site (upsert)."""
+    body = await request.json()
+    db = get_db()
+    if not db: return {"error": "No database"}
+    try:
+        cur = db.cursor()
+        cur.execute("""INSERT INTO site_state (entity_code, category, key, value, expires_at)
+            VALUES (%s,%s,%s,%s,%s)
+            ON CONFLICT (entity_code, category, key) DO UPDATE SET value=%s, updated_at=NOW(), expires_at=%s""",
+            (body.get("entity_code", "bhtc_fr"), body["category"], body["key"],
+             json.dumps(body["value"]), body.get("expires_at"),
+             json.dumps(body["value"]), body.get("expires_at")))
+        db.commit(); cur.close(); db.close()
+        return {"success": True}
+    except Exception as e:
+        logger.error(f"ops_state_update error: {e}")
+        return {"error": str(e)}
+
+@app.delete("/api/ops/state/{state_id}")
+async def ops_state_delete(state_id: int):
+    """Retirer un élément de l'état du site."""
+    db = get_db()
+    if not db: return {"error": "No database"}
+    try:
+        cur = db.cursor()
+        cur.execute("DELETE FROM site_state WHERE id=%s", (state_id,))
+        db.commit(); cur.close(); db.close()
+        return {"success": True}
+    except Exception as e:
+        logger.error(f"ops_state_delete error: {e}")
+        return {"error": str(e)}
+
+# ── BRIEFING & AUDIT ──
+
+@app.get("/api/ops/briefing")
+async def ops_briefing(entity: str = "bhtc_fr"):
+    """Briefing complet pour démarrage session Claude."""
+    db = get_db()
+    if not db: return {"error": "No database"}
+    try:
+        cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        # Opérations actives
+        cur.execute("SELECT id, name, type, status, created_at, expires_at FROM operations WHERE entity_code=%s AND status='active' ORDER BY created_at DESC", (entity,))
+        active_ops = cur.fetchall()
+        # Actions planifiées dans les 48h
+        cur.execute("""SELECT sa.*, o.name as operation_name FROM scheduled_actions sa
+            LEFT JOIN operations o ON sa.operation_id = o.id
+            WHERE sa.entity_code=%s AND sa.status='pending' AND sa.scheduled_at <= NOW() + INTERVAL '48 hours'
+            ORDER BY sa.scheduled_at ASC""", (entity,))
+        upcoming = cur.fetchall()
+        # Alertes récentes (24h)
+        cur.execute("""SELECT * FROM ops_audit_log WHERE entity_code=%s AND severity IN ('warning','error','critical')
+            AND timestamp >= NOW() - INTERVAL '24 hours' ORDER BY timestamp DESC""", (entity,))
+        alerts = cur.fetchall()
+        # Dernières opérations terminées (7 jours)
+        cur.execute("""SELECT id, name, type, status, completed_at FROM operations WHERE entity_code=%s
+            AND status IN ('completed','rolled_back') AND completed_at >= NOW() - INTERVAL '7 days'
+            ORDER BY completed_at DESC LIMIT 10""", (entity,))
+        recent = cur.fetchall()
+        # État du site
+        cur.execute("SELECT category, key, value, expires_at FROM site_state WHERE entity_code=%s ORDER BY category", (entity,))
+        site = cur.fetchall()
+        cur.close(); db.close()
+        return {
+            "entity": entity,
+            "active_operations": [dict(o) for o in active_ops],
+            "upcoming_actions_48h": [dict(u) for u in upcoming],
+            "alerts_24h": [dict(a) for a in alerts],
+            "recent_completed": [dict(r) for r in recent],
+            "site_state": [dict(s) for s in site]
+        }
+    except Exception as e:
+        logger.error(f"ops_briefing error: {e}")
+        return {"error": str(e)}
+
+@app.get("/api/ops/audit")
+async def ops_audit(entity: str = None, limit: int = 100):
+    """Journal d'audit (filtrable)."""
+    db = get_db()
+    if not db: return {"error": "No database"}
+    try:
+        cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        if entity:
+            cur.execute("SELECT * FROM ops_audit_log WHERE entity_code=%s ORDER BY timestamp DESC LIMIT %s", (entity, limit))
+        else:
+            cur.execute("SELECT * FROM ops_audit_log ORDER BY timestamp DESC LIMIT %s", (limit,))
+        rows = cur.fetchall()
+        cur.close(); db.close()
+        return {"audit_log": [dict(r) for r in rows]}
+    except Exception as e:
+        logger.error(f"ops_audit error: {e}")
+        return {"error": str(e)}
+
+@app.get("/api/ops/entities")
+async def ops_entities():
+    """Lister les entités."""
+    db = get_db()
+    if not db: return {"error": "No database"}
+    try:
+        cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("SELECT * FROM entity_registry WHERE active=TRUE ORDER BY code")
+        rows = cur.fetchall()
+        cur.close(); db.close()
+        return {"entities": [dict(r) for r in rows]}
+    except Exception as e:
+        logger.error(f"ops_entities error: {e}")
+        return {"error": str(e)}
+
+@app.get("/api/ops/health")
+async def ops_health():
+    """Santé globale du système."""
+    db = get_db()
+    rc = get_redis()
+    health = {"database": bool(db), "redis": bool(rc), "crons": {}, "pending_actions": 0, "active_ops": 0}
+    if db:
+        try:
+            cur = db.cursor()
+            cur.execute("SELECT COUNT(*) FROM scheduled_actions WHERE status='pending'")
+            health["pending_actions"] = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM operations WHERE status='active'")
+            health["active_ops"] = cur.fetchone()[0]
+            cur.execute("SELECT cron_name, MAX(executed_at) as last_run FROM cron_results GROUP BY cron_name")
+            for row in cur.fetchall():
+                health["crons"][row[0]] = str(row[1])
+            cur.close(); db.close()
+        except Exception as e:
+            health["error"] = str(e)
+            try: db.close()
+            except: pass
+    return health
+
+# ── CRONS STELLA OS ──
+
+@app.post("/api/cron/action-executor")
+async def cron_action_executor():
+    """Exécute les actions planifiées dont la date est passée. Toutes les 5 min."""
+    db = get_db()
+    if not db: return {"status": "no_db"}
+    results = []
+    try:
+        cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("""SELECT * FROM scheduled_actions
+            WHERE status='pending' AND scheduled_at <= NOW()
+            ORDER BY scheduled_at ASC LIMIT 10""")
+        actions = cur.fetchall()
+        if not actions:
+            cur.close(); db.close()
+            return {"status": "ok", "executed": 0}
+
+        for action in actions:
+            action = dict(action)
+            action_id = action["id"]
+            try:
+                # Marquer en cours
+                cur.execute("UPDATE scheduled_actions SET status='executing' WHERE id=%s", (action_id,))
+                db.commit()
+
+                payload = action["action_payload"] if isinstance(action["action_payload"], dict) else json.loads(action["action_payload"])
+                action_type = action["action_type"]
+
+                if action_type == "rollback":
+                    # Exécuter le rollback via Shopify API
+                    rollback_result = await _execute_rollback(action["operation_id"], payload, cur, db)
+                    results.append({"action_id": action_id, "type": "rollback", "result": rollback_result})
+                elif action_type == "notification":
+                    # Envoyer email
+                    await _send_ops_email(payload.get("to", "info@planetebeauty.com"),
+                                          payload.get("subject", "STELLA OS Notification"),
+                                          payload.get("body", ""))
+                    results.append({"action_id": action_id, "type": "notification", "result": "sent"})
+
+                # Marquer comme terminé
+                cur.execute("""UPDATE scheduled_actions SET status='completed', executed_at=NOW(),
+                    result=%s WHERE id=%s""", (json.dumps({"success": True}), action_id))
+                db.commit()
+                ops_log(action.get("entity_code", "bhtc_fr"), "cron:action-executor",
+                        f"{action_type}_executed", action.get("operation_id"), "info",
+                        {"action_id": action_id})
+
+            except Exception as e:
+                logger.error(f"Action {action_id} failed: {e}")
+                retry = action.get("retry_count", 0) + 1
+                max_r = action.get("max_retries", 3)
+                if retry < max_r:
+                    # Re-planifier dans 30 min
+                    cur.execute("""UPDATE scheduled_actions SET status='pending', retry_count=%s,
+                        scheduled_at=NOW() + INTERVAL '30 minutes', error_message=%s WHERE id=%s""",
+                        (retry, str(e), action_id))
+                else:
+                    cur.execute("""UPDATE scheduled_actions SET status='failed', retry_count=%s,
+                        error_message=%s WHERE id=%s""", (retry, str(e), action_id))
+                    ops_log(action.get("entity_code", "bhtc_fr"), "cron:action-executor",
+                            f"{action_type}_failed", action.get("operation_id"), "error",
+                            {"action_id": action_id, "error": str(e), "retries": retry})
+                    # Email alerte
+                    await _send_ops_email("info@planetebeauty.com",
+                        f"STELLA OS ALERTE — Action échouée #{action_id}",
+                        f"L'action {action_type} pour l'opération #{action.get('operation_id')} a échoué après {retry} tentatives.\n\nErreur : {e}")
+                db.commit()
+                results.append({"action_id": action_id, "error": str(e)})
+
+        cur.close(); db.close()
+        return {"status": "ok", "executed": len(results), "results": results}
+    except Exception as e:
+        logger.error(f"action_executor error: {e}")
+        try: db.close()
+        except: pass
+        return {"status": "error", "error": str(e)}
+
+async def _execute_rollback(operation_id, payload, cur, db):
+    """Exécuter un rollback : restaurer les fichiers modifiés via Shopify API."""
+    if not operation_id:
+        return {"error": "no operation_id"}
+
+    cur.execute("SELECT * FROM operations_files WHERE operation_id=%s AND rolled_back=FALSE", (operation_id,))
+    files = cur.fetchall()
+    rolled = []
+
+    for f in files:
+        f = dict(f) if hasattr(f, 'keys') else {"id": f[0], "file_path": f[2], "file_type": f[3], "state_before": f[4]}
+        file_id = f["id"]
+        file_path = f["file_path"]
+        file_type = f.get("file_type", "")
+        state_before = f.get("state_before", "")
+
+        try:
+            if file_type in ("theme_json", "liquid", "snippet") and state_before:
+                # Restaurer via Theme API
+                theme_id = "197543559510"
+                gql = """mutation { themeFilesUpsert(themeId: "gid://shopify/OnlineStoreTheme/%s", files: [{
+                    filename: "%s", body: { type: TEXT, value: %s }
+                }]) { upsertedThemeFiles { filename } userErrors { message } } }""" % (
+                    theme_id, file_path, json.dumps(state_before))
+                async with httpx.AsyncClient(timeout=30) as client:
+                    r = await client.post(f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/2026-01/graphql.json",
+                        headers={"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"},
+                        json={"query": gql})
+                rolled.append({"file": file_path, "status": "restored"})
+
+            elif file_type == "metafield" and state_before:
+                # Restaurer metafield
+                meta = json.loads(state_before) if isinstance(state_before, str) else state_before
+                gql = """mutation { metafieldsSet(metafields: [{ ownerId: "%s", namespace: "%s", key: "%s",
+                    type: "%s", value: %s }]) { metafields { id } userErrors { message } } }""" % (
+                    meta["ownerId"], meta["namespace"], meta["key"], meta["type"], json.dumps(meta["value"]))
+                async with httpx.AsyncClient(timeout=30) as client:
+                    r = await client.post(f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/2026-01/graphql.json",
+                        headers={"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"},
+                        json={"query": gql})
+                rolled.append({"file": file_path, "status": "restored"})
+
+            # Marquer comme rollbacké
+            cur.execute("UPDATE operations_files SET rolled_back=TRUE, rolled_back_at=NOW() WHERE id=%s", (file_id,))
+            db.commit()
+
+        except Exception as e:
+            rolled.append({"file": file_path, "status": "error", "error": str(e)})
+            logger.error(f"Rollback file {file_path}: {e}")
+
+    # Mettre à jour l'opération
+    cur.execute("UPDATE operations SET status='rolled_back', completed_at=NOW() WHERE id=%s", (operation_id,))
+    db.commit()
+    return {"files_rolled": len(rolled), "details": rolled}
+
+async def _send_ops_email(to, subject, body):
+    """Envoyer un email STELLA OS."""
+    try:
+        import aiosmtplib
+        from email.mime.text import MIMEText
+        smtp_host = os.getenv("SMTP_HOST", "smtp.gmail.com")
+        smtp_port = int(os.getenv("SMTP_PORT", "587"))
+        smtp_user = os.getenv("SMTP_USER", "")
+        smtp_pass = os.getenv("SMTP_PASS", "")
+        if not smtp_user:
+            logger.warning("No SMTP config for ops email")
+            return
+        msg = MIMEText(body, "plain", "utf-8")
+        msg["Subject"] = subject
+        msg["From"] = smtp_user
+        msg["To"] = to
+        await aiosmtplib.send(msg, hostname=smtp_host, port=smtp_port,
+                              username=smtp_user, password=smtp_pass, start_tls=True)
+        logger.info(f"Ops email sent: {subject}")
+    except Exception as e:
+        logger.error(f"Ops email error: {e}")
+
+@app.post("/api/cron/drift-detector")
+async def cron_drift_detector():
+    """Détecte les incohérences entre site_state et la réalité Shopify. Quotidien 7h Paris."""
+    db = get_db()
+    if not db: return {"status": "no_db"}
+    drifts = []
+    try:
+        cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        # 1. Promos expirées encore marquées actives
+        cur.execute("SELECT * FROM site_state WHERE category='promo_active' AND expires_at IS NOT NULL AND expires_at < NOW()")
+        expired = cur.fetchall()
+        for exp in expired:
+            drifts.append({"type": "expired_promo", "key": exp["key"], "expired_at": str(exp["expires_at"])})
+            # Auto-cleanup
+            cur.execute("DELETE FROM site_state WHERE id=%s", (exp["id"],))
+            ops_log(exp.get("entity_code", "bhtc_fr"), "cron:drift-detector", "expired_promo_cleaned",
+                    severity="warning", details={"key": exp["key"]})
+
+        # 2. Vérifier metafield promo-codes vs site_state
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                gql = '{ shop { metafield(namespace:"planete-beaute", key:"promo-codes") { value } } }'
+                r = await client.post(f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/2026-01/graphql.json",
+                    headers={"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"},
+                    json={"query": gql})
+                data = r.json()
+                mf_value = data.get("data", {}).get("shop", {}).get("metafield", {})
+                if mf_value:
+                    codes_live = json.loads(mf_value.get("value", "{}")).get("codes", {})
+                    # Vérifier chaque code live a un discount Shopify actif
+                    for code_name in codes_live:
+                        gql2 = '{ discountNodes(first:1, query:"%s") { nodes { id discount { ... on DiscountCodeBasic { status endsAt } } } } }' % code_name
+                        r2 = await client.post(f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/2026-01/graphql.json",
+                            headers={"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"},
+                            json={"query": gql2})
+                        d2 = r2.json()
+                        nodes = d2.get("data", {}).get("discountNodes", {}).get("nodes", [])
+                        if not nodes:
+                            drifts.append({"type": "metafield_code_no_discount", "code": code_name,
+                                           "detail": "Code dans metafield promo-codes mais pas de discount Shopify actif"})
+                            ops_log("bhtc_fr", "cron:drift-detector", "code_without_discount",
+                                    severity="error", details={"code": code_name})
+        except Exception as e:
+            logger.error(f"Drift check metafield: {e}")
+
+        db.commit()
+        cur.execute("INSERT INTO cron_results (cron_name, result_data) VALUES (%s,%s)",
+                    ("drift-detector", json.dumps({"drifts_found": len(drifts), "details": drifts})))
+        db.commit(); cur.close(); db.close()
+
+        # Email si des drifts trouvés
+        if drifts:
+            drift_text = "\n".join([f"- {d['type']}: {d.get('key', d.get('code', ''))}" for d in drifts])
+            await _send_ops_email("info@planetebeauty.com",
+                f"STELLA OS — {len(drifts)} incohérence(s) détectée(s)",
+                f"Le drift detector a trouvé {len(drifts)} incohérence(s):\n\n{drift_text}\n\nActions correctives appliquées automatiquement quand possible.")
+
+        return {"status": "ok", "drifts_found": len(drifts), "details": drifts}
+    except Exception as e:
+        logger.error(f"drift_detector error: {e}")
+        try: db.close()
+        except: pass
+        return {"status": "error", "error": str(e)}
+
+@app.post("/api/cron/daily-briefing")
+async def cron_daily_briefing():
+    """Envoie le rapport quotidien à Benoit. Quotidien 8h Paris."""
+    db = get_db()
+    if not db: return {"status": "no_db"}
+    try:
+        cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+        # Opérations actives
+        cur.execute("SELECT name, type, expires_at FROM operations WHERE status='active' ORDER BY expires_at ASC NULLS LAST")
+        active_ops = cur.fetchall()
+
+        # Rollbacks exécutés hier
+        cur.execute("""SELECT sa.action_type, o.name, sa.executed_at, sa.status FROM scheduled_actions sa
+            LEFT JOIN operations o ON sa.operation_id = o.id
+            WHERE sa.executed_at >= NOW() - INTERVAL '24 hours' ORDER BY sa.executed_at DESC""")
+        yesterday_actions = cur.fetchall()
+
+        # Actions en attente (48h)
+        cur.execute("""SELECT sa.action_type, o.name, sa.scheduled_at FROM scheduled_actions sa
+            LEFT JOIN operations o ON sa.operation_id = o.id
+            WHERE sa.status='pending' AND sa.scheduled_at <= NOW() + INTERVAL '48 hours'
+            ORDER BY sa.scheduled_at ASC""")
+        upcoming = cur.fetchall()
+
+        # Alertes 24h
+        cur.execute("""SELECT action, severity, details FROM ops_audit_log
+            WHERE severity IN ('warning','error','critical') AND timestamp >= NOW() - INTERVAL '24 hours'
+            ORDER BY timestamp DESC""")
+        alerts = cur.fetchall()
+
+        # CA hier (depuis activity_log)
+        cur.execute("""SELECT COUNT(*) as count FROM activity_log
+            WHERE type='cashback_credited' AND timestamp >= NOW() - INTERVAL '24 hours'""")
+        cashback_count = cur.fetchone()
+
+        cur.close(); db.close()
+
+        # Composer le rapport
+        lines = ["STELLA OS — Rapport quotidien", "=" * 40, ""]
+        if active_ops:
+            lines.append(f"OPÉRATIONS ACTIVES ({len(active_ops)}):")
+            for op in active_ops:
+                exp = f" — expire {str(op['expires_at'])[:16]}" if op.get("expires_at") else ""
+                lines.append(f"  - [{op['type']}] {op['name']}{exp}")
+            lines.append("")
+        else:
+            lines.append("Aucune opération active.\n")
+
+        if upcoming:
+            lines.append(f"ACTIONS PRÉVUES (48h) ({len(upcoming)}):")
+            for u in upcoming:
+                lines.append(f"  - {u['action_type']} : {u.get('name', '?')} — {str(u['scheduled_at'])[:16]}")
+            lines.append("")
+
+        if yesterday_actions:
+            lines.append(f"ACTIONS EXÉCUTÉES HIER ({len(yesterday_actions)}):")
+            for ya in yesterday_actions:
+                lines.append(f"  - {ya['action_type']} : {ya.get('name', '?')} — {ya['status']}")
+            lines.append("")
+
+        if alerts:
+            lines.append(f"ALERTES ({len(alerts)}):")
+            for a in alerts:
+                lines.append(f"  - [{a['severity']}] {a['action']}")
+            lines.append("")
+
+        if cashback_count:
+            lines.append(f"Cashback crédités hier : {cashback_count.get('count', 0)}")
+
+        body = "\n".join(lines)
+        await _send_ops_email("info@planetebeauty.com", "STELLA OS — Rapport quotidien", body)
+
+        # Log cron
+        db2 = get_db()
+        if db2:
+            cur2 = db2.cursor()
+            cur2.execute("INSERT INTO cron_results (cron_name, result_data) VALUES (%s,%s)",
+                        ("daily-briefing", json.dumps({"sent": True, "ops": len(active_ops), "alerts": len(alerts)})))
+            db2.commit(); cur2.close(); db2.close()
+
+        return {"status": "ok", "active_ops": len(active_ops), "alerts": len(alerts)}
+    except Exception as e:
+        logger.error(f"daily_briefing error: {e}")
+        try: db.close()
+        except: pass
+        return {"status": "error", "error": str(e)}
+
+# ══════ FIN STELLA OS ══════
 
 app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static")), name="static")
 
