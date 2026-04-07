@@ -518,6 +518,8 @@ async def startup():
                       args=["coherence-check", "/api/cron/coherence-check"])
     scheduler.add_job(_run_cron, 'cron', day_of_week='mon', hour=7, minute=33, id='memory_audit',
                       args=["memory-audit", "/api/cron/memory-audit"])
+    scheduler.add_job(_run_cron, 'interval', hours=2, id='memory_consolidate',
+                      args=["memory-consolidate", "/api/cron/memory-consolidate"])
     scheduler.start()
     logger.info("Scheduler started: stock(1h), tags(3h15), nouveautes(3h45), audit(lun 7h), tryme(4h30), cashback(9h15), action-executor(5min), drift(5h), briefing(6h), coherence(6h), memory-audit(lun)")
 
@@ -7380,6 +7382,125 @@ async def cron_memory_audit():
             cur2 = db2.cursor()
             cur2.execute("INSERT INTO cron_results (cron_name, result_data) VALUES (%s,%s)",
                         ("memory-audit", json.dumps(results)))
+            db2.commit(); cur2.close(); db2.close()
+        except: pass
+
+    return results
+
+@app.post("/api/cron/memory-consolidate")
+async def cron_memory_consolidate():
+    """Toutes les 2h — Nourrir, organiser, optimiser, vérifier, homogénéiser, contrôler la mémoire."""
+    results = {"actions": [], "stats": {}}
+    db = get_db()
+    if not db: return {"error": "no_db"}
+    try:
+        cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+        # ── 1. NOURRIR — Capturer les événements récents non encore mémorisés ──
+        # Vérifier les activités des 2 dernières heures pas encore dans ops_audit_log
+        cur.execute("""SELECT type, action, details, timestamp FROM activity_log
+            WHERE timestamp >= NOW() - INTERVAL '2 hours'
+            AND type IN ('cashback_credit', 'tryme_created', 'order_paid', 'review_submitted', 'bis_notified')
+            ORDER BY timestamp DESC LIMIT 20""")
+        recent_events = cur.fetchall()
+        results["stats"]["events_2h"] = len(recent_events)
+
+        # Tracer les événements significatifs dans ops_audit_log s'ils n'y sont pas
+        for ev in recent_events:
+            cur.execute("""INSERT INTO ops_audit_log (entity_code, actor, action, severity, details)
+                SELECT 'bhtc_fr', 'cron:consolidate', %s, 'info', %s
+                WHERE NOT EXISTS (SELECT 1 FROM ops_audit_log WHERE action=%s AND timestamp >= NOW() - INTERVAL '2 hours')""",
+                (f"event:{ev['type']}", json.dumps({"action": ev["action"]}), f"event:{ev['type']}"))
+
+        # ── 2. ORGANISER — Classifier les mémoires RAG par catégorie ──
+        # Compter les mémoires par catégorie
+        cur.execute("SELECT category, COUNT(*) as c FROM claude_memories GROUP BY category ORDER BY c DESC")
+        mem_categories = cur.fetchall()
+        results["stats"]["rag_by_category"] = {r["category"]: r["c"] for r in mem_categories}
+        results["stats"]["rag_total"] = sum(r["c"] for r in mem_categories)
+
+        # ── 3. OPTIMISER — Détecter les doublons potentiels (mêmes titres) ──
+        cur.execute("""SELECT title, COUNT(*) as c FROM claude_memories
+            GROUP BY title HAVING COUNT(*) > 1 ORDER BY c DESC LIMIT 10""")
+        duplicates = cur.fetchall()
+        if duplicates:
+            results["actions"].append(f"{len(duplicates)} titres de mémoire en doublon potentiel")
+            results["stats"]["duplicates"] = [{"title": d["title"], "count": d["c"]} for d in duplicates]
+
+        # ── 4. VÉRIFIER — Cohérence entre les couches ──
+        # site_state vs opérations actives
+        cur.execute("SELECT COUNT(*) as c FROM site_state WHERE entity_code='bhtc_fr'")
+        state_count = cur.fetchone()["c"]
+        cur.execute("SELECT COUNT(*) as c FROM operations WHERE status='active'")
+        active_ops = cur.fetchone()["c"]
+        results["stats"]["site_state_count"] = state_count
+        results["stats"]["active_ops"] = active_ops
+
+        if state_count == 0:
+            results["actions"].append("site_state VIDE — l'état du site n'est pas suivi")
+
+        # ── 5. HOMOGÉNÉISER — S'assurer que les données critiques sont partout ──
+        # Vérifier que les codes promo dans site_state matchent le metafield Shopify
+        cur.execute("SELECT key, value FROM site_state WHERE entity_code='bhtc_fr' AND category='discount_active'")
+        state_codes = {r["key"] for r in cur.fetchall()}
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                gql = '{ shop { metafield(namespace:"planete-beaute", key:"promo-codes") { value } } }'
+                r = await client.post(f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/{SHOPIFY_API_VERSION}/graphql.json",
+                    headers={"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"},
+                    json={"query": gql})
+                mf = r.json().get("data", {}).get("shop", {}).get("metafield", {})
+                if mf:
+                    mf_codes = set(json.loads(mf.get("value", "{}")).get("codes", {}).keys())
+                    # Sync : metafield → site_state
+                    for code in mf_codes - state_codes:
+                        cur.execute("""INSERT INTO site_state (entity_code, category, key, value)
+                            VALUES ('bhtc_fr', 'discount_active', %s, %s)
+                            ON CONFLICT (entity_code, category, key) DO NOTHING""",
+                            (code, json.dumps({"source": "auto-sync from metafield"})))
+                        results["actions"].append(f"Code {code} ajouté dans site_state (sync metafield)")
+                    for code in state_codes - mf_codes:
+                        cur.execute("DELETE FROM site_state WHERE entity_code='bhtc_fr' AND category='discount_active' AND key=%s", (code,))
+                        results["actions"].append(f"Code {code} retiré de site_state (absent du metafield)")
+        except Exception as e:
+            results["actions"].append(f"Erreur sync metafield: {e}")
+
+        # ── 6. CONTRÔLER — Vérifier les seuils critiques ──
+        # Cashback : montant total encours
+        cur.execute("SELECT COALESCE(SUM(cashback_amount), 0) as total FROM cashback_rewards WHERE status='active'")
+        cashback_total = float(cur.fetchone()["total"])
+        results["stats"]["cashback_encours"] = cashback_total
+        if cashback_total > 5000:
+            results["actions"].append(f"ALERTE: cashback encours = {cashback_total:.0f}€ (seuil 5000€)")
+
+        # Try Me : codes actifs
+        cur.execute("SELECT COUNT(*) as c FROM tryme_purchases WHERE status='pending' AND expires_at > NOW()")
+        tryme_active = cur.fetchone()["c"]
+        results["stats"]["tryme_active"] = tryme_active
+
+        # ── 7. PRÉPARER LE CONTEXTE — Mettre à jour site_state avec les stats fraîches ──
+        cur.execute("""INSERT INTO site_state (entity_code, category, key, value, updated_at)
+            VALUES ('bhtc_fr', 'stats', 'memory_health', %s, NOW())
+            ON CONFLICT (entity_code, category, key) DO UPDATE SET value=%s, updated_at=NOW()""",
+            (json.dumps(results["stats"]), json.dumps(results["stats"])))
+
+        db.commit(); cur.close(); db.close()
+    except Exception as e:
+        results["actions"].append(f"Erreur consolidation: {e}")
+        try: db.close()
+        except: pass
+
+    # Logger
+    ops_log("bhtc_fr", "cron:memory-consolidate", "memory_consolidated",
+            severity="info", details={"actions": len(results["actions"]), "stats": results["stats"]})
+
+    # Sauvegarder résultat
+    db2 = get_db()
+    if db2:
+        try:
+            cur2 = db2.cursor()
+            cur2.execute("INSERT INTO cron_results (cron_name, result_data) VALUES (%s,%s)",
+                        ("memory-consolidate", json.dumps(results)))
             db2.commit(); cur2.close(); db2.close()
         except: pass
 
