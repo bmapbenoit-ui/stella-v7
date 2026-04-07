@@ -5066,11 +5066,12 @@ async def get_activity_log(limit: int = 50, type: str = None):
 
 @app.get("/api/kpis/summary")
 async def kpis_summary():
-    """KPIs temps réel — CA, commandes, panier moyen, cashback, BIS, quiz."""
+    """KPIs temps reel — STELLA OS dashboard complet."""
     result = {"revenue_today": 0, "orders_today": 0, "avg_order_value": 0,
-              "cashback_generated_today": 0, "bis_active": 0, "quiz_views_today": 0}
+              "cashback_generated_today": 0, "cashback_active_total": 0, "cashback_expiring_soon": 0,
+              "bis_active": 0, "tryme_active": 0, "reviews_pending": 0,
+              "catalogue_issues": 0, "quiz_completions_today": 0, "quiz_views_today": 0}
     try:
-        # Revenue + orders from Shopify
         from datetime import timezone
         today = datetime.now(timezone.utc).strftime("%Y-%m-%dT00:00:00Z")
         query = f'''{{ orders(first: 250, query: "created_at:>='{today}'") {{ edges {{ node {{ name totalPriceSet {{ shopMoney {{ amount }} }} displayFinancialStatus }} }} }} }}'''
@@ -5082,25 +5083,52 @@ async def kpis_summary():
         result["avg_order_value"] = round(result["revenue_today"] / max(result["orders_today"], 1), 2)
     except Exception as e:
         logger.warning(f"KPI shopify error: {e}")
-    # Cashback today
+
     db = get_db()
     if db:
         try:
             cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            # Cashback today
             cur.execute("SELECT COALESCE(SUM((details->>'cashback_amount')::numeric), 0) as total FROM activity_log WHERE type='cashback_credit' AND timestamp >= CURRENT_DATE")
             result["cashback_generated_today"] = float(cur.fetchone()["total"])
+            # Cashback encours actifs (montant total)
+            cur.execute("SELECT COALESCE(SUM(cashback_amount), 0) as total, COUNT(*) as cnt FROM cashback_rewards WHERE status='active' AND expires_at > NOW()")
+            row = cur.fetchone()
+            result["cashback_active_total"] = float(row["total"])
+            # Cashback expirant dans 7 jours
+            cur.execute("SELECT COUNT(*) as c FROM cashback_rewards WHERE status='active' AND expires_at BETWEEN NOW() AND NOW() + INTERVAL '7 days'")
+            result["cashback_expiring_soon"] = cur.fetchone()["c"]
+            # BIS actifs
             cur.execute("SELECT COUNT(*) as c FROM bis_subscriptions WHERE status='active'")
             result["bis_active"] = cur.fetchone()["c"]
+            # Try Me actifs (pending = non utilises, non expires)
+            cur.execute("SELECT COUNT(*) as c FROM tryme_purchases WHERE status='pending' AND expires_at > NOW()")
+            result["tryme_active"] = cur.fetchone()["c"]
+            # Avis en attente
+            cur.execute("SELECT COUNT(*) as c FROM product_reviews WHERE curated='pending'")
+            result["reviews_pending"] = cur.fetchone()["c"]
+            # Problemes catalogue (dernier audit)
+            cur.execute("SELECT result_data FROM cron_results WHERE cron_name='audit-qualite' ORDER BY executed_at DESC LIMIT 1")
+            audit_row = cur.fetchone()
+            if audit_row:
+                audit_data = audit_row["result_data"]
+                if isinstance(audit_data, str):
+                    try: audit_data = json.loads(audit_data)
+                    except: audit_data = {}
+                result["catalogue_issues"] = audit_data.get("total_issues", len(audit_data.get("issues", [])))
             cur.close(); db.close()
         except Exception as e:
+            logger.warning(f"KPI db error: {e}")
             try: db.close()
             except: pass
-    # Quiz views
+
+    # Quiz stats from Redis
     rc = get_redis()
     if rc:
         try:
             today_key = datetime.now().strftime("%Y-%m-%d")
             result["quiz_views_today"] = int(rc.get(f"quiz:quiz_view:{today_key}") or 0)
+            result["quiz_completions_today"] = int(rc.get(f"quiz:quiz_complete:{today_key}") or 0)
         except: pass
     return result
 
