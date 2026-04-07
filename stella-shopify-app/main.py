@@ -6823,6 +6823,29 @@ async def ops_context(request: Request):
             try: db.close()
             except: pass
 
+    # Recherche RAG Qdrant — remonter les mémoires pertinentes par mots-clés
+    try:
+        from qdrant_client import QdrantClient
+        import httpx as _hx
+        # Utiliser l'embedding service pour chercher dans Qdrant
+        qdrant_url = os.getenv("QDRANT_URL", "")
+        if qdrant_url:
+            # Recherche semantique via notre propre endpoint
+            async with _hx.AsyncClient(timeout=5) as client:
+                r = await client.post(f"http://localhost:{PORT}/memory/search",
+                    json={"query": message[:200], "limit": 3},
+                    headers={"X-API-Key": "stella-mem-2026-planetebeauty"})
+                if r.status_code == 200:
+                    mem_data = r.json()
+                    memories = mem_data.get("results", [])
+                    if memories:
+                        result["rag_memories"] = [
+                            {"title": m.get("title", ""), "content": m.get("content", "")[:300], "category": m.get("category", "")}
+                            for m in memories[:3]
+                        ]
+    except Exception as e:
+        logger.debug(f"Context RAG search: {e}")
+
     return result
 
 @app.get("/api/ops/health")
