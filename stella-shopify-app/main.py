@@ -6958,6 +6958,7 @@ async def tryme_available():
               variants(first: 10) {
                 nodes {
                   id title price availableForSale
+                  delai: metafield(namespace: "custom", key: "delai_d_expedition_variante") { value }
                 }
               }
             }
@@ -6969,7 +6970,10 @@ async def tryme_available():
         for p in products:
             for v in p.get("variants", {}).get("nodes", []):
                 vt = (v.get("title") or "").lower()
-                if "try me" in vt and v.get("availableForSale"):
+                # Filtrer : Try Me + en stock + expédition 24H
+                delai = (v.get("delai") or {}).get("value", "")
+                is_24h = "24H" in delai or "24h" in delai
+                if "try me" in vt and v.get("availableForSale") and is_24h:
                     available.append({
                         "product_id": p["id"].split("/")[-1],
                         "product_title": p["title"],
