@@ -2,13 +2,14 @@
 <html lang="fr">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>STELLA V8 — Tour de Contrôle</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0">
+  <title>STELLA OS — Tour de Controle</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/dashboard_v8.css">
   <meta name="theme-color" content="#0B0F19">
   <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 </head>
 <body>
 
@@ -17,274 +18,107 @@
   <div class="header-brand">
     <span class="logo">&#9830;</span>
     <span class="name">STELLA</span>
-    <span class="version">V8</span>
+    <span class="version">OS</span>
   </div>
   <div class="header-right">
     <span class="header-time" id="header-time">--:--</span>
     <span class="status-dot" id="global-status"></span>
-    <button class="btn-refresh" onclick="STELLA.refreshAll()">&#8635;</button>
+    <button class="btn-refresh" onclick="STELLA.refreshAll()" title="Rafraichir">&#8635;</button>
   </div>
 </header>
 
+<!-- ═══ ALERTES PRIORITAIRES ═══ -->
+<div id="alerts-bar" class="alerts-bar" style="display:none"></div>
+
 <!-- ═══ TAB NAVIGATION ═══ -->
 <nav class="tab-nav" id="tab-nav">
-  <button class="tab-btn active" data-tab="home"><span class="tab-icon">&#9632;</span> Accueil</button>
-  <button class="tab-btn" data-tab="orders"><span class="tab-icon">&#128722;</span> Commandes <span class="badge" id="badge-orders">0</span></button>
+  <button class="tab-btn active" data-tab="home"><span class="tab-icon">&#9670;</span> Dashboard</button>
   <button class="tab-btn" data-tab="cashback"><span class="tab-icon">&#128176;</span> Cashback</button>
-  <button class="tab-btn" data-tab="ads"><span class="tab-icon">&#128200;</span> Google Ads</button>
-  <button class="tab-btn" data-tab="quiz"><span class="tab-icon">&#127919;</span> Quiz</button>
-  <button class="tab-btn" data-tab="bis"><span class="tab-icon">&#128276;</span> Back in Stock <span class="badge" id="badge-bis">0</span></button>
-  <button class="tab-btn" data-tab="reviews"><span class="tab-icon">&#11088;</span> Avis</button>
-  <button class="tab-btn" data-tab="catalogue"><span class="tab-icon">&#128218;</span> Catalogue</button>
-  <button class="tab-btn" data-tab="system"><span class="tab-icon">&#9881;</span> Systeme</button>
-  <button class="tab-btn" data-tab="promo"><span class="tab-icon">&#127915;</span> Codes Promo</button>
-  <button class="tab-btn" data-tab="shipping"><span class="tab-icon">&#128666;</span> Livraison</button>
   <button class="tab-btn" data-tab="tryme"><span class="tab-icon">&#129514;</span> Try Me</button>
+  <button class="tab-btn" data-tab="reviews"><span class="tab-icon">&#11088;</span> Avis <span class="badge" id="badge-reviews">0</span></button>
+  <button class="tab-btn" data-tab="catalogue"><span class="tab-icon">&#128218;</span> Catalogue</button>
+  <button class="tab-btn" data-tab="bis"><span class="tab-icon">&#128276;</span> BIS <span class="badge" id="badge-bis">0</span></button>
+  <button class="tab-btn" data-tab="promo"><span class="tab-icon">&#127915;</span> Marketing</button>
+  <button class="tab-btn" data-tab="quiz"><span class="tab-icon">&#127919;</span> Quiz</button>
+  <button class="tab-btn" data-tab="ops"><span class="tab-icon">&#128736;</span> Operations <span class="badge" id="badge-ops">0</span></button>
+  <button class="tab-btn" data-tab="shipping"><span class="tab-icon">&#128666;</span> Livraison</button>
+  <button class="tab-btn" data-tab="system"><span class="tab-icon">&#9881;</span> Systeme</button>
 </nav>
 
 <!-- ═══════════════════════════════════════════════════════════════ -->
-<!-- TAB 1: ACCUEIL -->
+<!-- VUE 1: DASHBOARD — Alertes + KPIs STELLA + Actions rapides -->
 <!-- ═══════════════════════════════════════════════════════════════ -->
 <section class="tab-panel active" id="panel-home">
+  <!-- KPIs STELLA (pas les KPIs Shopify) -->
   <div class="kpi-grid" id="home-kpis">
-    <div class="kpi-card"><div class="kpi-value gold" id="kpi-revenue">--</div><div class="kpi-label">CA Jour</div></div>
-    <div class="kpi-card"><div class="kpi-value" id="kpi-orders">--</div><div class="kpi-label">Commandes</div></div>
-    <div class="kpi-card"><div class="kpi-value" id="kpi-aov">--</div><div class="kpi-label">Panier moyen</div></div>
-    <div class="kpi-card"><div class="kpi-value" id="kpi-cashback">--</div><div class="kpi-label">Cashback Jour</div></div>
+    <div class="kpi-card"><div class="kpi-value gold" id="kpi-cashback-encours">--</div><div class="kpi-label">Cashback encours</div></div>
+    <div class="kpi-card"><div class="kpi-value" id="kpi-tryme-pending">--</div><div class="kpi-label">Try Me en attente</div></div>
+    <div class="kpi-card"><div class="kpi-value" id="kpi-reviews-pending">--</div><div class="kpi-label">Avis a moderer</div></div>
+    <div class="kpi-card"><div class="kpi-value" id="kpi-bis-active">--</div><div class="kpi-label">BIS abonnes</div></div>
+    <div class="kpi-card"><div class="kpi-value" id="kpi-catalogue-issues">--</div><div class="kpi-label">Problemes catalogue</div></div>
+    <div class="kpi-card"><div class="kpi-value" id="kpi-quiz-completions">--</div><div class="kpi-label">Quiz completions</div></div>
   </div>
+  <!-- Actions rapides -->
+  <div class="quick-actions" id="quick-actions"></div>
+  <!-- Journal intelligent -->
   <div class="card">
-    <div class="card-header"><span>&#9889; Journal d'activite en direct</span><span class="badge-pill badge-gold" id="activity-count">0</span></div>
+    <div class="card-header">
+      <span>Journal d'activite</span>
+      <div class="filter-group">
+        <button class="filter-btn active" data-filter="business" onclick="STELLA.home.filterLog('business')">Business</button>
+        <button class="filter-btn" data-filter="all" onclick="STELLA.home.filterLog('all')">Tout</button>
+      </div>
+    </div>
     <div class="card-body" id="activity-feed"></div>
   </div>
-  <div class="card">
-    <div class="card-header"><span>&#128994; Services</span></div>
-    <div class="card-body"><div class="services-grid" id="services-grid"></div></div>
-  </div>
 </section>
 
 <!-- ═══════════════════════════════════════════════════════════════ -->
-<!-- TAB 2: COMMANDES -->
-<!-- ═══════════════════════════════════════════════════════════════ -->
-<section class="tab-panel" id="panel-orders">
-  <div class="kpi-grid" id="orders-kpis"></div>
-  <div class="card">
-    <div class="card-header"><span>Commandes du jour</span></div>
-    <div class="card-body"><table class="data-table" id="orders-table"><thead><tr><th>Commande</th><th>Client</th><th>Montant</th><th>Statut</th><th>Tags</th></tr></thead><tbody></tbody></table></div>
-  </div>
-</section>
-
-<!-- ═══════════════════════════════════════════════════════════════ -->
-<!-- TAB 3: CASHBACK -->
+<!-- VUE 2: CASHBACK — Sante + Performance + Actions + Params -->
 <!-- ═══════════════════════════════════════════════════════════════ -->
 <section class="tab-panel" id="panel-cashback">
+  <!-- Sante -->
+  <div class="section-label">Sante</div>
+  <div class="kpi-grid" id="cb-health"></div>
+  <!-- Performance -->
+  <div class="section-label">Performance</div>
   <div class="kpi-grid" id="cb-kpis"></div>
+  <!-- Actions -->
   <div class="card">
-    <div class="card-header"><span>Parametres Cashback</span><button class="btn-gold" onclick="STELLA.cashback.save()">Sauvegarder</button></div>
+    <div class="card-header"><span>Expirent bientot (7 jours)</span><span class="badge-pill badge-warning" id="cb-expiring-count">0</span></div>
+    <div class="card-body"><table class="data-table" id="cb-expiring-table"><thead><tr><th>Client</th><th>Commande</th><th>Montant</th><th>Expire le</th><th>Relance</th></tr></thead><tbody></tbody></table></div>
+  </div>
+  <div class="card">
+    <div class="card-header"><span>Encours actifs</span><span class="badge-pill badge-gold" id="cb-pending-count">0</span></div>
+    <div class="card-body"><table class="data-table" id="cb-pending-table"><thead><tr><th>Client</th><th>Commande</th><th>Montant</th><th>Expire le</th></tr></thead><tbody></tbody></table></div>
+  </div>
+  <!-- Parametrage -->
+  <div class="card">
+    <div class="card-header"><span>Parametrage</span><button class="btn-gold" onclick="STELLA.cashback.save()">Sauvegarder</button></div>
     <div class="card-body">
       <div class="form-row">
-        <div class="form-group"><label class="form-label">Taux (%)</label><input class="form-input" id="cb-rate" type="number" step="0.01" value="5"></div>
-        <div class="form-group"><label class="form-label">Expiration (jours)</label><input class="form-input" id="cb-expiry" type="number" value="60"></div>
+        <div class="form-group"><label class="form-label">Taux (%)</label><input class="form-input" id="cb-rate" type="number" step="0.1" min="0" max="100" value="5"></div>
+        <div class="form-group"><label class="form-label">Expiration (jours)</label><input class="form-input" id="cb-expiry" type="number" min="1" value="60"></div>
       </div>
       <div class="form-row">
-        <div class="form-group"><label class="form-label">Min utilisation</label><input class="form-input" id="cb-min-use" type="number" step="0.01" value="70"></div>
-        <div class="form-group"><label class="form-label">Min cashback</label><input class="form-input" id="cb-min-amount" type="number" step="0.01" value="0.50"></div>
+        <div class="form-group"><label class="form-label">Min utilisation (EUR)</label><input class="form-input" id="cb-min-use" type="number" step="0.01" min="0" value="70"></div>
+        <div class="form-group"><label class="form-label">Min cashback (EUR)</label><input class="form-input" id="cb-min-amount" type="number" step="0.01" min="0" value="0.50"></div>
       </div>
       <div class="form-group"><label class="form-label">Tags exclus</label><input class="form-input" id="cb-excluded-tags" value="tryme,no-cashback"></div>
     </div>
   </div>
-  <div class="card">
-    <div class="card-header"><span>&#9888; Expirent bientot (7 jours)</span><span class="badge-pill badge-error" id="cb-expiring-count">0</span></div>
-    <div class="card-body"><table class="data-table" id="cb-expiring-table"><thead><tr><th>Client</th><th>Commande</th><th>Montant</th><th>Expire le</th><th>Relance</th></tr></thead><tbody></tbody></table></div>
-  </div>
-  <div class="card">
-    <div class="card-header"><span>&#128176; Encours actifs</span><span class="badge-pill badge-gold" id="cb-pending-count">0</span></div>
-    <div class="card-body"><table class="data-table" id="cb-pending-table"><thead><tr><th>Client</th><th>Commande</th><th>Montant</th><th>Expire le</th></tr></thead><tbody></tbody></table></div>
-  </div>
-  <div class="card">
-    <div class="card-header"><span>&#128203; Flux cashback (30 derniers)</span></div>
-    <div class="card-body"><table class="data-table" id="cb-table"><thead><tr><th>Client</th><th>Commande</th><th>Base</th><th>Cashback</th><th>Status</th><th>Email</th><th>Date</th></tr></thead><tbody></tbody></table></div>
-  </div>
 </section>
 
 <!-- ═══════════════════════════════════════════════════════════════ -->
-<!-- TAB 4: GOOGLE ADS -->
-<!-- ═══════════════════════════════════════════════════════════════ -->
-<section class="tab-panel" id="panel-ads">
-  <div class="empty-state"><div class="icon">&#128200;</div><p>Google Ads — a connecter</p><p style="font-size:0.75rem;margin-top:8px;color:var(--text-muted)">Les endpoints Google Ads seront portes depuis la V6 dans une prochaine mise a jour.</p></div>
-</section>
-
-<!-- ═══════════════════════════════════════════════════════════════ -->
-<!-- TAB 5: QUIZ OLFACTIF -->
-<!-- ═══════════════════════════════════════════════════════════════ -->
-<section class="tab-panel" id="panel-quiz">
-  <div class="kpi-grid" id="quiz-kpis"></div>
-  <div class="panel-actions" style="margin-bottom:12px">
-    <button class="btn-outline" onclick="STELLA.quiz.regenerate()">&#8635; Regenerer quiz-data.json</button>
-    <a href="https://planetebeauty.com/pages/quiz-olfactif" target="_blank" class="btn-outline" style="text-decoration:none">Voir le quiz live &#8599;</a>
-  </div>
-  <div class="card">
-    <div class="card-header"><span>Statistiques Quiz</span></div>
-    <div class="card-body" id="quiz-details"></div>
-  </div>
-</section>
-
-<!-- ═══════════════════════════════════════════════════════════════ -->
-<!-- TAB 6: BACK IN STOCK -->
-<!-- ═══════════════════════════════════════════════════════════════ -->
-<section class="tab-panel" id="panel-bis">
-  <div class="kpi-grid" id="bis-kpis"></div>
-  <div class="card">
-    <div class="card-header"><span>Abonnes recents</span><span class="badge-pill badge-info" id="bis-smtp-status">SMTP: --</span></div>
-    <div class="card-body"><table class="data-table" id="bis-table"><thead><tr><th>Email</th><th>Produit</th><th>Date</th><th>Statut</th></tr></thead><tbody></tbody></table></div>
-  </div>
-</section>
-
-<!-- ═══════════════════════════════════════════════════════════════ -->
-<!-- TAB 7: AVIS & TRUSTPILOT -->
-<!-- ═══════════════════════════════════════════════════════════════ -->
-<section class="tab-panel" id="panel-reviews">
-  <div class="kpi-grid" id="reviews-kpis"></div>
-  <div class="card">
-    <div class="card-header"><span>Avis en attente de moderation</span><button class="btn-outline" onclick="STELLA.reviews.loadPending()">Rafraichir</button></div>
-    <div class="card-body" id="reviews-pending-list">
-      <div class="empty-state"><p>Chargement...</p></div>
-    </div>
-  </div>
-  <div class="card">
-    <div class="card-header"><span>Derniers avis publies</span></div>
-    <div class="card-body"><table class="data-table" id="reviews-table"><thead><tr><th>Produit</th><th>Note</th><th>Source</th><th>Date</th></tr></thead><tbody></tbody></table></div>
-  </div>
-</section>
-
-<!-- ═══════════════════════════════════════════════════════════════ -->
-<!-- TAB 8: CATALOGUE -->
-<!-- ═══════════════════════════════════════════════════════════════ -->
-<section class="tab-panel" id="panel-catalogue">
-  <div class="kpi-grid" id="catalogue-kpis"></div>
-  <div class="panel-actions" style="margin-bottom:12px">
-    <button class="btn-outline" onclick="STELLA.catalogue.forceAudit()">&#128269; Forcer audit</button>
-    <button class="btn-outline" onclick="STELLA.catalogue.syncTags()">&#128279; Sync tags</button>
-  </div>
-  <div class="card">
-    <div class="card-header"><span>Problemes detectes</span></div>
-    <div class="card-body"><table class="data-table" id="catalogue-issues"><thead><tr><th>Produit</th><th>Probleme</th></tr></thead><tbody></tbody></table></div>
-  </div>
-</section>
-
-<!-- ═══════════════════════════════════════════════════════════════ -->
-<!-- TAB 9: SYSTEME -->
-<!-- ═══════════════════════════════════════════════════════════════ -->
-<section class="tab-panel" id="panel-system">
-  <div class="card">
-    <div class="card-header"><span>&#128994; Sante des services</span><span class="badge-pill" id="sys-errors-badge">0 erreurs 24h</span></div>
-    <div class="card-body"><div class="services-grid" id="sys-services"></div></div>
-  </div>
-  <div class="card">
-    <div class="card-header"><span>&#9200; Crons Railway</span></div>
-    <div class="card-body"><table class="data-table" id="crons-table"><thead><tr><th>Cron</th><th>Dernier run</th><th>Statut</th></tr></thead><tbody></tbody></table></div>
-  </div>
-  <div class="card">
-    <div class="card-header"><span>&#128279; Webhooks Shopify</span></div>
-    <div class="card-body"><table class="data-table" id="webhooks-table"><thead><tr><th>Topic</th><th>URL</th></tr></thead><tbody></tbody></table></div>
-  </div>
-  <div class="card">
-    <div class="card-header"><span>&#9888; Erreurs recentes</span></div>
-    <div class="card-body" id="sys-errors"></div>
-  </div>
-</section>
-
-<!-- ═══════════════════════════════════════════════════════════════ -->
-<!-- TAB 10: CODES PROMO -->
-<!-- ═══════════════════════════════════════════════════════════════ -->
-<section class="tab-panel" id="panel-promo">
-  <div class="card">
-    <div class="card-header">
-      <span>&#127915; Codes promo actifs</span>
-      <button class="btn-gold" onclick="STELLA.promo.addCode()" style="font-size:0.75rem;padding:4px 12px">+ Ajouter un code</button>
-    </div>
-    <div class="card-body">
-      <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:16px">
-        Les codes promo sont affiches dans le panier. Le client clique pour activer. Try Me, cadeaux et vendors exclus sont automatiquement ignores.
-        Les codes ne se cumulent pas avec les paliers automatiques.
-      </p>
-      <table class="data-table" id="promo-table">
-        <thead><tr><th>Code</th><th>Reduction</th><th>Min panier</th><th>Message</th><th>Actions</th></tr></thead>
-        <tbody id="promo-tbody"></tbody>
-      </table>
-    </div>
-  </div>
-  <div class="card">
-    <div class="card-header"><span>&#128683; Vendors exclus</span></div>
-    <div class="card-body">
-      <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:8px">Les produits de ces marques ne recevront aucune reduction par code promo.</p>
-      <input type="text" class="form-input" id="promo-excluded-vendors" placeholder="Creed, Roja Parfums, Clive Christian" style="width:100%">
-      <small style="color:var(--text-muted)">Separes par des virgules</small>
-    </div>
-  </div>
-  <div style="padding:0 16px 16px">
-    <button class="btn-gold" onclick="STELLA.promo.save()">Sauvegarder les codes promo</button>
-  </div>
-</section>
-
-<!-- ═══════════════════════════════════════════════════════════════ -->
-<!-- TAB 11: LIVRAISON -->
-<!-- ═══════════════════════════════════════════════════════════════ -->
-<section class="tab-panel" id="panel-shipping">
-  <div class="card">
-    <div class="card-header">
-      <span>&#128666; Reduction frais de port</span>
-      <span id="shipping-status"></span>
-    </div>
-    <div class="card-body">
-      <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:16px">
-        Reduction automatique sur les frais de livraison quand le total eligible (hors Try Me, cadeaux) depasse le seuil.
-        S'applique sur les 3 modes : Mondial Relay, Colissimo relais, Colissimo domicile.
-      </p>
-      <div class="form-row">
-        <div class="form-group">
-          <label class="form-label">Seuil minimum (EUR)</label>
-          <input type="number" class="form-input" id="shipping-threshold" value="99" min="0" step="1">
-          <small style="color:var(--text-muted)">Montant minimum du panier eligible pour activer la reduction</small>
-        </div>
-        <div class="form-group">
-          <label class="form-label">Montant reduction (EUR)</label>
-          <input type="number" class="form-input" id="shipping-amount" value="5" min="0" step="0.5">
-          <small style="color:var(--text-muted)">Montant fixe deduit des frais de port</small>
-        </div>
-      </div>
-      <div style="margin-top:16px">
-        <button class="btn-gold" onclick="STELLA.shipping.save()">Sauvegarder</button>
-      </div>
-    </div>
-  </div>
-  <div class="card">
-    <div class="card-header"><span>&#128203; Tarifs de base par zone</span></div>
-    <div class="card-body">
-      <table class="data-table">
-        <thead><tr><th>Zone</th><th>Colissimo relais</th><th>Colissimo domicile</th><th>Apres reduction</th></tr></thead>
-        <tbody>
-          <tr><td>France</td><td>8 EUR</td><td>12 EUR</td><td id="ship-fr">--</td></tr>
-          <tr><td>Belgique / Allemagne</td><td>8 EUR</td><td>12 EUR</td><td id="ship-be">--</td></tr>
-          <tr><td>Luxembourg</td><td>--</td><td>12 EUR</td><td id="ship-lu">--</td></tr>
-          <tr><td>Pays-Bas</td><td>--</td><td>11 EUR</td><td id="ship-nl">--</td></tr>
-          <tr><td>Espagne</td><td>--</td><td>15 EUR</td><td id="ship-es">--</td></tr>
-        </tbody>
-      </table>
-      <small style="color:var(--text-muted)">Les tarifs de base se modifient dans Shopify &gt; Parametres &gt; Expedition. La reduction s'applique automatiquement en plus.</small>
-    </div>
-  </div>
-</section>
-
-<!-- ═══════════════════════════════════════════════════════════════ -->
-<!-- TAB 12: TRY ME -->
+<!-- VUE 3: TRY ME — Sante + Performance + Actions -->
 <!-- ═══════════════════════════════════════════════════════════════ -->
 <section class="tab-panel" id="panel-tryme">
+  <div class="section-label">Sante</div>
+  <div class="kpi-grid" id="tryme-health"></div>
+  <div class="section-label">Performance</div>
   <div class="kpi-grid" id="tryme-kpis"></div>
   <div class="card">
-    <div class="card-header">
-      <span>&#129514; Codes Try Me actifs</span>
-      <button class="btn-gold" onclick="STELLA.tryme.regenerateCards()" style="font-size:0.75rem;padding:4px 12px">Regenerer cartes</button>
-    </div>
+    <div class="card-header"><span>Codes Try Me</span></div>
     <div class="card-body">
       <table class="data-table" id="tryme-codes-table">
         <thead><tr><th>Commande</th><th>Code</th><th>Produit</th><th>Montant</th><th>Client</th><th>Expire</th><th>Statut</th><th>Carte</th></tr></thead>
@@ -293,10 +127,195 @@
     </div>
   </div>
   <div class="card">
-    <div class="card-header"><span>&#128444; Apercu cartes pre-generees</span></div>
+    <div class="card-header"><span>Apercu cartes</span><button class="btn-outline" onclick="STELLA.tryme.regenerateCards()">Regenerer</button></div>
     <div class="card-body" id="tryme-cards-grid" style="display:flex;flex-wrap:wrap;gap:12px"></div>
   </div>
 </section>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- VUE 4: AVIS — Sante + Performance + Moderation -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<section class="tab-panel" id="panel-reviews">
+  <div class="section-label">Sante</div>
+  <div class="kpi-grid" id="reviews-health"></div>
+  <div class="section-label">Performance</div>
+  <div class="kpi-grid" id="reviews-kpis"></div>
+  <div class="card">
+    <div class="card-header"><span>Avis en attente de moderation</span><button class="btn-outline" onclick="STELLA.reviews.loadPending()">Rafraichir</button></div>
+    <div class="card-body" id="reviews-pending-list"><div class="loading-spinner"></div></div>
+  </div>
+  <div class="card">
+    <div class="card-header"><span>Derniers avis publies</span></div>
+    <div class="card-body"><table class="data-table" id="reviews-table"><thead><tr><th>Produit</th><th>Note</th><th>Source</th><th>Date</th></tr></thead><tbody></tbody></table></div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- VUE 5: CATALOGUE & QUALITE -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<section class="tab-panel" id="panel-catalogue">
+  <div class="kpi-grid" id="catalogue-kpis"></div>
+  <div class="panel-actions">
+    <button class="btn-outline" onclick="STELLA.catalogue.forceAudit()">Forcer audit</button>
+    <button class="btn-outline" onclick="STELLA.catalogue.syncTags()">Sync tags</button>
+  </div>
+  <div class="card">
+    <div class="card-header"><span>Problemes detectes</span></div>
+    <div class="card-body"><table class="data-table" id="catalogue-issues"><thead><tr><th>Produit</th><th>Severite</th><th>Probleme</th></tr></thead><tbody></tbody></table></div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- VUE 6: BACK IN STOCK -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<section class="tab-panel" id="panel-bis">
+  <div class="kpi-grid" id="bis-kpis"></div>
+  <div class="card">
+    <div class="card-header"><span>Produits les plus demandes</span><span class="badge-pill" id="bis-smtp-status">SMTP: --</span></div>
+    <div class="card-body"><table class="data-table" id="bis-by-product"><thead><tr><th>Produit</th><th>Demandes</th><th>Stock actuel</th></tr></thead><tbody></tbody></table></div>
+  </div>
+  <div class="card">
+    <div class="card-header"><span>Abonnes recents</span></div>
+    <div class="card-body"><table class="data-table" id="bis-table"><thead><tr><th>Email</th><th>Produit</th><th>Date</th><th>Statut</th></tr></thead><tbody></tbody></table></div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- VUE 7: MARKETING — Codes Promo + Operations -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<section class="tab-panel" id="panel-promo">
+  <div class="card">
+    <div class="card-header">
+      <span>Codes promo actifs</span>
+      <button class="btn-gold btn-sm" onclick="STELLA.promo.showAddModal()">+ Ajouter</button>
+    </div>
+    <div class="card-body">
+      <table class="data-table" id="promo-table">
+        <thead><tr><th>Code</th><th>Reduction</th><th>Min panier</th><th>Utilisations</th><th>Actions</th></tr></thead>
+        <tbody id="promo-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-header"><span>Vendors exclus</span></div>
+    <div class="card-body">
+      <input type="text" class="form-input" id="promo-excluded-vendors" placeholder="Creed, Roja Parfums, Clive Christian">
+      <small class="form-hint">Separes par des virgules</small>
+    </div>
+  </div>
+  <div style="padding:0 16px 16px"><button class="btn-gold" onclick="STELLA.promo.save()">Sauvegarder</button></div>
+  <!-- Operations promo passees -->
+  <div class="card">
+    <div class="card-header"><span>Historique operations</span></div>
+    <div class="card-body" id="promo-history"></div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- VUE 8: QUIZ OLFACTIF -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<section class="tab-panel" id="panel-quiz">
+  <div class="section-label">Performance</div>
+  <div class="kpi-grid" id="quiz-kpis"></div>
+  <div class="panel-actions">
+    <button class="btn-outline" onclick="STELLA.quiz.regenerate()">Regenerer quiz-data.json</button>
+    <a href="https://www.planetebeauty.com/pages/trouvez-votre-parfum" target="_blank" class="btn-outline" style="text-decoration:none">Quiz live &#8599;</a>
+  </div>
+  <div class="card">
+    <div class="card-header"><span>Details</span></div>
+    <div class="card-body" id="quiz-details"></div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- VUE 9: STELLA OS — Operations + Etat site + Audit -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<section class="tab-panel" id="panel-ops">
+  <div class="kpi-grid" id="ops-kpis"></div>
+  <!-- Operations actives -->
+  <div class="card">
+    <div class="card-header"><span>Operations actives</span></div>
+    <div class="card-body" id="ops-active-list"><div class="empty-state"><p>Aucune operation active</p></div></div>
+  </div>
+  <!-- Etat du site -->
+  <div class="card">
+    <div class="card-header"><span>Etat live du site</span></div>
+    <div class="card-body"><table class="data-table" id="ops-state-table"><thead><tr><th>Categorie</th><th>Element</th><th>Details</th><th>Expire</th></tr></thead><tbody></tbody></table></div>
+  </div>
+  <!-- Actions planifiees -->
+  <div class="card">
+    <div class="card-header"><span>Actions planifiees</span></div>
+    <div class="card-body" id="ops-scheduled-list"><div class="empty-state"><p>Aucune action en attente</p></div></div>
+  </div>
+  <!-- Audit trail -->
+  <div class="card">
+    <div class="card-header"><span>Journal d'audit (24h)</span></div>
+    <div class="card-body"><table class="data-table" id="ops-audit-table"><thead><tr><th>Heure</th><th>Acteur</th><th>Action</th><th>Severite</th></tr></thead><tbody></tbody></table></div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- VUE 10: LIVRAISON -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<section class="tab-panel" id="panel-shipping">
+  <div class="kpi-grid" id="shipping-kpis"></div>
+  <div class="card">
+    <div class="card-header"><span>Parametrage</span><span class="badge-pill badge-success" id="shipping-status">ACTIF</span></div>
+    <div class="card-body">
+      <div class="form-row">
+        <div class="form-group"><label class="form-label">Seuil minimum (EUR)</label><input type="number" class="form-input" id="shipping-threshold" value="99" min="0" step="1"></div>
+        <div class="form-group"><label class="form-label">Reduction (EUR)</label><input type="number" class="form-input" id="shipping-amount" value="5" min="0" step="0.5"></div>
+      </div>
+      <button class="btn-gold" onclick="STELLA.shipping.save()" style="margin-top:12px">Sauvegarder</button>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-header"><span>Tarifs par zone</span></div>
+    <div class="card-body">
+      <table class="data-table">
+        <thead><tr><th>Zone</th><th>Relay</th><th>Domicile</th><th>Apres reduction</th></tr></thead>
+        <tbody id="shipping-rates-body">
+          <tr><td>France</td><td>8 EUR</td><td>12 EUR</td><td class="ship-after">--</td></tr>
+          <tr><td>Belgique / Allemagne</td><td>8 EUR</td><td>12 EUR</td><td class="ship-after">--</td></tr>
+          <tr><td>Luxembourg</td><td>--</td><td>12 EUR</td><td class="ship-after">--</td></tr>
+          <tr><td>Pays-Bas</td><td>--</td><td>11 EUR</td><td class="ship-after">--</td></tr>
+          <tr><td>Espagne</td><td>--</td><td>15 EUR</td><td class="ship-after">--</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- VUE 11: SYSTEME -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<section class="tab-panel" id="panel-system">
+  <div class="card">
+    <div class="card-header"><span>Services</span><span class="badge-pill" id="sys-errors-badge">0 erreurs 24h</span></div>
+    <div class="card-body"><div class="services-grid" id="sys-services"></div></div>
+  </div>
+  <div class="card">
+    <div class="card-header"><span>Crons Railway (24/7)</span></div>
+    <div class="card-body"><table class="data-table" id="crons-table"><thead><tr><th>Cron</th><th>Frequence</th><th>Dernier run</th><th>Statut</th></tr></thead><tbody></tbody></table></div>
+  </div>
+  <div class="card">
+    <div class="card-header"><span>Webhooks Shopify</span></div>
+    <div class="card-body"><table class="data-table" id="webhooks-table"><thead><tr><th>Topic</th><th>URL</th></tr></thead><tbody></tbody></table></div>
+  </div>
+  <div class="card">
+    <div class="card-header"><span>Erreurs recentes</span></div>
+    <div class="card-body" id="sys-errors"></div>
+  </div>
+</section>
+
+<!-- ═══ MODAL (codes promo, etc.) ═══ -->
+<div class="modal-overlay" id="modal-overlay" style="display:none" onclick="STELLA.closeModal()">
+  <div class="modal" onclick="event.stopPropagation()">
+    <div class="modal-header"><span id="modal-title">Modal</span><button class="modal-close" onclick="STELLA.closeModal()">&times;</button></div>
+    <div class="modal-body" id="modal-body"></div>
+    <div class="modal-footer" id="modal-footer"></div>
+  </div>
+</div>
 
 <script src="/static/dashboard_v8.js"></script>
 </body>
