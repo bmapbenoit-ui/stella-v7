@@ -6957,7 +6957,7 @@ async def tryme_available():
               id title handle
               variants(first: 10) {
                 nodes {
-                  id title price availableForSale quantityAvailable
+                  id title price availableForSale
                 }
               }
             }
@@ -6969,7 +6969,7 @@ async def tryme_available():
         for p in products:
             for v in p.get("variants", {}).get("nodes", []):
                 vt = (v.get("title") or "").lower()
-                if "try me" in vt and v.get("availableForSale") and (v.get("quantityAvailable") or 0) > 0:
+                if "try me" in vt and v.get("availableForSale"):
                     available.append({
                         "product_id": p["id"].split("/")[-1],
                         "product_title": p["title"],
