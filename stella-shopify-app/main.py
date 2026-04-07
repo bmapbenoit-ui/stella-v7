@@ -2028,6 +2028,19 @@ def compute_auto_tags(product_data, cutoff_iso):
         for o in items:
             if o.strip() in TOP_OCCASIONS: new_tags.add(f"Occasion:{o.strip()}")
 
+    # Accord principal + secondaires
+    acc = product_data.get("accord")
+    if acc and acc.get("value"):
+        val = acc["value"].strip()
+        if val: new_tags.add(f"Accord:{val}")
+    acc2 = product_data.get("accords_sec")
+    if acc2 and acc2.get("value"):
+        val2 = acc2["value"]
+        items2 = json.loads(val2) if val2.startswith("[") else [x.strip() for x in val2.split(",")]
+        for a in items2:
+            a = a.strip()
+            if a: new_tags.add(f"Accord:{a}")
+
     # Nouveauté (< 30 days)
     if product_data.get("createdAt", "") > cutoff_iso:
         new_tags.add("Nouveauté")
@@ -2048,7 +2061,7 @@ async def cron_sync_tags(request: Request):
     headers = {"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"}
 
     # Auto-tag prefixes we manage
-    AUTO_PREFIXES = ("Famille:", "Saison:", "Genre:", "Concentration:", "Occasion:", "Nouveauté")
+    AUTO_PREFIXES = ("Famille:", "Saison:", "Genre:", "Concentration:", "Occasion:", "Accord:", "Nouveauté")
 
     updated, skipped = 0, 0
     cursor = None
@@ -2062,6 +2075,8 @@ async def cron_sync_tags(request: Request):
                 genre: metafield(namespace: "parfum", key: "genre") {{ value }}
                 concentration: metafield(namespace: "parfum", key: "concentration") {{ value }}
                 occasions: metafield(namespace: "parfum", key: "occasions") {{ value }}
+                accord: metafield(namespace: "parfum", key: "accord_principal") {{ value }}
+                accords_sec: metafield(namespace: "parfum", key: "accords_secondaires") {{ value }}
             }} }} pageInfo {{ hasNextPage }} }} }}"""}, headers=headers)
             data = r.json().get("data", {}).get("products", {})
             for edge in data.get("edges", []):
