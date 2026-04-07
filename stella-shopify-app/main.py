@@ -325,6 +325,17 @@ CREATE TABLE IF NOT EXISTS ops_audit_log (
     details JSONB DEFAULT '{}'
 );
 
+CREATE TABLE IF NOT EXISTS process_playbook (
+    id SERIAL PRIMARY KEY,
+    process_name VARCHAR(100) UNIQUE NOT NULL,
+    process_type VARCHAR(50) NOT NULL,
+    description TEXT,
+    trigger_conditions TEXT,
+    steps JSONB NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
 CREATE INDEX IF NOT EXISTS idx_operations_status ON operations(status);
 CREATE INDEX IF NOT EXISTS idx_operations_entity ON operations(entity_code);
 CREATE INDEX IF NOT EXISTS idx_scheduled_actions_status ON scheduled_actions(status, scheduled_at);
@@ -406,6 +417,71 @@ async def startup():
             cur.execute("""INSERT INTO entity_registry (code, name, country, currency, timezone, shopify_domain, platform)
                 VALUES ('bhtc_fr', 'BHTC SARL', 'FR', 'EUR', 'Europe/Paris', 'planetemode.myshopify.com', 'shopify')
                 ON CONFLICT (code) DO NOTHING""")
+            # Seed process_playbook
+            playbook_seed = [
+                ("creation_produit", "catalogue", "Pipeline complet creation/enrichissement produit", "Benoit demande d'ajouter ou enrichir un produit",
+                 json.dumps([
+                    {"step": 1, "action": "Scraper site officiel marque (notes, parfumeur, annee, INCI)"},
+                    {"step": 2, "action": "Scraper Fragrantica via Chrome MCP (note communaute X,XX/5)"},
+                    {"step": 3, "action": "Remplir 32 metafields namespace parfum"},
+                    {"step": 4, "action": "Description 3 lignes (accroche + citation + Fragrantica)"},
+                    {"step": 5, "action": "SEO title max 70c + meta description max 155c"},
+                    {"step": 6, "action": "Vendor MAJUSCULES + productType = concentration exacte"},
+                    {"step": 7, "action": "Tags auto (Famille:X, Saison:X, Genre:X, Concentration:X, Occasion:X, Accord:X)"},
+                    {"step": 8, "action": "Creer variante Try Me si applicable (5% arrondi sup)"},
+                    {"step": 9, "action": "Verifier images (3 images carre 2000x2000 WebP alt SEO)"},
+                    {"step": 10, "action": "Verifier affichage page produit"}
+                 ])),
+                ("creation_marque", "catalogue", "Pipeline ajout nouvelle marque au catalogue", "Benoit demande d'ajouter une marque",
+                 json.dumps([
+                    {"step": 1, "action": "Creer la collection marque"},
+                    {"step": 2, "action": "Enrichir chaque produit (pipeline creation_produit 10 etapes)"},
+                    {"step": 3, "action": "Creer un article de blog pour la marque"},
+                    {"step": 4, "action": "Ajouter dans liste collections homepage"},
+                    {"step": 5, "action": "Ajouter dans le menu navigation"},
+                    {"step": 6, "action": "Mettre a jour le compteur Nos XX Marques homepage"},
+                    {"step": 7, "action": "Mettre a jour la page collection (description, image)"}
+                 ])),
+                ("operation_promo", "marketing", "Lancement operation promotionnelle temporaire", "Benoit demande une promo/event temporaire",
+                 json.dumps([
+                    {"step": 1, "action": "POST /api/ops/create avec tous les fichiers a modifier (state_before)"},
+                    {"step": 2, "action": "Executer les modifications (code promo, banniere, sections, metafield)"},
+                    {"step": 3, "action": "POST /api/ops/schedule rollback a la date d'expiration"},
+                    {"step": 4, "action": "POST /api/ops/state/update avec la promo active"},
+                    {"step": 5, "action": "Verifier visuellement (homepage, page produit, panier)"}
+                 ])),
+                ("modification_theme", "technique", "Modification fichier theme Liquid/JSON/CSS", "Toute modification du theme",
+                 json.dumps([
+                    {"step": 1, "action": "Lire la carte des dependances (registre §5)"},
+                    {"step": 2, "action": "Identifier les systemes impactes"},
+                    {"step": 3, "action": "POST /api/ops/create avec state_before du fichier"},
+                    {"step": 4, "action": "Faire la modification"},
+                    {"step": 5, "action": "Tester ATC sur 3 produits (formValid=true, bisEmailInForm=false)"},
+                    {"step": 6, "action": "Tester panier + checkout"},
+                    {"step": 7, "action": "REVERT immediat si echec"}
+                 ])),
+                ("deploy_railway", "technique", "Deploiement code Railway", "Push sur branch main",
+                 json.dumps([
+                    {"step": 1, "action": "python3 -c 'import py_compile; py_compile.compile(\"main.py\", doraise=True)'"},
+                    {"step": 2, "action": "git add + git commit + git push origin main"},
+                    {"step": 3, "action": "Attendre deploy (45s) + verifier /api/ops/health"},
+                    {"step": 4, "action": "POST /api/ops/state/update deploy commit"},
+                    {"step": 5, "action": "Mettre a jour registre technique"}
+                 ])),
+                ("deploy_shopify_function", "technique", "Deploiement Shopify Function Rust/WASM", "Modification extension Rust",
+                 json.dumps([
+                    {"step": 1, "action": "cargo build --target wasm32-wasip1 (verifier compilation)"},
+                    {"step": 2, "action": "shopify app deploy --force --no-release"},
+                    {"step": 3, "action": "shopify app release --version=stella-v8-XX --allow-updates"},
+                    {"step": 4, "action": "Verifier que la Function est ACTIVE dans Shopify Admin"},
+                    {"step": 5, "action": "Tester le parcours client (ATC, panier, checkout, codes promo)"},
+                    {"step": 6, "action": "Mettre a jour registre technique (version, IDs)"}
+                 ])),
+            ]
+            for name, ptype, desc, trigger, steps in playbook_seed:
+                cur.execute("""INSERT INTO process_playbook (process_name, process_type, description, trigger_conditions, steps)
+                    VALUES (%s,%s,%s,%s,%s) ON CONFLICT (process_name) DO UPDATE SET steps=%s, updated_at=NOW()""",
+                    (name, ptype, desc, trigger, steps, steps))
             db.commit(); cur.close(); db.close()
             logger.info("Chat tables ready + STELLA OS tables + entity_registry seeded")
         except Exception as e:
@@ -6349,6 +6425,35 @@ async def ops_entities():
         return {"entities": [dict(r) for r in rows]}
     except Exception as e:
         logger.error(f"ops_entities error: {e}")
+        return {"error": str(e)}
+
+@app.get("/api/ops/playbook")
+async def ops_playbook_list():
+    """Lister tous les processus du playbook."""
+    db = get_db()
+    if not db: return {"error": "No database"}
+    try:
+        cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("SELECT process_name, process_type, description, trigger_conditions FROM process_playbook ORDER BY process_type, process_name")
+        rows = cur.fetchall()
+        cur.close(); db.close()
+        return {"playbook": [dict(r) for r in rows]}
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/api/ops/playbook/{name}")
+async def ops_playbook_detail(name: str):
+    """Recuperer les etapes d'un processus."""
+    db = get_db()
+    if not db: return {"error": "No database"}
+    try:
+        cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("SELECT * FROM process_playbook WHERE process_name=%s", (name,))
+        row = cur.fetchone()
+        cur.close(); db.close()
+        if not row: return {"error": f"Process '{name}' not found"}
+        return dict(row)
+    except Exception as e:
         return {"error": str(e)}
 
 @app.get("/api/ops/health")
