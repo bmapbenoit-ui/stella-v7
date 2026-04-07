@@ -207,12 +207,14 @@ const STELLA = {
         <div class="kpi-card"><div class="kpi-value gold" style="font-size:1.1rem">${STELLA.eur(data.total_amount || 0)}</div><div class="kpi-label">Montant total</div></div>`;
 
       // KPIs
+      const pendingList = data.pending || [];
+      const pendingAmount = pendingList.reduce((s, r) => s + (parseFloat(r.cashback_amount) || 0), 0);
       const kpis = document.getElementById('cb-kpis');
       if (kpis) kpis.innerHTML = `
-        <div class="kpi-card"><div class="kpi-value">${data.total_active || 0}</div><div class="kpi-label">Encours actifs</div></div>
-        <div class="kpi-card"><div class="kpi-value gold">${STELLA.eur(data.active_amount || 0)}</div><div class="kpi-label">Encours EUR</div></div>
-        <div class="kpi-card"><div class="kpi-value">${data.used_count || 0}</div><div class="kpi-label">Utilises</div></div>
-        <div class="kpi-card"><div class="kpi-value">${data.expired_count || 0}</div><div class="kpi-label">Expires</div></div>`;
+        <div class="kpi-card"><div class="kpi-value">${pendingList.length}</div><div class="kpi-label">Encours actifs</div></div>
+        <div class="kpi-card"><div class="kpi-value gold">${STELLA.eur(pendingAmount)}</div><div class="kpi-label">Encours EUR</div></div>
+        <div class="kpi-card"><div class="kpi-value">${data.total_used || 0}</div><div class="kpi-label">Utilises</div></div>
+        <div class="kpi-card"><div class="kpi-value">${data.total_revoked || 0}</div><div class="kpi-label">Revoques</div></div>`;
 
       // Expiring
       const expCount = document.getElementById('cb-expiring-count');
@@ -222,10 +224,9 @@ const STELLA = {
 
       // Pending
       const pendCount = document.getElementById('cb-pending-count');
-      if (pendCount) pendCount.textContent = (data.pending || data.active_list || []).length;
+      if (pendCount) pendCount.textContent = pendingList.length;
       const pendTb = document.querySelector('#cb-pending-table tbody');
-      const pendList = data.pending || data.active_list || [];
-      if (pendTb) pendTb.innerHTML = pendList.map(r => `<tr><td>${r.customer_email || ''}</td><td>${r.order_name || ''}</td><td style="font-weight:bold">${STELLA.eur(r.cashback_amount)}</td><td>${STELLA.shortTime(r.expires_at)}</td></tr>`).join('') || '<tr><td colspan="4" class="empty-state">Aucun encours</td></tr>';
+      if (pendTb) pendTb.innerHTML = pendingList.slice(0, 50).map(r => `<tr><td>${r.customer_email || ''}</td><td>${r.order_name || ''}</td><td style="font-weight:bold">${STELLA.eur(r.cashback_amount)}</td><td>${STELLA.shortTime(r.expires_at)}</td></tr>`).join('') || '<tr><td colspan="4" class="empty-state">Aucun encours</td></tr>';
 
       // Settings
       if (settings) {
@@ -275,7 +276,7 @@ const STELLA = {
 
       // Codes table
       const tbody = document.getElementById('tryme-codes-tbody');
-      if (tbody) tbody.innerHTML = (data.codes || []).map(c => {
+      if (tbody) tbody.innerHTML = (data.recent_codes || data.codes || []).map(c => {
         const statusClass = c.status === 'used' ? 'gold' : c.status === 'expired' ? 'error' : 'warning';
         return `<tr>
           <td>${c.order_name || ''}</td><td style="font-weight:600">${c.discount_code || ''}</td>
@@ -308,11 +309,14 @@ const STELLA = {
       const data = await STELLA.api('/api/reviews/dashboard');
       if (!data) return;
 
-      // Health
+      // Health — pending count from separate endpoint
+      const pendingData = await STELLA.api('/api/reviews/pending');
+      const pendingCount = pendingData && pendingData.reviews ? pendingData.reviews.length : 0;
+      const sourceCount = data.by_source ? Object.keys(data.by_source).length : 0;
       const health = document.getElementById('reviews-health');
       if (health) health.innerHTML = `
-        <div class="kpi-card"><div class="kpi-value">${data.pending || 0}</div><div class="kpi-label">En attente</div></div>
-        <div class="kpi-card"><div class="kpi-value">${data.sources || '--'}</div><div class="kpi-label">Sources</div></div>`;
+        <div class="kpi-card"><div class="kpi-value">${pendingCount}</div><div class="kpi-label">En attente</div></div>
+        <div class="kpi-card"><div class="kpi-value">${sourceCount}</div><div class="kpi-label">Sources</div></div>`;
 
       // KPIs
       const kpis = document.getElementById('reviews-kpis');
