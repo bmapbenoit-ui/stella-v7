@@ -35,7 +35,7 @@ const STELLA = {
     if (!this.state.loaded[tabId]) {
       this.state.loaded[tabId] = true;
       const loader = {home:'home',cashback:'cashback',tryme:'tryme',reviews:'reviews',catalogue:'catalogue',
-        bis:'bis',promo:'promo',quiz:'quiz',ops:'ops',shipping:'shipping',system:'system'};
+        bis:'bis',gads:'gads',promo:'promo',quiz:'quiz',ops:'ops',shipping:'shipping',system:'system'};
       if (loader[tabId] && this[loader[tabId]] && this[loader[tabId]].load) this[loader[tabId]].load();
     }
   },
@@ -699,6 +699,125 @@ const STELLA = {
             </div>
             <span class="activity-time">${STELLA.relativeTime(e.timestamp)}</span>
           </div>`).join('') || '<div class="empty-state"><p>Aucune erreur</p></div>';
+      }
+    }
+  }
+  // ═══ MARKETING INTELLIGENCE ═══
+  gads: {
+    async load() {
+      try {
+        const r = await fetch('/api/marketing/intelligence');
+        const d = await r.json();
+        const $ = (id, v) => { const e = document.getElementById(id); if (e) e.textContent = v; };
+        const $h = (id, v) => { const e = document.getElementById(id); if (e) e.innerHTML = v; };
+
+        // Month label
+        $('mi-month', 'Marketing Intelligence — ' + (d.month_label || ''));
+
+        // ── Recommendations ──
+        const recs = d.recommendations || [];
+        if (recs.length) {
+          document.getElementById('mi-recs-card').style.display = '';
+          const colors = {critical:'#dc2626',high:'#f59e0b',medium:'#3b82f6'};
+          $h('mi-recs', recs.map(r => `<div class="activity-item"><span style="color:${colors[r.priority]||'#888'}; font-weight:600">${r.priority.toUpperCase()}</span> <span style="margin-left:0.5rem">${r.text}</span></div>`).join(''));
+        }
+
+        // ── Budget gauge ──
+        const b = d.budget || {};
+        const ratio = b.ratio_pct || 0;
+        const color = b.status === 'danger' ? 'var(--color-danger)' : b.status === 'warning' ? 'var(--color-warning)' : '#22c55e';
+        const ratioEl = document.getElementById('mi-ratio');
+        const bar = document.getElementById('mi-bar');
+        if (ratioEl) { ratioEl.textContent = ratio.toFixed(2) + ' %'; ratioEl.style.color = color; }
+        if (bar) { bar.style.width = Math.min(ratio / 10 * 100, 100) + '%'; bar.style.background = color; }
+        $('mi-spend', STELLA.eur(b.ads_spend));
+        $('mi-revenue', STELLA.eur(b.revenue));
+        $('mi-proj-spend', STELLA.eur(b.projected_spend));
+        const globalRoas = b.ads_spend > 0 ? (b.revenue / b.ads_spend).toFixed(1) + 'x' : '-';
+        $('mi-roas', globalRoas);
+
+        // ── Campaigns ──
+        const camps = d.campaigns || [];
+        $h('mi-campaigns', camps.filter(c => c.cost > 0 || c.status === 'ENABLED').map(c => {
+          const roasColor = c.roas >= 8 ? '#22c55e' : c.roas >= 3 ? '#f59e0b' : c.roas > 0 ? '#dc2626' : '';
+          const statusDot = c.status === 'ENABLED' ? '<span style="color:#22c55e">●</span>' : '<span style="color:#666">○</span>';
+          return `<tr><td>${statusDot} ${c.name}</td><td style="font-size:0.7rem">${c.type.replace('PERFORMANCE_MAX','PMax').replace('DEMAND_GEN','DemGen')}</td><td>${STELLA.eur(c.cost)}</td><td>${c.clicks}</td><td>${c.conversions}</td><td>${STELLA.eur(c.conv_value)}</td><td style="font-weight:700;color:${roasColor}">${c.roas}x</td><td>${STELLA.eur(c.cpc)}</td><td>${c.ctr}%</td><td>${c.cpa ? STELLA.eur(c.cpa) : '-'}</td></tr>`;
+        }).join('') || '<tr><td colspan="10" class="empty-state">Aucune campagne</td></tr>');
+
+        // ── Asset Groups ──
+        const ags = d.asset_groups || [];
+        if (ags.length) {
+          document.getElementById('mi-ag-card').style.display = '';
+          $h('mi-asset-groups', ags.filter(a => a.cost > 0).map(a => {
+            const rc = a.roas >= 8 ? '#22c55e' : a.roas >= 3 ? '#f59e0b' : '#dc2626';
+            return `<tr><td>${a.name}</td><td>${STELLA.eur(a.cost)}</td><td>${a.clicks}</td><td>${a.conversions}</td><td>${STELLA.eur(a.conv_value)}</td><td style="font-weight:700;color:${rc}">${a.roas}x</td></tr>`;
+          }).join(''));
+        }
+
+        // ── Funnel ──
+        const f = d.funnel || {};
+        $('mi-sessions', (f.sessions || 0).toLocaleString('fr-FR'));
+        $('mi-atc-rate', (f.atc_rate || 0) + '%');
+        $('mi-checkout-rate', (f.checkout_rate || 0) + '%');
+        $('mi-purchase-rate', (f.purchase_rate || 0) + '%');
+        $('mi-conv-rate', (f.overall_conv || 0) + '%');
+        $('mi-ga4-revenue', STELLA.eur(f.revenue));
+
+        // ── Channels ──
+        $h('mi-channels', (d.channels || []).map(ch => {
+          const bounceColor = ch.bounce_rate > 80 ? 'color:#dc2626' : ch.bounce_rate > 50 ? 'color:#f59e0b' : '';
+          return `<tr><td style="font-weight:500">${ch.name}</td><td>${ch.sessions}</td><td>${ch.atc}</td><td>${ch.checkout}</td><td>${ch.purchases}</td><td>${STELLA.eur(ch.revenue)}</td><td style="${bounceColor}">${ch.bounce_rate}%</td><td>${ch.conv_rate}%</td></tr>`;
+        }).join('') || '<tr><td colspan="8" class="empty-state">Aucune donnee</td></tr>');
+
+        // ── Conversion Tracking ──
+        const ct = d.conversion_tracking || {};
+        const primary = ct.primary_actions || [];
+        const badge = document.getElementById('mi-tracking-badge');
+        if (badge) {
+          badge.textContent = ct.purchase_tracking ? 'OK' : 'ALERTE';
+          badge.style.background = ct.purchase_tracking ? '#22c55e' : '#dc2626';
+        }
+        let trackHtml = '<div style="margin-bottom:0.5rem"><strong>Actions primaires (' + primary.length + ') :</strong></div>';
+        trackHtml += primary.map(a => `<div class="activity-item"><span style="color:#22c55e">●</span> ${a.name} <span style="color:var(--text-muted);font-size:0.7rem">${a.category} / ${a.type}</span></div>`).join('');
+        if (ct.secondary_actions && ct.secondary_actions.length) {
+          trackHtml += '<div style="margin-top:0.75rem;margin-bottom:0.5rem"><strong>Secondaires (' + ct.secondary_actions.length + ') :</strong></div>';
+          trackHtml += ct.secondary_actions.slice(0, 5).map(a => `<div class="activity-item"><span style="color:#666">○</span> ${a.name} <span style="color:var(--text-muted);font-size:0.7rem">${a.category}</span></div>`).join('');
+          if (ct.secondary_actions.length > 5) trackHtml += `<div style="color:var(--text-muted);font-size:0.75rem">+ ${ct.secondary_actions.length - 5} autres</div>`;
+        }
+        $h('mi-tracking', trackHtml);
+
+        // ── SEO ──
+        const seo = d.seo || {};
+        $h('mi-seo-queries', (seo.top_queries || []).map(q =>
+          `<tr><td>${q.query}</td><td>${q.clicks}</td><td>${q.impressions}</td><td>${q.ctr}%</td><td>${q.position}</td></tr>`
+        ).join('') || '<tr><td colspan="5" class="empty-state">-</td></tr>');
+        $h('mi-seo-pages', (seo.top_pages || []).map(p =>
+          `<tr><td style="font-size:0.75rem">${p.page || '/'}</td><td>${p.clicks}</td><td>${p.impressions}</td><td>${p.ctr}%</td><td>${p.position}</td></tr>`
+        ).join('') || '<tr><td colspan="5" class="empty-state">-</td></tr>');
+
+        // ── Merchant Center ──
+        const mc = d.merchant || {};
+        $h('mi-merchant-kpis', `
+          <div class="kpi-card"><div class="kpi-value">${mc.total_products || 0}</div><div class="kpi-label">Produits</div></div>
+          <div class="kpi-card"><div class="kpi-value" style="color:#22c55e">${mc.ok || 0}</div><div class="kpi-label">OK</div></div>
+          <div class="kpi-card"><div class="kpi-value" style="color:#f59e0b">${mc.warnings || 0}</div><div class="kpi-label">Warnings</div></div>
+          <div class="kpi-card"><div class="kpi-value" style="color:#dc2626">${mc.disapproved || 0}</div><div class="kpi-label">Disapproved</div></div>
+        `);
+        if (mc.top_issues && mc.top_issues.length) {
+          $h('mi-merchant-issues', '<div style="font-size:0.75rem;color:var(--text-muted)">Top issues: ' +
+            mc.top_issues.slice(0, 5).map(i => `<span style="margin-right:0.75rem">${i.code} (${i.count})</span>`).join('') + '</div>');
+        }
+
+        // ── Daily breakdown ──
+        $h('mi-daily', (b.daily || []).map(row => {
+          const r2 = row.revenue > 0 ? (row.spend / row.revenue * 100).toFixed(1) + '%' : '-';
+          return `<tr><td>${row.date}</td><td>${STELLA.eur(row.spend)}</td><td>${STELLA.eur(row.revenue)}</td><td>${r2}</td></tr>`;
+        }).join('') || '<tr><td colspan="4" class="empty-state">-</td></tr>');
+
+        // Errors
+        if (d.errors && d.errors.length) console.warn('Marketing Intel errors:', d.errors);
+      } catch (e) {
+        console.error('Marketing Intelligence load error:', e);
       }
     }
   }

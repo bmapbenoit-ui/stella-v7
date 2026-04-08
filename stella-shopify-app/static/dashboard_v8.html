@@ -38,6 +38,7 @@
   <button class="tab-btn" data-tab="reviews"><span class="tab-icon">&#11088;</span> Avis <span class="badge" id="badge-reviews">0</span></button>
   <button class="tab-btn" data-tab="catalogue"><span class="tab-icon">&#128218;</span> Catalogue</button>
   <button class="tab-btn" data-tab="bis"><span class="tab-icon">&#128276;</span> BIS <span class="badge" id="badge-bis">0</span></button>
+  <button class="tab-btn" data-tab="gads"><span class="tab-icon">&#128200;</span> Google Ads</button>
   <button class="tab-btn" data-tab="promo"><span class="tab-icon">&#127915;</span> Marketing</button>
   <button class="tab-btn" data-tab="quiz"><span class="tab-icon">&#127919;</span> Quiz</button>
   <button class="tab-btn" data-tab="ops"><span class="tab-icon">&#128736;</span> Operations <span class="badge" id="badge-ops">0</span></button>
@@ -174,6 +175,132 @@
   <div class="card">
     <div class="card-header"><span>Abonnes recents</span></div>
     <div class="card-body"><table class="data-table" id="bis-table"><thead><tr><th>Email</th><th>Produit</th><th>Date</th><th>Statut</th></tr></thead><tbody></tbody></table></div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- VUE: MARKETING INTELLIGENCE — Ads + GA4 + SEO + Merchant -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<section class="tab-panel" id="panel-gads">
+
+  <!-- RECOMMENDATIONS -->
+  <div class="card" id="mi-recs-card" style="display:none">
+    <div class="card-header"><span>Recommandations</span></div>
+    <div class="card-body" id="mi-recs"></div>
+  </div>
+
+  <!-- BUDGET GAUGE -->
+  <div class="section-label" id="mi-month">Marketing Intelligence</div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem">
+    <div class="card" style="text-align:center;padding:1.5rem">
+      <div style="font-size:2.5rem;font-weight:700;font-variant-numeric:tabular-nums" id="mi-ratio">--</div>
+      <div style="font-size:0.8rem;color:var(--text-muted)">Ads / CA mensuel</div>
+      <div style="margin:0.75rem auto;max-width:300px;height:6px;background:var(--bg-surface);border-radius:4px;overflow:hidden">
+        <div id="mi-bar" style="height:100%;width:0%;border-radius:4px;transition:width 0.6s"></div>
+      </div>
+      <div style="display:flex;justify-content:space-between;max-width:300px;margin:0 auto;font-size:0.65rem;color:var(--text-muted)">
+        <span>0%</span><span style="color:var(--color-warning)">4%</span><span style="color:var(--color-danger)">5%</span><span>10%</span>
+      </div>
+    </div>
+    <div class="kpi-grid" style="grid-template-columns:1fr 1fr">
+      <div class="kpi-card"><div class="kpi-value" id="mi-spend">--</div><div class="kpi-label">Depenses Ads</div></div>
+      <div class="kpi-card"><div class="kpi-value" id="mi-revenue">--</div><div class="kpi-label">CA Shopify</div></div>
+      <div class="kpi-card"><div class="kpi-value" id="mi-proj-spend">--</div><div class="kpi-label">Proj. depenses</div></div>
+      <div class="kpi-card"><div class="kpi-value" id="mi-roas">--</div><div class="kpi-label">ROAS global</div></div>
+    </div>
+  </div>
+
+  <!-- CAMPAIGNS -->
+  <div class="card">
+    <div class="card-header"><span>Campagnes Google Ads</span></div>
+    <div class="card-body" style="overflow-x:auto">
+      <table class="data-table">
+        <thead><tr><th>Campagne</th><th>Type</th><th>Cout</th><th>Clics</th><th>Conv.</th><th>Valeur</th><th>ROAS</th><th>CPC</th><th>CTR</th><th>CPA</th></tr></thead>
+        <tbody id="mi-campaigns"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ASSET GROUPS (PMax) -->
+  <div class="card" id="mi-ag-card" style="display:none">
+    <div class="card-header"><span>Asset Groups (PMax)</span></div>
+    <div class="card-body" style="overflow-x:auto">
+      <table class="data-table">
+        <thead><tr><th>Groupe</th><th>Cout</th><th>Clics</th><th>Conv.</th><th>Valeur</th><th>ROAS</th></tr></thead>
+        <tbody id="mi-asset-groups"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- FUNNEL E-COMMERCE -->
+  <div class="section-label">Funnel E-commerce (GA4)</div>
+  <div class="kpi-grid" id="mi-funnel-kpis">
+    <div class="kpi-card"><div class="kpi-value" id="mi-sessions">--</div><div class="kpi-label">Sessions</div></div>
+    <div class="kpi-card"><div class="kpi-value" id="mi-atc-rate">--</div><div class="kpi-label">Taux ATC</div></div>
+    <div class="kpi-card"><div class="kpi-value" id="mi-checkout-rate">--</div><div class="kpi-label">ATC &rarr; Checkout</div></div>
+    <div class="kpi-card"><div class="kpi-value" id="mi-purchase-rate">--</div><div class="kpi-label">Checkout &rarr; Achat</div></div>
+    <div class="kpi-card"><div class="kpi-value" id="mi-conv-rate">--</div><div class="kpi-label">Conv. globale</div></div>
+    <div class="kpi-card"><div class="kpi-value" id="mi-ga4-revenue">--</div><div class="kpi-label">Revenue GA4</div></div>
+  </div>
+
+  <!-- CHANNELS -->
+  <div class="card">
+    <div class="card-header"><span>Canaux d'acquisition (GA4)</span></div>
+    <div class="card-body" style="overflow-x:auto">
+      <table class="data-table">
+        <thead><tr><th>Canal</th><th>Sessions</th><th>ATC</th><th>Checkout</th><th>Achats</th><th>Revenue</th><th>Bounce</th><th>Conv%</th></tr></thead>
+        <tbody id="mi-channels"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- CONVERSION TRACKING -->
+  <div class="card">
+    <div class="card-header"><span>Suivi de conversion (Ads)</span><span class="badge" id="mi-tracking-badge">-</span></div>
+    <div class="card-body" id="mi-tracking"></div>
+  </div>
+
+  <!-- SEO -->
+  <div class="section-label">SEO (Search Console)</div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem">
+    <div class="card">
+      <div class="card-header"><span>Top requetes</span></div>
+      <div class="card-body">
+        <table class="data-table">
+          <thead><tr><th>Requete</th><th>Clics</th><th>Impr.</th><th>CTR</th><th>Pos.</th></tr></thead>
+          <tbody id="mi-seo-queries"></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header"><span>Top pages</span></div>
+      <div class="card-body">
+        <table class="data-table">
+          <thead><tr><th>Page</th><th>Clics</th><th>Impr.</th><th>CTR</th><th>Pos.</th></tr></thead>
+          <tbody id="mi-seo-pages"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- MERCHANT CENTER -->
+  <div class="card">
+    <div class="card-header"><span>Merchant Center</span></div>
+    <div class="card-body">
+      <div class="kpi-grid" id="mi-merchant-kpis"></div>
+      <div id="mi-merchant-issues" style="margin-top:0.5rem"></div>
+    </div>
+  </div>
+
+  <!-- DAILY BREAKDOWN -->
+  <div class="card">
+    <div class="card-header"><span>Depenses vs CA journalier</span></div>
+    <div class="card-body">
+      <table class="data-table">
+        <thead><tr><th>Date</th><th>Depense Ads</th><th>CA Shopify</th><th>Ratio</th></tr></thead>
+        <tbody id="mi-daily"></tbody>
+      </table>
+    </div>
   </div>
 </section>
 

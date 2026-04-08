@@ -53,6 +53,13 @@ SMTP_PASS = os.getenv("SMTP_PASS", "")
 SMTP_FROM_NAME = os.getenv("SMTP_FROM_NAME", "PlanèteBeauty")
 SMTP_FROM_EMAIL = os.getenv("SMTP_FROM_EMAIL", "")
 
+# Google Ads API config
+GADS_DEVELOPER_TOKEN = os.getenv("GADS_DEVELOPER_TOKEN", "")
+GADS_CLIENT_ID = os.getenv("GADS_CLIENT_ID", "")
+GADS_CLIENT_SECRET = os.getenv("GADS_CLIENT_SECRET", "")
+GADS_REFRESH_TOKEN = os.getenv("GADS_REFRESH_TOKEN", "")
+GADS_CUSTOMER_ID = os.getenv("GADS_CUSTOMER_ID", "")  # sans tirets: 9024900792
+
 app = FastAPI(title="STELLA Shopify App")
 
 # CORS for BIS (Back In Stock) endpoints — storefront needs to call our API
@@ -521,8 +528,10 @@ async def startup():
                       args=["memory-audit", "/api/cron/memory-audit"])
     scheduler.add_job(_run_cron, 'interval', hours=2, id='memory_consolidate',
                       args=["memory-consolidate", "/api/cron/memory-consolidate"])
+    scheduler.add_job(_run_cron, 'cron', hour=8, minute=0, id='gads_budget_guard',
+                      args=["gads-budget-guard", "/api/cron/gads-budget-guard"])
     scheduler.start()
-    logger.info("Scheduler started: stock(1h), tags(3h15), nouveautes(3h45), audit(lun 7h), tryme(4h30), cashback(9h15), action-executor(5min), drift(5h), briefing(6h), coherence(6h), memory-audit(lun)")
+    logger.info("Scheduler started: stock(1h), tags(3h15), nouveautes(3h45), audit(lun 7h), tryme(4h30), cashback(9h15), action-executor(5min), drift(5h), briefing(6h), coherence(6h), memory-audit(lun), gads-guard(8h)")
 
 # ══════════════════════ 3-LAYER MEMORY ══════════════════════
 def save_to_redis(conv_id, role, content):
@@ -5228,9 +5237,12 @@ async def kpis_summary():
               "bis_active": 0, "tryme_active": 0, "reviews_pending": 0,
               "catalogue_issues": 0, "quiz_completions_today": 0, "quiz_views_today": 0}
     try:
-        from datetime import timezone
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%dT00:00:00Z")
-        query = f'''{{ orders(first: 250, query: "created_at:>='{today}'") {{ edges {{ node {{ name totalPriceSet {{ shopMoney {{ amount }} }} displayFinancialStatus }} }} }} }}'''
+        from zoneinfo import ZoneInfo
+        tz_paris = ZoneInfo("Europe/Paris")
+        today_paris = datetime.now(tz_paris).replace(hour=0, minute=0, second=0, microsecond=0)
+        today_iso = today_paris.strftime("%Y-%m-%dT%H:%M:%S%z")
+        today_iso = today_iso[:-2] + ":" + today_iso[-2:]  # +0200 → +02:00
+        query = f'''{{ orders(first: 250, query: "created_at:>='{today_iso}'") {{ edges {{ node {{ name totalPriceSet {{ shopMoney {{ amount }} }} displayFinancialStatus }} }} }} }}'''
         data = await shopify_graphql(query)
         orders = data.get("data", {}).get("orders", {}).get("edges", [])
         paid = [o for o in orders if o["node"].get("displayFinancialStatus") in ["PAID", "PARTIALLY_PAID", "PARTIALLY_REFUNDED"]]
@@ -5288,6 +5300,369 @@ async def kpis_summary():
         except: pass
     return result
 
+# ══════════════════════ MARKETING INTELLIGENCE ══════════════════════
+
+GADS_MCC_ID = os.getenv("GADS_MCC_ID", "9032082552")
+GA4_PROPERTY_ID = os.getenv("GA4_PROPERTY_ID", "427142120")
+GMERCHANT_ID = os.getenv("GMERCHANT_ID", "277377202")
+GSC_SITE = os.getenv("GSC_SITE", "https://www.planetebeauty.com/")
+GOOGLE_REFRESH_TOKEN = os.getenv("GOOGLE_REFRESH_TOKEN", "")
+
+async def _google_access_token() -> str:
+    """Refresh Google OAuth universal access token."""
+    token = GOOGLE_REFRESH_TOKEN or GADS_REFRESH_TOKEN
+    if not token: raise ValueError("No Google refresh token configured")
+    async with httpx.AsyncClient(timeout=10) as c:
+        r = await c.post("https://oauth2.googleapis.com/token", data={
+            "client_id": GADS_CLIENT_ID,
+            "client_secret": GADS_CLIENT_SECRET,
+            "refresh_token": token,
+            "grant_type": "refresh_token"
+        })
+        r.raise_for_status()
+        return r.json()["access_token"]
+
+async def _gads_query(access_token: str, gaql: str) -> dict:
+    """Execute a GAQL query against Google Ads REST API v20."""
+    url = f"https://googleads.googleapis.com/v20/customers/{GADS_CUSTOMER_ID}/googleAds:search"
+    async with httpx.AsyncClient(timeout=30) as c:
+        r = await c.post(url, json={"query": gaql}, headers={
+            "Authorization": f"Bearer {access_token}",
+            "developer-token": GADS_DEVELOPER_TOKEN,
+            "login-customer-id": GADS_MCC_ID,
+        })
+        r.raise_for_status()
+        return r.json()
+
+async def _ga4_report(access_token: str, body: dict) -> dict:
+    """Run a GA4 Data API report."""
+    url = f"https://analyticsdata.googleapis.com/v1beta/properties/{GA4_PROPERTY_ID}:runReport"
+    async with httpx.AsyncClient(timeout=30) as c:
+        r = await c.post(url, json=body, headers={"Authorization": f"Bearer {access_token}"})
+        r.raise_for_status()
+        return r.json()
+
+async def _gsc_query(access_token: str, body: dict) -> dict:
+    """Run a Search Console query."""
+    from urllib.parse import quote
+    url = f"https://www.googleapis.com/webmasters/v3/sites/{quote(GSC_SITE, safe='')}/searchAnalytics/query"
+    async with httpx.AsyncClient(timeout=30) as c:
+        r = await c.post(url, json=body, headers={"Authorization": f"Bearer {access_token}"})
+        r.raise_for_status()
+        return r.json()
+
+async def _merchant_get(access_token: str, path: str) -> dict:
+    """Call Merchant Center API."""
+    url = f"https://shoppingcontent.googleapis.com/content/v2.1/{GMERCHANT_ID}/{path}"
+    async with httpx.AsyncClient(timeout=30) as c:
+        r = await c.get(url, headers={"Authorization": f"Bearer {access_token}"})
+        r.raise_for_status()
+        return r.json()
+
+def _paris_month_range():
+    """Return first_ymd, today_ymd, first_iso (Shopify-compatible), days_elapsed, days_in_month."""
+    from zoneinfo import ZoneInfo
+    import calendar
+    tz = ZoneInfo("Europe/Paris")
+    now = datetime.now(tz)
+    first = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    first_iso = first.strftime("%Y-%m-%dT%H:%M:%S%z")
+    first_iso = first_iso[:-2] + ":" + first_iso[-2:]
+    return first.strftime("%Y-%m-%d"), now.strftime("%Y-%m-%d"), first_iso, now.day, calendar.monthrange(now.year, now.month)[1], now.strftime("%B %Y")
+
+@app.get("/api/marketing/intelligence")
+async def marketing_intelligence():
+    """Full marketing intelligence — Ads, GA4, Search Console, Merchant Center."""
+    rc = get_redis()
+    if rc:
+        try:
+            cached = rc.get("dashboard:marketing:intel")
+            if cached: return json.loads(cached)
+        except: pass
+
+    first_ymd, today_ymd, first_iso, days_elapsed, days_in_month, month_label = _paris_month_range()
+    token = await _google_access_token()
+
+    result = {"month_label": month_label, "days_elapsed": days_elapsed, "days_in_month": days_in_month,
+              "budget": {}, "campaigns": [], "asset_groups": [], "conversion_tracking": {},
+              "funnel": {}, "channels": [], "seo": {}, "merchant": {}, "recommendations": [], "errors": []}
+
+    # ── 1. ADS: Budget ratio + daily breakdown ──
+    try:
+        gads_daily = await _gads_query(token, f"SELECT metrics.cost_micros, segments.date FROM customer WHERE segments.date BETWEEN '{first_ymd}' AND '{today_ymd}'")
+        daily_spend = {}
+        total_micros = 0
+        for row in gads_daily.get("results", []):
+            cost = int(row.get("metrics", {}).get("costMicros", 0))
+            day = row.get("segments", {}).get("date", "")
+            total_micros += cost
+            if day: daily_spend[day] = daily_spend.get(day, 0) + cost
+        ads_spend = round(total_micros / 1_000_000, 2)
+
+        # Shopify revenue same period
+        shopify_q = f'''{{ orders(first: 250, query: "created_at:>='{first_iso}'") {{ edges {{ node {{ createdAt totalPriceSet {{ shopMoney {{ amount }} }} displayFinancialStatus }} }} }} }}'''
+        shopify_data = await shopify_graphql(shopify_q)
+        daily_rev = {}
+        total_rev = 0
+        for e in shopify_data.get("data", {}).get("orders", {}).get("edges", []):
+            n = e["node"]
+            if n.get("displayFinancialStatus") in {"PAID", "PARTIALLY_PAID", "PARTIALLY_REFUNDED"}:
+                amt = float(n["totalPriceSet"]["shopMoney"]["amount"])
+                total_rev += amt
+                day = n["createdAt"][:10]
+                daily_rev[day] = daily_rev.get(day, 0) + amt
+        revenue = round(total_rev, 2)
+        ratio = round(ads_spend / revenue * 100, 2) if revenue > 0 else 0
+        proj_spend = round(ads_spend / max(days_elapsed, 1) * days_in_month, 2)
+        proj_rev = round(revenue / max(days_elapsed, 1) * days_in_month, 2)
+        proj_ratio = round(proj_spend / proj_rev * 100, 2) if proj_rev > 0 else 0
+
+        result["budget"] = {
+            "ads_spend": ads_spend, "revenue": revenue, "ratio_pct": ratio,
+            "threshold_pct": 5.0, "status": "danger" if ratio >= 5 else "warning" if ratio >= 4 else "ok",
+            "projected_spend": proj_spend, "projected_revenue": proj_rev, "projected_ratio_pct": proj_ratio,
+            "daily": [{"date": d, "spend": round(v / 1_000_000, 2), "revenue": round(daily_rev.get(d, 0), 2)}
+                      for d, v in sorted(daily_spend.items())]
+        }
+    except Exception as e:
+        logger.warning(f"Marketing intel budget error: {e}")
+        result["errors"].append(f"Budget: {str(e)[:200]}")
+
+    # ── 2. ADS: Campaigns performance ──
+    try:
+        camps = await _gads_query(token, f"""
+            SELECT campaign.name, campaign.status, campaign.advertising_channel_type,
+                   metrics.cost_micros, metrics.clicks, metrics.impressions,
+                   metrics.conversions, metrics.conversions_value, metrics.average_cpc, metrics.ctr,
+                   metrics.cost_per_conversion
+            FROM campaign WHERE segments.date DURING THIS_MONTH AND campaign.status != REMOVED
+            ORDER BY metrics.cost_micros DESC""")
+        for r in camps.get("results", []):
+            c, m = r.get("campaign", {}), r.get("metrics", {})
+            cost = int(m.get("costMicros", 0)) / 1e6
+            conv_val = float(m.get("conversionsValue", 0))
+            roas = round(conv_val / cost, 1) if cost > 0 else 0
+            result["campaigns"].append({
+                "name": c.get("name", ""), "status": c.get("status", ""),
+                "type": c.get("advertisingChannelType", ""),
+                "cost": round(cost, 2), "clicks": int(m.get("clicks", 0)),
+                "impressions": int(m.get("impressions", 0)),
+                "conversions": round(float(m.get("conversions", 0)), 1),
+                "conv_value": round(conv_val, 2), "roas": roas,
+                "cpc": round(int(m.get("averageCpc", 0)) / 1e6, 2),
+                "ctr": round(float(m.get("ctr", 0)) * 100, 2),
+                "cpa": round(int(m.get("costPerConversion", 0)) / 1e6, 2) if m.get("costPerConversion") else 0
+            })
+    except Exception as e:
+        result["errors"].append(f"Campaigns: {str(e)[:200]}")
+
+    # ── 3. ADS: Asset groups (PMax breakdown) ──
+    try:
+        ags = await _gads_query(token, f"""
+            SELECT asset_group.name, asset_group.status,
+                   metrics.cost_micros, metrics.conversions, metrics.conversions_value,
+                   metrics.clicks, metrics.impressions
+            FROM asset_group WHERE segments.date DURING THIS_MONTH AND campaign.status = ENABLED
+            ORDER BY metrics.cost_micros DESC LIMIT 20""")
+        for r in ags.get("results", []):
+            ag, m = r.get("assetGroup", {}), r.get("metrics", {})
+            cost = int(m.get("costMicros", 0)) / 1e6
+            val = float(m.get("conversionsValue", 0))
+            result["asset_groups"].append({
+                "name": ag.get("name", ""), "status": ag.get("status", ""),
+                "cost": round(cost, 2), "clicks": int(m.get("clicks", 0)),
+                "impressions": int(m.get("impressions", 0)),
+                "conversions": round(float(m.get("conversions", 0)), 1),
+                "conv_value": round(val, 2),
+                "roas": round(val / cost, 1) if cost > 0 else 0
+            })
+    except Exception as e:
+        result["errors"].append(f"Asset groups: {str(e)[:200]}")
+
+    # ── 4. ADS: Conversion tracking audit ──
+    try:
+        conv_actions = await _gads_query(token, """
+            SELECT conversion_action.name, conversion_action.type, conversion_action.status,
+                   conversion_action.category, conversion_action.include_in_conversions_metric
+            FROM conversion_action WHERE conversion_action.status = ENABLED""")
+        primary = []
+        secondary = []
+        for r in conv_actions.get("results", []):
+            ca = r.get("conversionAction", {})
+            entry = {"name": ca.get("name", ""), "type": ca.get("type", ""),
+                     "category": ca.get("category", ""), "primary": ca.get("includeInConversionsMetric", False)}
+            if entry["primary"]: primary.append(entry)
+            else: secondary.append(entry)
+        result["conversion_tracking"] = {
+            "primary_actions": primary, "secondary_actions": secondary,
+            "total_enabled": len(primary) + len(secondary),
+            "purchase_tracking": any(a["category"] == "PURCHASE" for a in primary)
+        }
+    except Exception as e:
+        result["errors"].append(f"Conversion tracking: {str(e)[:200]}")
+
+    # ── 5. GA4: Funnel e-commerce + channels ──
+    try:
+        funnel = await _ga4_report(token, {
+            "dateRanges": [{"startDate": first_ymd, "endDate": today_ymd}],
+            "metrics": [{"name": "sessions"}, {"name": "addToCarts"}, {"name": "checkouts"},
+                        {"name": "ecommercePurchases"}, {"name": "purchaseRevenue"},
+                        {"name": "totalUsers"}, {"name": "bounceRate"}],
+            "dimensions": [{"name": "sessionDefaultChannelGroup"}]
+        })
+        totals = {"sessions": 0, "atc": 0, "checkout": 0, "purchases": 0, "revenue": 0}
+        for r in funnel.get("rows", []):
+            ch = r["dimensionValues"][0]["value"]
+            vals = [v["value"] for v in r["metricValues"]]
+            sessions, atc, checkout, purchases = int(vals[0]), int(vals[1]), int(vals[2]), int(vals[3])
+            rev, users, bounce = float(vals[4]), int(vals[5]), float(vals[6])
+            totals["sessions"] += sessions; totals["atc"] += atc
+            totals["checkout"] += checkout; totals["purchases"] += purchases; totals["revenue"] += rev
+            result["channels"].append({
+                "name": ch, "sessions": sessions, "users": users, "atc": atc,
+                "checkout": checkout, "purchases": purchases, "revenue": round(rev, 2),
+                "bounce_rate": round(bounce * 100, 1),
+                "atc_rate": round(atc / max(sessions, 1) * 100, 1),
+                "conv_rate": round(purchases / max(sessions, 1) * 100, 2)
+            })
+        result["channels"].sort(key=lambda x: -x["sessions"])
+        # Funnel totals + drop-off rates
+        result["funnel"] = {
+            **totals, "revenue": round(totals["revenue"], 2),
+            "atc_rate": round(totals["atc"] / max(totals["sessions"], 1) * 100, 1),
+            "checkout_rate": round(totals["checkout"] / max(totals["atc"], 1) * 100, 1),
+            "purchase_rate": round(totals["purchases"] / max(totals["checkout"], 1) * 100, 1),
+            "overall_conv": round(totals["purchases"] / max(totals["sessions"], 1) * 100, 2)
+        }
+    except Exception as e:
+        result["errors"].append(f"GA4 funnel: {str(e)[:200]}")
+
+    # ── 6. GA4: Tracking audit (events firing correctly?) ──
+    try:
+        events = await _ga4_report(token, {
+            "dateRanges": [{"startDate": first_ymd, "endDate": today_ymd}],
+            "metrics": [{"name": "eventCount"}, {"name": "purchaseRevenue"}],
+            "dimensions": [{"name": "eventName"}],
+            "dimensionFilter": {"filter": {"fieldName": "eventName", "inListFilter": {
+                "values": ["purchase", "add_to_cart", "begin_checkout", "view_item",
+                           "add_payment_info", "add_shipping_info", "page_view", "session_start"]}}}
+        })
+        event_counts = {}
+        for r in events.get("rows", []):
+            ev = r["dimensionValues"][0]["value"]
+            event_counts[ev] = int(r["metricValues"][0]["value"])
+        result["funnel"]["events"] = event_counts
+        # Check tracking health
+        tracking_issues = []
+        if event_counts.get("purchase", 0) == 0: tracking_issues.append("Aucun event purchase detecte")
+        if event_counts.get("add_to_cart", 0) == 0: tracking_issues.append("Aucun event add_to_cart detecte")
+        if event_counts.get("begin_checkout", 0) > 0 and event_counts.get("add_payment_info", 0) == 0:
+            tracking_issues.append("begin_checkout present mais add_payment_info absent")
+        result["funnel"]["tracking_issues"] = tracking_issues
+    except Exception as e:
+        result["errors"].append(f"GA4 events: {str(e)[:200]}")
+
+    # ── 7. Search Console: SEO performance ──
+    try:
+        # Top queries
+        gsc_queries = await _gsc_query(token, {
+            "startDate": first_ymd, "endDate": today_ymd,
+            "dimensions": ["query"], "rowLimit": 20, "type": "web"
+        })
+        # Top pages
+        gsc_pages = await _gsc_query(token, {
+            "startDate": first_ymd, "endDate": today_ymd,
+            "dimensions": ["page"], "rowLimit": 15, "type": "web"
+        })
+        result["seo"] = {
+            "top_queries": [{"query": r["keys"][0], "clicks": r["clicks"], "impressions": r["impressions"],
+                             "ctr": round(r["ctr"] * 100, 1), "position": round(r["position"], 1)}
+                            for r in gsc_queries.get("rows", [])],
+            "top_pages": [{"page": r["keys"][0].replace(GSC_SITE.rstrip("/"), ""),
+                           "clicks": r["clicks"], "impressions": r["impressions"],
+                           "ctr": round(r["ctr"] * 100, 1), "position": round(r["position"], 1)}
+                          for r in gsc_pages.get("rows", [])],
+        }
+    except Exception as e:
+        result["errors"].append(f"Search Console: {str(e)[:200]}")
+
+    # ── 8. Merchant Center: Product health ──
+    try:
+        statuses = await _merchant_get(token, "productstatuses?maxResults=250")
+        products = statuses.get("resources", [])
+        ok = disapproved = warnings_count = 0
+        issues_map = {}
+        for p in products:
+            has_disapproval = any(ds.get("status") == "disapproved" for ds in p.get("destinationStatuses", []))
+            if has_disapproval:
+                disapproved += 1
+            else:
+                item_issues = p.get("itemLevelIssues", [])
+                if item_issues:
+                    warnings_count += 1
+                    for iss in item_issues:
+                        code = iss.get("code", "unknown")
+                        issues_map[code] = issues_map.get(code, 0) + 1
+                else:
+                    ok += 1
+        result["merchant"] = {
+            "total_products": len(products), "ok": ok,
+            "warnings": warnings_count, "disapproved": disapproved,
+            "top_issues": [{"code": k, "count": v} for k, v in sorted(issues_map.items(), key=lambda x: -x[1])[:10]]
+        }
+    except Exception as e:
+        result["errors"].append(f"Merchant Center: {str(e)[:200]}")
+
+    # ── 9. Auto-generate recommendations ──
+    recs = []
+    b = result.get("budget", {})
+    if b.get("ratio_pct", 0) >= 4:
+        recs.append({"priority": "high", "area": "budget", "text": f"Ratio Ads/CA a {b['ratio_pct']}% — proche du seuil 5%. Surveiller."})
+    for camp in result.get("campaigns", []):
+        if camp["status"] == "ENABLED" and camp["cost"] > 50 and camp["roas"] < 3:
+            recs.append({"priority": "high", "area": "campaign", "text": f"Campagne '{camp['name']}' ROAS faible ({camp['roas']}x). Optimiser ou pauser."})
+        if camp["status"] == "ENABLED" and camp["cost"] > 50 and camp["roas"] > 8:
+            recs.append({"priority": "medium", "area": "campaign", "text": f"Campagne '{camp['name']}' ROAS excellent ({camp['roas']}x). Potentiel d'augmentation budget."})
+    ct = result.get("conversion_tracking", {})
+    if not ct.get("purchase_tracking"):
+        recs.append({"priority": "critical", "area": "tracking", "text": "Aucune action de conversion PURCHASE en primaire. Le suivi d'achat est peut-etre casse."})
+    for ch in result.get("channels", []):
+        if ch["sessions"] > 100 and ch["bounce_rate"] > 80:
+            recs.append({"priority": "medium", "area": "traffic", "text": f"Canal '{ch['name']}' : {ch['bounce_rate']}% bounce sur {ch['sessions']} sessions. Trafic de mauvaise qualite."})
+        if ch["sessions"] > 50 and ch["atc"] > 10 and ch["purchases"] == 0:
+            recs.append({"priority": "medium", "area": "funnel", "text": f"Canal '{ch['name']}' : {ch['atc']} ATC mais 0 achat. Probleme checkout?"})
+    m = result.get("merchant", {})
+    if m.get("disapproved", 0) > 0:
+        recs.append({"priority": "high", "area": "merchant", "text": f"{m['disapproved']} produits disapproved dans Merchant Center. Visibilite Shopping reduite."})
+    if m.get("warnings", 0) > 20:
+        recs.append({"priority": "medium", "area": "merchant", "text": f"{m['warnings']} produits avec warnings Merchant Center. Corriger pour ameliorer qualite du flux."})
+    funnel = result.get("funnel", {})
+    if funnel.get("checkout_rate", 100) < 50:
+        recs.append({"priority": "medium", "area": "funnel", "text": f"Taux ATC→Checkout = {funnel['checkout_rate']}%. Friction possible dans le panier."})
+    if funnel.get("purchase_rate", 100) < 30:
+        recs.append({"priority": "medium", "area": "funnel", "text": f"Taux Checkout→Achat = {funnel['purchase_rate']}%. Friction au paiement."})
+    result["recommendations"] = sorted(recs, key=lambda x: {"critical": 0, "high": 1, "medium": 2}.get(x["priority"], 3))
+
+    # Cache 15 min
+    if rc:
+        try: rc.setex("dashboard:marketing:intel", 900, json.dumps(result))
+        except: pass
+    return result
+
+# Legacy endpoint — redirects
+@app.get("/api/google-ads/dashboard")
+async def google_ads_dashboard():
+    """Legacy — returns budget section from marketing intelligence."""
+    data = await marketing_intelligence()
+    b = data.get("budget", {})
+    b["month_label"] = data.get("month_label", "")
+    b["days_elapsed"] = data.get("days_elapsed", 0)
+    b["days_in_month"] = data.get("days_in_month", 0)
+    b["error"] = data.get("errors", [None])[0] if data.get("errors") else None
+    return b
+
+# ══════════════════════ ORDERS DASHBOARD ══════════════════════
+
 @app.get("/api/orders/dashboard")
 async def orders_dashboard():
     """Commandes du jour depuis Shopify."""
@@ -5299,9 +5674,12 @@ async def orders_dashboard():
     if cached:
         return json.loads(cached)
     try:
-        from datetime import timezone
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%dT00:00:00Z")
-        query = f'''{{ orders(first: 50, query: "created_at:>='{today}'", sortKey: CREATED_AT, reverse: true) {{ edges {{ node {{ id name createdAt totalPriceSet {{ shopMoney {{ amount currencyCode }} }} displayFinancialStatus displayFulfillmentStatus customer {{ email displayName }} tags }} }} }} }}'''
+        from zoneinfo import ZoneInfo
+        tz_paris = ZoneInfo("Europe/Paris")
+        today_paris = datetime.now(tz_paris).replace(hour=0, minute=0, second=0, microsecond=0)
+        today_iso = today_paris.strftime("%Y-%m-%dT%H:%M:%S%z")
+        today_iso = today_iso[:-2] + ":" + today_iso[-2:]
+        query = f'''{{ orders(first: 50, query: "created_at:>='{today_iso}'", sortKey: CREATED_AT, reverse: true) {{ edges {{ node {{ id name createdAt totalPriceSet {{ shopMoney {{ amount currencyCode }} }} displayFinancialStatus displayFulfillmentStatus customer {{ email displayName }} tags }} }} }} }}'''
         data = await shopify_graphql(query)
         orders = []
         for edge in data.get("data", {}).get("orders", {}).get("edges", []):
@@ -7660,6 +8038,64 @@ async def cron_memory_consolidate():
         except: pass
 
     return results
+
+# ══════════════════════ CRON: GOOGLE ADS BUDGET GUARD ══════════════════════
+
+@app.post("/api/cron/gads-budget-guard")
+async def cron_gads_budget_guard():
+    """Quotidien 8h — Verifie que depenses Ads < 5% du CA Shopify mensuel."""
+    if not GADS_REFRESH_TOKEN and not GOOGLE_REFRESH_TOKEN:
+        return {"skipped": True, "reason": "no_google_credentials"}
+    try:
+        data = await marketing_intelligence()
+        b = data.get("budget", {})
+        ratio = b.get("ratio_pct", 0)
+        projected = b.get("projected_ratio_pct", 0)
+        status = b.get("status", "ok")
+
+        # Store cron result
+        db = get_db()
+        if db:
+            try:
+                cur = db.cursor()
+                cur.execute("INSERT INTO cron_results (cron_name, result_data, executed_at) VALUES (%s, %s, NOW())",
+                            ("gads-budget-guard", json.dumps(data)))
+                db.commit(); cur.close(); db.close()
+            except: pass
+
+        # Alert if ratio >= 4%
+        if ratio >= 4.0:
+            severity = "danger" if ratio >= 5.0 else "warning"
+            log_activity("gads_alert", f"Google Ads: ratio {ratio:.2f}% du CA (seuil 5%). Projection: {projected:.2f}%",
+                         {"ratio": ratio, "projected": projected, "spend": b.get("ads_spend", 0),
+                          "revenue": b.get("revenue", 0)},
+                         source="cron", status=severity)
+
+            # Email alert if >= 5%
+            if ratio >= 5.0 and SMTP_HOST:
+                try:
+                    msg = MIMEMultipart("alternative")
+                    msg["Subject"] = f"ALERTE Google Ads : {ratio:.1f}% du CA"
+                    msg["From"] = f"{SMTP_FROM_NAME} <{SMTP_FROM_EMAIL}>"
+                    msg["To"] = SMTP_FROM_EMAIL
+                    body = f"""<div style="font-family:sans-serif;max-width:500px;margin:0 auto">
+                      <h2 style="color:#dc2626">Budget Ads depasse le seuil</h2>
+                      <p>Ratio actuel : <strong>{ratio:.2f}%</strong> (seuil : 5%)</p>
+                      <p>Depenses mois : <strong>{data.get('ads_spend_month', 0):.2f} EUR</strong></p>
+                      <p>CA mois : <strong>{data.get('revenue_month', 0):.2f} EUR</strong></p>
+                      <p>Projection fin de mois : <strong>{projected:.2f}%</strong></p>
+                    </div>"""
+                    msg.attach(MIMEText(body, "html"))
+                    await aiosmtplib.send(msg, hostname=SMTP_HOST, port=SMTP_PORT,
+                                          username=SMTP_USER, password=SMTP_PASS, use_tls=True)
+                    logger.info(f"GADS alert email sent: ratio={ratio:.2f}%")
+                except Exception as e:
+                    logger.warning(f"GADS alert email error: {e}")
+
+        return {"ratio": ratio, "projected": projected, "status": status, "alerted": ratio >= 4.0}
+    except Exception as e:
+        logger.error(f"GADS budget guard error: {e}")
+        return {"error": str(e)}
 
 # ══════ FIN STELLA OS ══════
 
