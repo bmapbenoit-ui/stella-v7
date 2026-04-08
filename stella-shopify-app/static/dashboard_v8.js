@@ -701,7 +701,7 @@ const STELLA = {
           </div>`).join('') || '<div class="empty-state"><p>Aucune erreur</p></div>';
       }
     }
-  }
+  },
   // ═══ MARKETING INTELLIGENCE ═══
   gads: {
     async load() {
