@@ -5760,7 +5760,7 @@ async def catalogue_dashboard():
             try: db.close()
             except: pass
     try:
-        query = '{ productsCount { count } }'
+        query = '{ productsCount(limit: null) { count } }'
         data = await shopify_graphql(query)
         result["total_products"] = data.get("data", {}).get("productsCount", {}).get("count", 0)
     except: pass
