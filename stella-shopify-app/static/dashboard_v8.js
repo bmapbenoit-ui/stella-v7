@@ -278,12 +278,15 @@ const STELLA = {
       const tbody = document.getElementById('tryme-codes-tbody');
       if (tbody) tbody.innerHTML = (data.recent_codes || data.codes || []).map(c => {
         const statusClass = c.status === 'used' ? 'gold' : c.status === 'expired' ? 'error' : 'warning';
-        return `<tr>
-          <td>${c.order_name || ''}</td><td style="font-weight:600">${c.discount_code || ''}</td>
-          <td>${c.product_title || ''}</td><td>${STELLA.eur(c.tryme_price || c.amount || 0)}</td>
+        const isUpsell = c.tryme_type === 'upsell' || (c.discount_code || '').startsWith('TU-');
+        const typeLabel = isUpsell ? '<span class="badge-pill badge-gold" style="font-size:0.6rem">UPSELL -5%</span>' : '';
+        const priceDisplay = isUpsell ? '-5%' : STELLA.eur(c.tryme_price || c.amount || 0);
+        return `<tr${isUpsell ? ' style="background:rgba(196,149,106,0.05)"' : ''}>
+          <td>${c.order_name || ''}</td><td style="font-weight:600">${c.discount_code || ''} ${typeLabel}</td>
+          <td>${c.product_title || ''}</td><td>${priceDisplay}</td>
           <td>${c.customer_email || ''}</td><td>${STELLA.shortTime(c.discount_expires_at || c.expires_at)}</td>
           <td><span class="badge-pill badge-${statusClass}">${c.status}</span></td>
-          <td>${c.order_id ? `<a href="/api/tryme/card-pdf/${c.order_id}" target="_blank" class="btn-outline btn-sm">PDF</a>` : ''}</td>
+          <td>${!isUpsell && c.order_id ? `<a href="/api/tryme/card-pdf/${c.order_id}" target="_blank" class="btn-outline btn-sm">PDF</a>` : ''}</td>
         </tr>`;
       }).join('') || '<tr><td colspan="8" class="empty-state">Aucun code</td></tr>';
 

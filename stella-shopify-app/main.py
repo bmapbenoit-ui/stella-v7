@@ -410,6 +410,7 @@ async def startup():
                 "ALTER TABLE product_reviews ADD COLUMN IF NOT EXISTS order_number TEXT",
                 "ALTER TABLE cashback_rewards ADD COLUMN IF NOT EXISTS email_sent BOOLEAN DEFAULT FALSE",
                 "ALTER TABLE cashback_rewards ADD COLUMN IF NOT EXISTS reminder_sent_at TIMESTAMP",
+                "ALTER TABLE tryme_purchases ADD COLUMN IF NOT EXISTS tryme_type VARCHAR(20) DEFAULT 'classic'",
             ]:
                 try: cur.execute(col_sql)
                 except Exception: pass
@@ -1711,6 +1712,28 @@ async def webhook_tryme_order(request: Request):
                     logger.info(f"Try Me Upsell code created: {upsell_code} for {customer_email}")
                     log_activity("tryme_upsell", f"Code upsell -5% {upsell_code} créé pour {customer_email} (commande {order_name})",
                                  {"code": upsell_code, "order": order_name, "customer": customer_email}, source="webhook")
+                    # Stocker en base pour le dashboard
+                    db_u = get_db()
+                    if db_u:
+                        try:
+                            cur_u = db_u.cursor()
+                            upsell_product = upsell_items[0]
+                            cur_u.execute("""INSERT INTO tryme_purchases
+                                (customer_email, customer_id, product_id, product_handle, product_title, variant_id,
+                                 order_id, order_name, tryme_price, discount_code, discount_expires_at, status, tryme_type)
+                                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'pending','upsell')""",
+                                (customer_email, customer_id,
+                                 str(upsell_product.get("product_id", "")),
+                                 upsell_product.get("handle", ""),
+                                 upsell_product.get("title", ""),
+                                 str(upsell_product.get("variant_id", "")),
+                                 order_id, order_name, 0, upsell_code,
+                                 expires_u.strftime("%Y-%m-%dT%H:%M:%SZ")))
+                            db_u.commit(); cur_u.close(); db_u.close()
+                        except Exception as e:
+                            logger.error(f"Try Me Upsell DB insert error: {e}")
+                            try: db_u.close()
+                            except: pass
                     # Écrire le code upsell dans le metafield tryme-codes (pour Order Printer facture)
                     try:
                         upsell_line = f"{upsell_code} | -5% sur votre prochaine commande (Try Me Découverte)"
@@ -2096,7 +2119,8 @@ async def tryme_dashboard(request: Request = None):
 
             cur.execute("""SELECT customer_email, product_title, product_id, discount_code,
                            tryme_price, status, order_id, order_name,
-                           purchased_at, discount_expires_at
+                           purchased_at, discount_expires_at,
+                           COALESCE(tryme_type, 'classic') as tryme_type
                            FROM tryme_purchases ORDER BY purchased_at DESC LIMIT 30""")
             recent = cur.fetchall()
             for r in recent:
