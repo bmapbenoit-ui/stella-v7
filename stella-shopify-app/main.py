@@ -782,17 +782,29 @@ import secrets
 from fastapi.responses import RedirectResponse
 
 OAUTH_SCOPES = ",".join([
-    "read_products", "write_products", "read_orders", "read_customers",
-    "read_analytics", "read_inventory", "read_content", "read_themes",
-    "write_script_tags", "read_script_tags", "read_metaobjects",
-    "read_metaobject_definitions", "read_locations", "read_shipping",
-    "read_product_listings", "write_product_listings", "read_files",
-    "read_publications", "read_discounts", "read_price_rules",
-    "read_fulfillments", "read_draft_orders", "read_markets",
-    "read_translations", "read_online_store_pages",
+    "read_products", "write_products",
+    "read_orders", "write_orders",
+    "read_customers", "write_customers",
+    "read_inventory", "write_inventory",
+    "read_content", "write_content",
+    "read_themes", "write_themes",
+    "read_discounts", "write_discounts",
+    "read_price_rules",
+    "read_analytics", "read_reports",
+    "read_shipping", "read_locations",
+    "read_fulfillments", "read_draft_orders",
+    "read_files", "write_files",
+    "read_publications",
+    "read_metaobjects", "read_metaobject_definitions",
+    "read_product_listings", "write_product_listings",
+    "read_translations",
+    "read_online_store_pages", "write_online_store_pages",
     "read_online_store_navigation", "read_locales",
-    "write_custom_pixels", "read_custom_pixels",
-    "read_customer_events", "read_reports",
+    "read_markets",
+    "read_script_tags", "write_script_tags",
+    "read_custom_pixels", "write_custom_pixels",
+    "read_customer_events",
+    "read_legal_policies", "write_legal_policies",
 ])
 
 async def exchange_session_for_offline_token(session_token: str, shop: str) -> dict:
@@ -883,7 +895,7 @@ async def auth_install(request: Request):
     if not client_id:
         return HTMLResponse("<h1>Error</h1><p>No client_id configured</p>", status_code=500)
     redirect_uri = f"{HOST_URL}/auth/callback" if HOST_URL else f"https://stella-shopify-app-production.up.railway.app/auth/callback"
-    scopes = "read_products,write_products,read_orders,read_customers,write_customers,read_content,write_content,read_themes,write_themes,read_inventory,write_inventory"
+    scopes = OAUTH_SCOPES
     nonce = str(uuid.uuid4())
     # Store nonce in Redis for CSRF verification
     rc = get_redis()
