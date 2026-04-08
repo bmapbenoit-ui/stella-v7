@@ -43,11 +43,10 @@ body {
 
 /* ═══ HEADER ═══ */
 .header {
-  position: sticky; top: 0; z-index: 100;
+  position: relative; z-index: 100;
   display: flex; align-items: center; justify-content: space-between;
   padding: 12px 16px;
-  background: rgba(11,15,25,0.85);
-  backdrop-filter: blur(16px);
+  background: var(--bg-base);
   border-bottom: 1px solid var(--border);
 }
 .header-brand { display: flex; align-items: center; gap: 8px; }
@@ -67,8 +66,10 @@ body {
   display: flex; overflow-x: auto; scrollbar-width: none;
   border-bottom: 1px solid var(--border);
   background: var(--bg-base);
-  position: sticky; top: 53px; z-index: 90;
+  position: sticky; top: 0; z-index: 90;
   -webkit-overflow-scrolling: touch;
+  gap: 0;
+  padding-bottom: 2px;
 }
 .tab-nav::-webkit-scrollbar { display: none; }
 .tab-btn {
@@ -77,6 +78,10 @@ body {
   background: none; border: none; border-bottom: 2px solid transparent;
   color: var(--text-muted); font-size: 0.8rem; font-weight: 500;
   cursor: pointer; transition: all 0.2s; font-family: var(--font);
+  -webkit-tap-highlight-color: rgba(212,175,55,0.2);
+  touch-action: manipulation;
+  user-select: none;
+  min-height: 44px;
 }
 .tab-btn:hover { color: var(--text-secondary); }
 .tab-btn.active { color: var(--gold); border-bottom-color: var(--gold); }
