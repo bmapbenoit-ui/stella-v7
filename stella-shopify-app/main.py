@@ -2191,8 +2191,8 @@ async def tryme_dashboard(request: Request = None):
 async def tryme_delete_entry(discount_code: str, request: Request = None):
     """Admin: delete a Try Me entry from PostgreSQL by discount_code."""
     if request:
-        key = request.headers.get("x-api-key", "")
-        if key != API_KEY:
+        api_key = request.headers.get("X-API-Key", "")
+        if api_key != "stella-mem-2026-planetebeauty":
             raise HTTPException(401, "Unauthorized")
     db = get_db()
     if not db:
