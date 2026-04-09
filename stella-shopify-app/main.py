@@ -2187,6 +2187,32 @@ async def tryme_dashboard(request: Request = None):
     return result
 
 
+@app.delete("/api/tryme/{discount_code}")
+async def tryme_delete_entry(discount_code: str, request: Request = None):
+    """Admin: delete a Try Me entry from PostgreSQL by discount_code."""
+    if request:
+        key = request.headers.get("x-api-key", "")
+        if key != API_KEY:
+            raise HTTPException(401, "Unauthorized")
+    db = get_db()
+    if not db:
+        raise HTTPException(500, "DB unavailable")
+    try:
+        cur = db.cursor()
+        cur.execute("DELETE FROM tryme_purchases WHERE discount_code=%s RETURNING id", (discount_code,))
+        deleted = cur.fetchone()
+        db.commit()
+        cur.close(); db.close()
+        if deleted:
+            log_activity("tryme_admin", f"Entrée Try Me {discount_code} supprimée manuellement", {"code": discount_code}, source="admin")
+            return {"ok": True, "deleted": discount_code}
+        return {"ok": False, "reason": "not_found"}
+    except Exception as e:
+        try: db.close()
+        except: pass
+        raise HTTPException(500, str(e))
+
+
 # ══════════════════════ BACK IN STOCK (BIS) ══════════════════════
 
 class BISSubscribeRequest(BaseModel):
