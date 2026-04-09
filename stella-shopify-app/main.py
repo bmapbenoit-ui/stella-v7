@@ -7384,28 +7384,52 @@ async def ops_context(request: Request):
             try: db.close()
             except: pass
 
-    # Recherche RAG Qdrant — remonter les mémoires pertinentes par mots-clés
-    try:
-        from qdrant_client import QdrantClient
-        import httpx as _hx
-        # Utiliser l'embedding service pour chercher dans Qdrant
-        qdrant_url = os.getenv("QDRANT_URL", "")
-        if qdrant_url:
-            # Recherche semantique via notre propre endpoint
-            async with _hx.AsyncClient(timeout=5) as client:
-                r = await client.post(f"http://localhost:{PORT}/memory/search",
-                    json={"query": message[:200], "limit": 3},
-                    headers={"X-API-Key": "stella-mem-2026-planetebeauty"})
-                if r.status_code == 200:
-                    mem_data = r.json()
-                    memories = mem_data.get("results", [])
+    # Recherche RAG — PostgreSQL direct (fiable, pas de dépendance Qdrant/embedding)
+    if message and len(message) > 3:
+        db2 = get_db()
+        if db2:
+            try:
+                cur2 = db2.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+                words = [w.strip() for w in message.split() if len(w.strip()) > 2]
+                if words:
+                    conditions = " OR ".join(["(title ILIKE %s OR content ILIKE %s)"] * len(words))
+                    params = []
+                    for w in words[:8]:  # Max 8 mots-clés
+                        params.extend([f"%{w}%", f"%{w}%"])
+                    params.append(5)
+                    cur2.execute(f"SELECT id, title, content, category, importance FROM claude_memories WHERE ({conditions}) ORDER BY importance DESC LIMIT %s", params)
+                    memories = cur2.fetchall()
                     if memories:
                         result["rag_memories"] = [
-                            {"title": m.get("title", ""), "content": m.get("content", "")[:300], "category": m.get("category", "")}
+                            {"title": m["title"], "content": (m["content"] or "")[:300], "category": m.get("category", "")}
                             for m in memories[:3]
                         ]
-    except Exception as e:
-        logger.debug(f"Context RAG search: {e}")
+                cur2.close(); db2.close()
+            except Exception as e:
+                logger.debug(f"Context RAG search: {e}")
+                try: db2.close()
+                except: pass
+
+    # Incohérences non résolues — dernier rapport coherence-check
+    db3 = get_db()
+    if db3:
+        try:
+            cur3 = db3.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cur3.execute("SELECT result_data FROM cron_results WHERE cron_name='coherence-check' ORDER BY executed_at DESC LIMIT 1")
+            row = cur3.fetchone()
+            if row and row["result_data"]:
+                report = row["result_data"] if isinstance(row["result_data"], dict) else json.loads(row["result_data"])
+                incoherences = report.get("incoherences", [])
+                errors = report.get("errors", [])
+                if incoherences:
+                    result["pending_incoherences"] = incoherences
+                elif errors:
+                    result["pending_incoherences"] = [{"domain": "legacy", "description": e} for e in errors]
+            cur3.close(); db3.close()
+        except Exception as e:
+            logger.debug(f"Context incoherences: {e}")
+            try: db3.close()
+            except: pass
 
     return result
 
@@ -7783,106 +7807,216 @@ async def cron_daily_briefing():
 
 @app.post("/api/cron/coherence-check")
 async def cron_coherence_check():
-    """Toutes les 6h — vérifie la cohérence site + mémoire + systèmes."""
-    results = {"checks": [], "errors": [], "warnings": []}
+    """Toutes les 6h — cross-check complet multi-sources. Shopify = source de vérité."""
+    results = {"checks": [], "errors": [], "warnings": [], "incoherences": [], "elements_ok": []}
+    shopify_headers = {"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"}
+    shopify_gql = f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/{SHOPIFY_API_VERSION}/graphql.json"
 
-    # 1. Vérifier cohérence metafield promo-codes vs discounts Shopify actifs
-    try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            # Lire le metafield
+    async with httpx.AsyncClient(timeout=20) as client:
+
+        # ══ A. CODES PROMO — cross-check 3 sources ══
+        try:
+            # Source 1: Shopify metafield
             gql = '{ shop { metafield(namespace:"planete-beaute", key:"promo-codes") { value } } }'
-            r = await client.post(f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/{SHOPIFY_API_VERSION}/graphql.json",
-                headers={"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"},
-                json={"query": gql})
+            r = await client.post(shopify_gql, headers=shopify_headers, json={"query": gql})
             mf = r.json().get("data", {}).get("shop", {}).get("metafield", {})
-            if mf:
-                codes_in_mf = list(json.loads(mf.get("value", "{}")).get("codes", {}).keys())
-                # Vérifier chaque code existe dans Shopify
-                for code_name in codes_in_mf:
-                    gql2 = '{ discountNodes(first:1, query:"%s") { nodes { id discount { ... on DiscountCodeBasic { status } } } } }' % code_name
-                    r2 = await client.post(f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/{SHOPIFY_API_VERSION}/graphql.json",
-                        headers={"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"},
-                        json={"query": gql2})
-                    nodes = r2.json().get("data", {}).get("discountNodes", {}).get("nodes", [])
-                    if not nodes:
-                        results["errors"].append(f"Code {code_name} dans metafield promo-codes mais AUCUN discount Shopify — client voit un code inutilisable")
-                    else:
-                        results["checks"].append(f"Code {code_name} : OK")
-    except Exception as e:
-        results["warnings"].append(f"Erreur check promo-codes: {e}")
+            mf_codes = set(json.loads(mf.get("value", "{}")).get("codes", {}).keys()) if mf else set()
 
-    # 2. Vérifier SMTP fonctionnel
-    try:
-        import aiosmtplib
-        smtp_host = os.getenv("SMTP_HOST", "smtp.gmail.com")
-        smtp_port = int(os.getenv("SMTP_PORT", "587"))
+            # Source 2: site_state Railway
+            db = get_db()
+            state_codes = set()
+            if db:
+                cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+                cur.execute("SELECT key FROM site_state WHERE entity_code='bhtc_fr' AND category='discount_active'")
+                state_codes = {r["key"] for r in cur.fetchall()}
+                cur.close(); db.close()
+
+            # Source 3: Shopify Discounts (vérifier chaque code du metafield)
+            shopify_active = set()
+            for code_name in mf_codes:
+                gql2 = '{ discountNodes(first:1, query:"%s") { nodes { id discount { ... on DiscountCodeBasic { status } } } } }' % code_name
+                r2 = await client.post(shopify_gql, headers=shopify_headers, json={"query": gql2})
+                nodes = r2.json().get("data", {}).get("discountNodes", {}).get("nodes", [])
+                if nodes:
+                    shopify_active.add(code_name)
+
+            # Cross-check
+            if mf_codes == state_codes == shopify_active:
+                results["elements_ok"].append(f"{len(mf_codes)} codes promo coherents (metafield = site_state = Shopify): {', '.join(sorted(mf_codes))}")
+            else:
+                if mf_codes != shopify_active:
+                    diff = mf_codes - shopify_active
+                    if diff:
+                        results["incoherences"].append({"domain": "codes_promo", "description": f"Codes dans metafield mais SANS discount Shopify: {diff}", "source_verite": f"Shopify actifs: {shopify_active}", "action": "Creer les discounts manquants ou retirer du metafield"})
+                if mf_codes != state_codes:
+                    results["incoherences"].append({"domain": "codes_promo", "description": f"Metafield ({mf_codes}) != site_state ({state_codes})", "source_verite": f"Metafield = source", "action": "Sync site_state"})
+        except Exception as e:
+            results["warnings"].append(f"Check promo: {e}")
+
+        # ══ B. PRODUITS RECENTS (7 jours) — images notes + SEO + description ══
+        try:
+            gql = """{ products(first: 20, query: "updated_at:>%s", sortKey: UPDATED_AT, reverse: true) {
+                nodes { id title status vendor
+                    seo { title description }
+                    descriptionHtml
+                    img_tete: metafield(namespace:"parfum", key:"image_note_tete") { value }
+                    img_coeur: metafield(namespace:"parfum", key:"image_note_coeur") { value }
+                    img_fond: metafield(namespace:"parfum", key:"image_note_fond") { value }
+                    note_tete: metafield(namespace:"parfum", key:"note_tete_principale") { value }
+                    note_coeur: metafield(namespace:"parfum", key:"note_coeur_principale") { value }
+                    note_fond: metafield(namespace:"parfum", key:"note_fond_principale") { value }
+                }
+            } }""" % (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+            r = await client.post(shopify_gql, headers=shopify_headers, json={"query": gql})
+            products = r.json().get("data", {}).get("products", {}).get("nodes", [])
+
+            produits_ok = 0
+            for p in products:
+                issues = []
+                title = p.get("title", "?")
+
+                # Images notes
+                has_notes = p.get("note_tete") or p.get("note_coeur") or p.get("note_fond")
+                if has_notes:
+                    if not p.get("img_tete", {}).get("value"):
+                        issues.append("image_note_tete manquante")
+                    if not p.get("img_coeur", {}).get("value"):
+                        issues.append("image_note_coeur manquante")
+                    if not p.get("img_fond", {}).get("value"):
+                        issues.append("image_note_fond manquante")
+
+                # SEO
+                seo = p.get("seo", {}) or {}
+                if not seo.get("title"):
+                    issues.append("SEO title vide")
+                if not seo.get("description"):
+                    issues.append("SEO meta vide")
+
+                # Description
+                desc = p.get("descriptionHtml", "") or ""
+                if desc.count("<p>") < 3 and desc.count("<p") < 3:
+                    issues.append("Description < 3 paragraphes")
+
+                # Vendor
+                vendor = p.get("vendor", "")
+                if vendor != vendor.upper():
+                    issues.append(f"Vendor pas MAJUSCULES: {vendor}")
+
+                if issues:
+                    results["incoherences"].append({
+                        "domain": "produits",
+                        "description": f"{title}: {', '.join(issues)}",
+                        "action": "Corriger avant mise en ACTIVE"
+                    })
+                else:
+                    produits_ok += 1
+
+            if produits_ok > 0:
+                results["elements_ok"].append(f"{produits_ok}/{len(products)} produits recents complets")
+        except Exception as e:
+            results["warnings"].append(f"Check produits: {e}")
+
+        # ══ C. OPERATIONS — ops obsoletes ══
+        db = get_db()
+        if db:
+            try:
+                cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+                # Ops actives avec expires_at depasse
+                cur.execute("SELECT id, name FROM operations WHERE status='active' AND expires_at IS NOT NULL AND expires_at < NOW()")
+                expired_ops = cur.fetchall()
+                for op in expired_ops:
+                    results["incoherences"].append({"domain": "operations", "description": f"Op '{op['name']}' (id:{op['id']}) active mais expiree", "action": "Completer ou supprimer"})
+
+                # Actions echouees
+                cur.execute("SELECT COUNT(*) as c FROM scheduled_actions WHERE status='failed'")
+                failed = cur.fetchone()["c"]
+                if failed > 0:
+                    results["incoherences"].append({"domain": "operations", "description": f"{failed} action(s) planifiee(s) en echec", "action": "Investiguer et relancer ou supprimer"})
+
+                # Promos expirees dans site_state
+                cur.execute("SELECT key FROM site_state WHERE category='promo_active' AND expires_at IS NOT NULL AND expires_at < NOW()")
+                for exp in cur.fetchall():
+                    cur.execute("DELETE FROM site_state WHERE category='promo_active' AND key=%s", (exp['key'],))
+                    results["warnings"].append(f"Promo expiree {exp['key']} nettoyee de site_state")
+
+                db.commit(); cur.close(); db.close()
+            except Exception as e:
+                results["warnings"].append(f"Check ops: {e}")
+                try: db.close()
+                except: pass
+
+        # ══ D. MEMOIRE QDRANT — doublons + credentials retrouvables ══
+        db = get_db()
+        if db:
+            try:
+                cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+                # Doublons
+                cur.execute("SELECT title, COUNT(*) as c FROM claude_memories GROUP BY title HAVING COUNT(*) > 1 ORDER BY c DESC LIMIT 10")
+                dupes = cur.fetchall()
+                dupe_count = sum(d["c"] - 1 for d in dupes)
+                if dupe_count > 0:
+                    results["incoherences"].append({"domain": "memoire", "description": f"{dupe_count} doublons dans Qdrant ({len(dupes)} titres)", "action": "memory-consolidate va nettoyer"})
+                else:
+                    results["elements_ok"].append("Zero doublon memoire")
+
+                # Credentials retrouvables
+                cur.execute("SELECT COUNT(*) as c FROM claude_memories WHERE (title ILIKE '%openai%' OR content ILIKE '%sk-proj%') AND importance >= 8")
+                if cur.fetchone()["c"] > 0:
+                    results["elements_ok"].append("Cle OpenAI retrouvable dans RAG")
+                else:
+                    results["incoherences"].append({"domain": "memoire", "description": "Cle OpenAI introuvable dans RAG (importance >= 8)", "action": "Sauvegarder la cle avec importance 10"})
+
+                # Stats memoire
+                cur.execute("SELECT COUNT(*) as c FROM claude_memories")
+                total = cur.fetchone()["c"]
+                results["elements_ok"].append(f"{total} memoires RAG total")
+
+                cur.close(); db.close()
+            except Exception as e:
+                results["warnings"].append(f"Check memoire: {e}")
+                try: db.close()
+                except: pass
+
+        # ══ E. SMTP (conditionnel) ══
         smtp_user = os.getenv("SMTP_USER", "")
         if smtp_user:
-            smtp = aiosmtplib.SMTP(hostname=smtp_host, port=smtp_port)
-            await smtp.connect()
-            await smtp.starttls()
-            await smtp.login(smtp_user, os.getenv("SMTP_PASS", ""))
-            await smtp.quit()
-            results["checks"].append("SMTP: OK")
-        else:
-            results["warnings"].append("SMTP non configuré")
-    except Exception as e:
-        results["errors"].append(f"SMTP DOWN: {e}")
+            try:
+                import aiosmtplib
+                smtp = aiosmtplib.SMTP(hostname=os.getenv("SMTP_HOST", "smtp.gmail.com"), port=int(os.getenv("SMTP_PORT", "587")))
+                await smtp.connect()
+                await smtp.starttls()
+                await smtp.login(smtp_user, os.getenv("SMTP_PASS", ""))
+                await smtp.quit()
+                results["elements_ok"].append("SMTP OK")
+            except Exception as e:
+                results["warnings"].append(f"SMTP: {e}")
 
-    # 3. Vérifier que site_state reflète la réalité
-    db = get_db()
-    if db:
-        try:
-            cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-            # Promos expirées encore dans site_state
-            cur.execute("SELECT key FROM site_state WHERE category='promo_active' AND expires_at IS NOT NULL AND expires_at < NOW()")
-            expired = cur.fetchall()
-            for exp in expired:
-                results["errors"].append(f"Promo expirée encore dans site_state: {exp['key']}")
-                cur.execute("DELETE FROM site_state WHERE category='promo_active' AND key=%s", (exp['key'],))
+        # ══ F. THEME — version coherente ══
+        db = get_db()
+        if db:
+            try:
+                cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+                cur.execute("SELECT value FROM site_state WHERE entity_code='bhtc_fr' AND category='theme' AND key='main_theme'")
+                row = cur.fetchone()
+                if row:
+                    theme_state = row["value"] if isinstance(row["value"], dict) else json.loads(row["value"])
+                    results["elements_ok"].append(f"Theme {theme_state.get('name', '?')} ID {theme_state.get('id', '?')}")
+                cur.close(); db.close()
+            except:
+                try: db.close()
+                except: pass
 
-            # Actions échouées non traitées
-            cur.execute("SELECT COUNT(*) as c FROM scheduled_actions WHERE status='failed'")
-            failed = cur.fetchone()["c"]
-            if failed > 0:
-                results["errors"].append(f"{failed} action(s) planifiée(s) en échec non traitée(s)")
+    # ══ RESULTATS ══
+    has_incoherences = len(results["incoherences"]) > 0
+    severity = "error" if has_incoherences else ("warning" if results["warnings"] else "info")
 
-            # Crons — vérifier que chaque cron a tourné dans les délais
-            cur.execute("SELECT cron_name, MAX(executed_at) as last FROM cron_results GROUP BY cron_name")
-            crons = cur.fetchall()
-            from datetime import timezone, timedelta
-            now = datetime.now(timezone.utc)
-            expected = {"stock-check": 2, "sync-tags": 26, "audit-qualite": 170, "tryme-expire": 26, "cashback-reminder": 26}
-            for c in crons:
-                name = c["cron_name"]
-                last = c["last"]
-                if name in expected and last:
-                    hours_ago = (now - last.replace(tzinfo=timezone.utc)).total_seconds() / 3600
-                    if hours_ago > expected[name]:
-                        results["warnings"].append(f"Cron {name} en retard: dernier run il y a {hours_ago:.0f}h (attendu < {expected[name]}h)")
-                    else:
-                        results["checks"].append(f"Cron {name}: OK ({hours_ago:.0f}h)")
-
-            db.commit(); cur.close(); db.close()
-        except Exception as e:
-            results["warnings"].append(f"Erreur check DB: {e}")
-            try: db.close()
-            except: pass
-
-    # Logger les résultats
     ops_log("bhtc_fr", "cron:coherence-check", "coherence_check_complete",
-            severity="error" if results["errors"] else "info",
-            details={"checks": len(results["checks"]), "errors": len(results["errors"]), "warnings": len(results["warnings"])})
+            severity=severity,
+            details={"checks_ok": len(results["elements_ok"]), "incoherences": len(results["incoherences"]), "warnings": len(results["warnings"])})
 
-    # Email si erreurs
-    if results["errors"]:
-        error_text = "\n".join(f"❌ {e}" for e in results["errors"])
-        warning_text = "\n".join(f"⚠️ {w}" for w in results["warnings"])
-        await _send_ops_email("info@planetebeauty.com",
-            f"STELLA OS — {len(results['errors'])} incohérence(s) détectée(s)",
-            f"Contrôle de cohérence automatique :\n\n{error_text}\n\n{warning_text}")
-
-    # Sauvegarder dans cron_results
+    # Sauvegarder
     db2 = get_db()
     if db2:
         try:
@@ -7995,13 +8129,21 @@ async def cron_memory_consolidate():
         results["stats"]["rag_by_category"] = {r["category"]: r["c"] for r in mem_categories}
         results["stats"]["rag_total"] = sum(r["c"] for r in mem_categories)
 
-        # ── 3. OPTIMISER — Détecter les doublons potentiels (mêmes titres) ──
+        # ── 3. OPTIMISER — Supprimer les doublons (garder le plus récent) ──
         cur.execute("""SELECT title, COUNT(*) as c FROM claude_memories
-            GROUP BY title HAVING COUNT(*) > 1 ORDER BY c DESC LIMIT 10""")
+            GROUP BY title HAVING COUNT(*) > 1 ORDER BY c DESC LIMIT 20""")
         duplicates = cur.fetchall()
+        total_deleted = 0
         if duplicates:
-            results["actions"].append(f"{len(duplicates)} titres de mémoire en doublon potentiel")
-            results["stats"]["duplicates"] = [{"title": d["title"], "count": d["c"]} for d in duplicates]
+            for d in duplicates:
+                # Garder le plus récent (id le plus grand), supprimer les autres
+                cur.execute("""DELETE FROM claude_memories WHERE title = %s AND id NOT IN (
+                    SELECT MAX(id) FROM claude_memories WHERE title = %s)""",
+                    (d["title"], d["title"]))
+                deleted = cur.rowcount
+                total_deleted += deleted
+            results["actions"].append(f"{total_deleted} doublons supprimés ({len(duplicates)} titres)")
+            results["stats"]["duplicates_cleaned"] = total_deleted
 
         # ── 4. VÉRIFIER — Cohérence entre les couches ──
         # site_state vs opérations actives
