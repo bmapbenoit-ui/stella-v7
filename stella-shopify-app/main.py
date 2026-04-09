@@ -502,10 +502,11 @@ async def startup():
     # ══════ SCHEDULER 24/7 (tourne meme si le Mac est eteint) ══════
     scheduler.add_job(_run_cron, 'interval', hours=1, id='stock_check',
                       args=["stock-check", "/api/cron/stock-check"])
-    scheduler.add_job(_run_cron, 'cron', hour=3, minute=15, id='sync_tags',
-                      args=["sync-tags", "/api/cron/sync-tags"])
-    scheduler.add_job(_run_cron, 'cron', hour=3, minute=45, id='nouveautes_expire',
-                      args=["nouveautes-expire", "/api/cron/nouveautes-expire"])
+    # sync_tags + nouveautes_expire DISABLED 09/04/2026 — gestion manuelle des nouveautés par Benoit
+    # scheduler.add_job(_run_cron, 'cron', hour=3, minute=15, id='sync_tags',
+    #                   args=["sync-tags", "/api/cron/sync-tags"])
+    # scheduler.add_job(_run_cron, 'cron', hour=3, minute=45, id='nouveautes_expire',
+    #                   args=["nouveautes-expire", "/api/cron/nouveautes-expire"])
     scheduler.add_job(_run_cron, 'cron', day_of_week='mon', hour=7, minute=0, id='audit_qualite',
                       args=["audit-qualite", "/api/cron/audit-qualite"])
     scheduler.add_job(_run_cron, 'cron', hour=4, minute=30, id='tryme_expire',
@@ -531,7 +532,7 @@ async def startup():
     scheduler.add_job(_run_cron, 'cron', hour=8, minute=0, id='gads_budget_guard',
                       args=["gads-budget-guard", "/api/cron/gads-budget-guard"])
     scheduler.start()
-    logger.info("Scheduler started: stock(1h), tags(3h15), nouveautes(3h45), audit(lun 7h), tryme(4h30), cashback(9h15), action-executor(5min), drift(5h), briefing(6h), coherence(6h), memory-audit(lun), gads-guard(8h)")
+    logger.info("Scheduler started: stock(1h), audit(lun 7h), tryme(4h30), cashback(9h15), action-executor(5min), drift(5h), briefing(6h), coherence(6h), memory-audit(lun), gads-guard(8h)")
 
 # ══════════════════════ 3-LAYER MEMORY ══════════════════════
 def save_to_redis(conv_id, role, content):
@@ -2327,9 +2328,9 @@ def compute_auto_tags(product_data, cutoff_iso):
             a = a.strip()
             if a: new_tags.add(f"Accord:{a}")
 
-    # Nouveauté (< 30 days)
-    if product_data.get("createdAt", "") > cutoff_iso:
-        new_tags.add("Nouveauté")
+    # Nouveauté — DISABLED 09/04/2026: gestion manuelle par Benoit
+    # if product_data.get("createdAt", "") > cutoff_iso:
+    #     new_tags.add("Nouveauté")
 
     return new_tags
 
@@ -2347,7 +2348,7 @@ async def cron_sync_tags(request: Request):
     headers = {"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"}
 
     # Auto-tag prefixes we manage
-    AUTO_PREFIXES = ("Famille:", "Saison:", "Genre:", "Concentration:", "Occasion:", "Accord:", "Nouveauté")
+    AUTO_PREFIXES = ("Famille:", "Saison:", "Genre:", "Concentration:", "Occasion:", "Accord:")
 
     updated, skipped = 0, 0
     cursor = None
