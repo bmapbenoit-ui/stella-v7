@@ -1477,9 +1477,16 @@ async def webhook_tryme_order(request: Request):
     if not customer_email:
         return {"ok": True, "skipped": True, "reason": "no_email"}
 
-    tryme_items = [li for li in line_items if is_tryme_item(li)]
-    if not tryme_items:
+    def _is_upsell_item(li):
+        return any(p.get("name") == "_tryme_upsell" and p.get("value") == "true"
+                   for p in (li.get("properties") or []))
+
+    all_tryme_items = [li for li in line_items if is_tryme_item(li)]
+    if not all_tryme_items:
         return {"ok": True, "skipped": True, "reason": "no_tryme_items"}
+
+    # Séparer Try Me classiques (code TM- remise fixe sur produit) des upsells (code TU- -5% prochaine commande)
+    tryme_items = [li for li in all_tryme_items if not _is_upsell_item(li)]
 
     # Redis lock to prevent duplicate webhook processing
     rc = get_redis()
@@ -1688,10 +1695,7 @@ async def webhook_tryme_order(request: Request):
             logger.error(f"Try Me metafield write error: {e}")
 
     # Try Me Upsell : si un item a la propriété _tryme_upsell, générer un code -5% prochaine commande
-    upsell_items = [li for li in line_items if is_tryme_item(li) and any(
-        (p.get("name") == "_tryme_upsell" and p.get("value") == "true")
-        for p in (li.get("properties") or [])
-    )]
+    upsell_items = [li for li in all_tryme_items if _is_upsell_item(li)]
     if upsell_items and customer_email:
         try:
             upsell_code = f"TU-{uuid.uuid4().hex[:6].upper()}"
