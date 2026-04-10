@@ -1250,17 +1250,28 @@ async def context_summary(request: Request):
 @app.get("/memory")
 async def list_memories(request: Request):
     verify_claude_key(request)
+    limit = int(request.query_params.get("limit", "50"))
+    offset = int(request.query_params.get("offset", "0"))
+    category = request.query_params.get("category", "")
+    if limit > 1000: limit = 1000
     db = get_db()
-    if not db: return {"memories": []}
+    if not db: return {"memories": [], "total": 0}
     try:
         cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute("SELECT * FROM claude_memories ORDER BY created_at DESC LIMIT 50")
+        if category:
+            cur.execute("SELECT COUNT(*) as c FROM claude_memories WHERE category=%s", (category,))
+            total = cur.fetchone()["c"]
+            cur.execute("SELECT * FROM claude_memories WHERE category=%s ORDER BY importance DESC, created_at DESC LIMIT %s OFFSET %s", (category, limit, offset))
+        else:
+            cur.execute("SELECT COUNT(*) as c FROM claude_memories")
+            total = cur.fetchone()["c"]
+            cur.execute("SELECT * FROM claude_memories ORDER BY importance DESC, created_at DESC LIMIT %s OFFSET %s", (limit, offset))
         rows = cur.fetchall(); cur.close(); db.close()
-        return {"memories": [{**r, "created_at": r["created_at"].isoformat() if r["created_at"] else None} for r in rows]}
+        return {"memories": [{**r, "created_at": r["created_at"].isoformat() if r["created_at"] else None} for r in rows], "total": total, "limit": limit, "offset": offset}
     except Exception as e:
         try: db.close()
         except: pass
-        return {"memories": [], "error": str(e)}
+        return {"memories": [], "total": 0, "error": str(e)}
 
 @app.post("/memory")
 async def create_memory(mem: MemoryCreate, request: Request):
