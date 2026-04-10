@@ -8125,7 +8125,28 @@ async def cron_coherence_check():
                 try: db.close()
                 except: pass
 
-        # ══ D. MEMOIRE QDRANT — doublons + credentials retrouvables ══
+        # ══ D. HEARTBEAT MAC — vérifier que les checks locaux tournent ══
+        db_hb = get_db()
+        if db_hb:
+            try:
+                cur_hb = db_hb.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+                cur_hb.execute("SELECT created_at FROM claude_memories WHERE title='heartbeat-mac' ORDER BY created_at DESC LIMIT 1")
+                hb = cur_hb.fetchone()
+                if hb and hb["created_at"]:
+                    hours_ago = (datetime.now(timezone.utc) - hb["created_at"].replace(tzinfo=timezone.utc)).total_seconds() / 3600
+                    if hours_ago > 4:
+                        results["incoherences"].append({"domain": "monitoring", "description": f"Heartbeat Mac absent depuis {hours_ago:.0f}h (seuil 4h)", "action": "Mac eteint ou Claude Code ferme — checks locaux ne tournent pas"})
+                    else:
+                        results["elements_ok"].append(f"Heartbeat Mac OK ({hours_ago:.0f}h)")
+                else:
+                    results["warnings"].append("Aucun heartbeat Mac trouve — checks locaux jamais executes?")
+                cur_hb.close(); db_hb.close()
+            except Exception as e:
+                results["warnings"].append(f"Heartbeat check: {e}")
+                try: db_hb.close()
+                except: pass
+
+        # ══ E. MEMOIRE QDRANT — doublons + credentials retrouvables ══
         db = get_db()
         if db:
             try:
@@ -8158,7 +8179,7 @@ async def cron_coherence_check():
                 try: db.close()
                 except: pass
 
-        # ══ E. SMTP (conditionnel) ══
+        # ══ F. SMTP (conditionnel) ══
         smtp_user = os.getenv("SMTP_USER", "")
         if smtp_user:
             try:
@@ -8172,7 +8193,7 @@ async def cron_coherence_check():
             except Exception as e:
                 results["warnings"].append(f"SMTP: {e}")
 
-        # ══ F. THEME — version coherente ══
+        # ══ G. THEME — version coherente ══
         db = get_db()
         if db:
             try:
