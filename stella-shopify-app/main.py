@@ -4024,7 +4024,7 @@ async def _check_product_enrichment(pdata):
                 w, h = img.get("width", 0), img.get("height", 0)
                 if w != h:
                     issues.append(f"image {i+1} pas carrée ({w}x{h})")
-                elif w < 2000:
+                elif w < 2048:
                     issues.append(f"image {i+1} trop petite ({w}px, min 2000)")
 
             # 7. Images notes olfactives
