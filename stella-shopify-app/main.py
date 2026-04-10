@@ -8195,6 +8195,34 @@ async def cron_coherence_check():
             severity=severity,
             details={"checks_ok": len(results["elements_ok"]), "incoherences": len(results["incoherences"]), "warnings": len(results["warnings"])})
 
+    # Email automatique si nouvelles incohérences détectées
+    if has_incoherences:
+        # Comparer avec le dernier rapport pour ne pas spammer
+        db_prev = get_db()
+        prev_count = 0
+        if db_prev:
+            try:
+                cur_prev = db_prev.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+                cur_prev.execute("SELECT result_data FROM cron_results WHERE cron_name='coherence-check' ORDER BY executed_at DESC LIMIT 1")
+                prev = cur_prev.fetchone()
+                if prev and prev["result_data"]:
+                    prev_data = prev["result_data"] if isinstance(prev["result_data"], dict) else json.loads(prev["result_data"])
+                    prev_count = len(prev_data.get("incoherences", []))
+                cur_prev.close(); db_prev.close()
+            except:
+                try: db_prev.close()
+                except: pass
+
+        current_count = len(results["incoherences"])
+        # Alerter seulement si nouvelles incohérences (pas les mêmes qu'avant)
+        if current_count > prev_count:
+            new_issues = current_count - prev_count
+            inco_text = "\n".join(f"• [{i.get('domain','')}] {i.get('description','')}" for i in results["incoherences"][:10])
+            ok_text = "\n".join(f"✅ {e}" for e in results["elements_ok"][:5])
+            await _send_ops_email("info@planetebeauty.com",
+                f"STELLA — {new_issues} nouvelle(s) incohérence(s) détectée(s)",
+                f"Contrôle automatique ({current_count} incohérences, {len(results['elements_ok'])} éléments OK)\n\nIncohérences:\n{inco_text}\n\nOK:\n{ok_text}")
+
     # Sauvegarder
     db2 = get_db()
     if db2:
