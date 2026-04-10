@@ -8282,6 +8282,128 @@ async def cron_gads_budget_guard():
         logger.error(f"GADS budget guard error: {e}")
         return {"error": str(e)}
 
+# ══════ SELF-AUDIT — État réel du système (remplace le guide statique) ══════
+
+@app.get("/api/self-audit")
+async def self_audit():
+    """Retourne l'état RÉEL de chaque composant en lisant le code et les services live.
+    Source de vérité = code + API, PAS un fichier guide statique."""
+    audit = {"generated_at": datetime.now().isoformat(), "components": []}
+    shopify_headers = {"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"}
+    shopify_gql = f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/{SHOPIFY_API_VERSION}/graphql.json"
+
+    # ── 1. ENDPOINTS — Lister tous les @app.route enregistrés ──
+    routes = []
+    for route in app.routes:
+        if hasattr(route, 'path') and hasattr(route, 'methods'):
+            methods = list(route.methods - {"HEAD", "OPTIONS"}) if route.methods else []
+            if methods and not route.path.startswith("/static"):
+                routes.append({"path": route.path, "methods": methods})
+    audit["endpoints_count"] = len(routes)
+    audit["endpoints"] = sorted(routes, key=lambda r: r["path"])
+
+    # ── 2. WEBHOOKS — Lister les webhooks Shopify enregistrés ──
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            gql = '{ webhookSubscriptions(first: 20) { edges { node { topic endpoint { ... on WebhookHttpEndpoint { callbackUrl } } } } } }'
+            r = await client.post(shopify_gql, headers=shopify_headers, json={"query": gql})
+            wh = r.json().get("data", {}).get("webhookSubscriptions", {}).get("edges", [])
+            webhooks = [{"topic": w["node"]["topic"], "url": w["node"]["endpoint"]["callbackUrl"]} for w in wh]
+            audit["webhooks"] = webhooks
+    except Exception as e:
+        audit["webhooks"] = {"error": str(e)}
+
+    # ── 3. CRONS — État des crons APScheduler ──
+    db = get_db()
+    if db:
+        try:
+            cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cur.execute("SELECT cron_name, MAX(executed_at) as last_run, COUNT(*) as runs FROM cron_results GROUP BY cron_name ORDER BY cron_name")
+            crons = cur.fetchall()
+            audit["crons"] = [{"name": c["cron_name"], "last_run": c["last_run"].isoformat() if c["last_run"] else None, "total_runs": c["runs"]} for c in crons]
+            cur.close(); db.close()
+        except Exception as e:
+            audit["crons"] = {"error": str(e)}
+            try: db.close()
+            except: pass
+
+    # ── 4. COMPOSANTS FONCTIONNELS — Test chaque service ──
+    components = []
+
+    # Cashback
+    try:
+        settings = get_cashback_settings()
+        components.append({"name": "Cashback", "status": "ok", "config": {"rate": settings.get("cashback_rate"), "expiry": settings.get("expiry_days"), "min_use": settings.get("min_order_use")}})
+    except:
+        components.append({"name": "Cashback", "status": "error", "detail": "get_cashback_settings() failed"})
+
+    # Codes promo
+    try:
+        db2 = get_db()
+        if db2:
+            cur2 = db2.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cur2.execute("SELECT key, value FROM site_state WHERE category='discount_active'")
+            codes = {r["key"]: r["value"] for r in cur2.fetchall()}
+            cur2.close(); db2.close()
+            components.append({"name": "Codes Promo", "status": "ok", "codes": list(codes.keys())})
+    except:
+        components.append({"name": "Codes Promo", "status": "error"})
+
+    # BIS
+    try:
+        db3 = get_db()
+        if db3:
+            cur3 = db3.cursor()
+            cur3.execute("SELECT COUNT(*) FROM bis_subscriptions WHERE notified_at IS NULL")
+            bis_count = cur3.fetchone()[0]
+            cur3.close(); db3.close()
+            components.append({"name": "BIS", "status": "ok", "active_subscribers": bis_count})
+    except:
+        components.append({"name": "BIS", "status": "error", "detail": "table bis_subscriptions missing?"})
+
+    # Quiz
+    rc = get_redis()
+    if rc:
+        quiz_last = rc.get("quiz:regen:last")
+        quiz_count = rc.get("quiz:regen:count")
+        components.append({"name": "Quiz", "status": "ok", "last_regen": int(quiz_last) if quiz_last else None, "products": int(quiz_count) if quiz_count else None})
+    else:
+        components.append({"name": "Quiz", "status": "unknown", "detail": "Redis unavailable"})
+
+    # Shipping
+    try:
+        db4 = get_db()
+        if db4:
+            cur4 = db4.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cur4.execute("SELECT value FROM site_state WHERE key='shipping_settings' LIMIT 1")
+            row = cur4.fetchone()
+            cur4.close(); db4.close()
+            if row:
+                components.append({"name": "Livraison", "status": "ok", "config": row["value"]})
+            else:
+                components.append({"name": "Livraison", "status": "ok", "detail": "defaults"})
+    except:
+        components.append({"name": "Livraison", "status": "error"})
+
+    # Google Ads
+    has_gads = bool(os.getenv("GADS_CUSTOMER_ID")) and bool(os.getenv("GOOGLE_REFRESH_TOKEN") or os.getenv("GADS_REFRESH_TOKEN"))
+    components.append({"name": "Google Ads", "status": "configured" if has_gads else "not_configured", "customer_id": os.getenv("GADS_CUSTOMER_ID", "")})
+
+    # Memory
+    try:
+        db5 = get_db()
+        if db5:
+            cur5 = db5.cursor()
+            cur5.execute("SELECT COUNT(*) FROM claude_memories")
+            mem_count = cur5.fetchone()[0]
+            cur5.close(); db5.close()
+            components.append({"name": "Memoire RAG", "status": "ok", "count": mem_count})
+    except:
+        components.append({"name": "Memoire RAG", "status": "error"})
+
+    audit["components"] = components
+    return audit
+
 # ══════ FIN STELLA OS ══════
 
 app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static")), name="static")
