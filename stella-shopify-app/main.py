@@ -3945,10 +3945,36 @@ async def webhook_product_change(request: Request):
     except Exception as e:
         logger.warning(f"Try Me card pregeneration check: {e}")
 
+    # Force DRAFT on new products if they are ACTIVE and incomplete
+    # Shopify webhook header X-Shopify-Topic tells us if it's create or update
+    topic = request.headers.get("X-Shopify-Topic", "")
+    if "create" in topic.lower():
+        asyncio.create_task(_force_draft_if_incomplete(pdata))
+
     # Auto-enrichment check: verify product completeness
     asyncio.create_task(_check_product_enrichment(pdata))
 
     return {"ok": True, "regenerating": True}
+
+async def _force_draft_if_incomplete(pdata):
+    """Force new products to DRAFT status. Products must be 100% complete before going ACTIVE."""
+    try:
+        pid = pdata.get("admin_graphql_api_id", f"gid://shopify/Product/{pdata.get('id','')}")
+        status = pdata.get("status", "")
+        ptitle = pdata.get("title", "")
+
+        if status and status.lower() == "active":
+            async with httpx.AsyncClient(timeout=10) as client:
+                mut = 'mutation { productUpdate(input: {id: "%s", status: DRAFT}) { product { id status } userErrors { message } } }' % pid
+                await client.post(SHOPIFY_GRAPHQL_URL,
+                    headers={"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"},
+                    json={"query": mut})
+                logger.info(f"Forced DRAFT on new product: {ptitle}")
+                log_activity("force_draft", f"Nouveau produit forcé en DRAFT: {ptitle}",
+                    {"product": ptitle, "reason": "Règle: jamais ACTIVE tant que pas 100% complet"},
+                    source="webhook", product_title=ptitle)
+    except Exception as e:
+        logger.warning(f"Force draft: {e}")
 
 async def _check_product_enrichment(pdata):
     """Check if a product is fully enriched. Tag 'a-enrichir' if not.
