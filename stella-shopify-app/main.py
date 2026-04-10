@@ -3945,7 +3945,149 @@ async def webhook_product_change(request: Request):
     except Exception as e:
         logger.warning(f"Try Me card pregeneration check: {e}")
 
+    # Auto-enrichment check: verify product completeness
+    asyncio.create_task(_check_product_enrichment(pdata))
+
     return {"ok": True, "regenerating": True}
+
+async def _check_product_enrichment(pdata):
+    """Check if a product is fully enriched. Tag 'a-enrichir' if not.
+    Checks: vendor, description, SEO, images notes, images produit (carré 2000x2000),
+    metafields parfum, variante Try Me, canaux de vente, collections/catégories."""
+    try:
+        pid = pdata.get("admin_graphql_api_id", f"gid://shopify/Product/{pdata.get('id','')}")
+        ptitle = pdata.get("title", "")
+        vendor = pdata.get("vendor", "")
+        product_type = pdata.get("product_type", "")
+
+        # Skip non-perfume products
+        perfume_types = ["Extrait de Parfum", "Eau de Parfum", "Eau de Parfum Intense", "Eau de Toilette", "Eau de Cologne"]
+        if product_type not in perfume_types:
+            return
+
+        issues = []
+
+        # 1. Vendor uppercase
+        if vendor and vendor != vendor.upper():
+            issues.append("vendor pas MAJUSCULES")
+
+        # 2. productType exact
+        if product_type not in perfume_types:
+            issues.append(f"productType '{product_type}' non standard")
+
+        # 3. Deep check via GraphQL
+        async with httpx.AsyncClient(timeout=20) as client:
+            gql = """{ product(id: "%s") {
+                descriptionHtml status publishedOnCurrentPublication
+                seo { title description }
+                images(first: 5) { edges { node { width height url } } }
+                variants(first: 5) { edges { node { title price availableForSale } } }
+                collections(first: 5) { edges { node { title } } }
+                img_tete: metafield(namespace:"parfum", key:"image_note_tete") { value }
+                img_coeur: metafield(namespace:"parfum", key:"image_note_coeur") { value }
+                img_fond: metafield(namespace:"parfum", key:"image_note_fond") { value }
+                note_tete: metafield(namespace:"parfum", key:"note_tete_principale") { value }
+                note_coeur: metafield(namespace:"parfum", key:"note_coeur_principale") { value }
+                note_fond: metafield(namespace:"parfum", key:"note_fond_principale") { value }
+                parfumeur: metafield(namespace:"parfum", key:"parfumeur") { value }
+                famille: metafield(namespace:"parfum", key:"famille_olfactive") { value }
+                accord: metafield(namespace:"parfum", key:"accord_principal") { value }
+                genre: metafield(namespace:"parfum", key:"genre") { value }
+                intensite: metafield(namespace:"parfum", key:"intensite") { value }
+                sillage: metafield(namespace:"parfum", key:"sillage_level") { value }
+                tags
+            } }""" % pid
+            r = await client.post(SHOPIFY_GRAPHQL_URL,
+                headers={"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"},
+                json={"query": gql})
+            p = r.json().get("data", {}).get("product", {})
+            if not p:
+                return
+
+            # 4. Description 3 paragraphs
+            desc = p.get("descriptionHtml", "") or ""
+            if desc.count("<p") < 3:
+                issues.append("description < 3 paragraphes")
+
+            # 5. SEO
+            seo = p.get("seo", {}) or {}
+            if not seo.get("title"):
+                issues.append("SEO title vide")
+            if not seo.get("description"):
+                issues.append("SEO meta vide")
+
+            # 6. Images produit — minimum 3, carrées
+            images = [e["node"] for e in p.get("images", {}).get("edges", [])]
+            if len(images) < 3:
+                issues.append(f"seulement {len(images)} images (min 3)")
+            for i, img in enumerate(images):
+                w, h = img.get("width", 0), img.get("height", 0)
+                if w != h:
+                    issues.append(f"image {i+1} pas carrée ({w}x{h})")
+                elif w < 2000:
+                    issues.append(f"image {i+1} trop petite ({w}px, min 2000)")
+
+            # 7. Images notes olfactives
+            if p.get("note_tete", {}).get("value"):
+                if not p.get("img_tete", {}).get("value"):
+                    issues.append("image_note_tete manquante")
+                if not p.get("img_coeur", {}).get("value"):
+                    issues.append("image_note_coeur manquante")
+                if not p.get("img_fond", {}).get("value"):
+                    issues.append("image_note_fond manquante")
+
+            # 8. Metafields parfum essentiels (7 champs minimum)
+            essential_mf = ["note_tete", "note_coeur", "note_fond", "parfumeur", "famille", "accord", "genre"]
+            missing_mf = [k for k in essential_mf if not p.get(k, {}).get("value")]
+            if missing_mf:
+                issues.append(f"metafields manquants: {', '.join(missing_mf)}")
+
+            # 9. Variante Try Me
+            variants = [e["node"] for e in p.get("variants", {}).get("edges", [])]
+            has_tryme = any("try me" in (v.get("title") or "").lower() for v in variants)
+            has_standard = any("try me" not in (v.get("title") or "").lower() for v in variants)
+            if has_standard and not has_tryme:
+                issues.append("pas de variante Try Me")
+
+            # 10. Collections/catégories
+            collections = [e["node"]["title"] for e in p.get("collections", {}).get("edges", [])]
+            if not collections:
+                issues.append("pas dans aucune collection")
+
+            # 11. Tags format
+            tags = p.get("tags", [])
+            has_famille_tag = any(t.startswith("Famille:") for t in tags)
+            has_genre_tag = any(t.startswith("Genre:") for t in tags)
+            if not has_famille_tag:
+                issues.append("tag Famille:X manquant")
+            if not has_genre_tag:
+                issues.append("tag Genre:X manquant")
+
+            # === TAG MANAGEMENT ===
+            current_tags = p.get("tags", [])
+            needs_tag = len(issues) > 0
+            has_tag = "a-enrichir" in current_tags
+
+            if needs_tag and not has_tag:
+                new_tags = current_tags + ["a-enrichir"]
+                mut = 'mutation { productUpdate(input: {id: "%s", tags: %s}) { product { id } userErrors { message } } }' % (pid, json.dumps(new_tags))
+                await client.post(SHOPIFY_GRAPHQL_URL,
+                    headers={"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"},
+                    json={"query": mut})
+                logger.info(f"Enrichment: tagged '{ptitle}' a-enrichir — {', '.join(issues[:5])}")
+                log_activity("enrichment_check", f"Produit incomplet: {ptitle} — {len(issues)} problèmes",
+                    {"product": ptitle, "issues": issues}, source="webhook", product_title=ptitle)
+
+            elif not needs_tag and has_tag:
+                new_tags = [t for t in current_tags if t != "a-enrichir"]
+                mut = 'mutation { productUpdate(input: {id: "%s", tags: %s}) { product { id } userErrors { message } } }' % (pid, json.dumps(new_tags))
+                await client.post(SHOPIFY_GRAPHQL_URL,
+                    headers={"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"},
+                    json={"query": mut})
+                logger.info(f"Enrichment: '{ptitle}' complet, tag a-enrichir retiré")
+
+    except Exception as e:
+        logger.warning(f"Enrichment check: {e}")
 
 # ══════════════════════ CASHBACK FIDÉLITÉ (Crédit Magasin) ══════════════════════
 
