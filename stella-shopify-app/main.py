@@ -1393,6 +1393,160 @@ async def delete_memory(memory_id: int, request: Request):
         except: pass
         return {"status": "error", "message": str(e)}
 
+# ═══════════════════════════════════════════════════════════════════════════
+# STELLA-MEM — Rapports IA métier (reçus depuis le daemon local)
+# ═══════════════════════════════════════════════════════════════════════════
+
+@app.post("/api/stella-mem/report")
+async def receive_stella_mem_report(request: Request):
+    """Receive a report from STELLA-MEM daemon (local → Railway)."""
+    verify_claude_key(request)
+    db = get_db()
+    if not db: return {"status": "error", "message": "DB unavailable"}
+    try:
+        body = await request.json()
+        cur = db.cursor()
+        # Create table if not exists
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS stella_mem_reports (
+                id SERIAL PRIMARY KEY,
+                report_type TEXT NOT NULL DEFAULT 'daily',
+                report_date TEXT,
+                score INTEGER DEFAULT 0,
+                sessions_count INTEGER DEFAULT 0,
+                total_actions INTEGER DEFAULT 0,
+                understood JSONB DEFAULT '[]',
+                not_understood JSONB DEFAULT '[]',
+                problems JSONB DEFAULT '{}',
+                suggestions JSONB DEFAULT '[]',
+                lessons JSONB DEFAULT '[]',
+                full_report JSONB NOT NULL,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        cur.execute("""
+            INSERT INTO stella_mem_reports
+            (report_type, report_date, score, sessions_count, total_actions,
+             understood, not_understood, problems, suggestions, full_report)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
+        """, (
+            body.get("type", "daily"),
+            body.get("date", ""),
+            body.get("score", 0),
+            body.get("sessions_count", 0),
+            body.get("total_actions", 0),
+            json.dumps(body.get("understood", [])),
+            json.dumps(body.get("not_understood", [])),
+            json.dumps(body.get("problem_summary", {})),
+            json.dumps(body.get("suggestions", [])),
+            json.dumps(body),
+        ))
+        report_id = cur.fetchone()[0]
+        db.commit(); cur.close(); db.close()
+        log_activity("stella_mem", "report_received", f"Report #{report_id} type={body.get('type','?')}")
+        return {"status": "ok", "report_id": report_id}
+    except Exception as e:
+        try: db.close()
+        except: pass
+        return {"status": "error", "message": str(e)}
+
+
+@app.get("/api/stella-mem/reports")
+async def get_stella_mem_reports(request: Request, limit: int = 20):
+    """Get STELLA-MEM reports for the dashboard."""
+    verify_claude_key(request)
+    db = get_db()
+    if not db: return {"reports": []}
+    try:
+        cur = db.cursor()
+        cur.execute("""
+            SELECT id, report_type, report_date, score, sessions_count,
+                   total_actions, understood, not_understood, problems,
+                   suggestions, created_at
+            FROM stella_mem_reports
+            ORDER BY created_at DESC LIMIT %s
+        """, (limit,))
+        cols = [d[0] for d in cur.description]
+        rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+        # Serialize datetime
+        for r in rows:
+            if r.get("created_at"):
+                r["created_at"] = r["created_at"].isoformat()
+        cur.close(); db.close()
+        return {"reports": rows}
+    except Exception as e:
+        try: db.close()
+        except: pass
+        return {"reports": [], "error": str(e)}
+
+
+@app.get("/api/stella-mem/latest")
+async def get_stella_mem_latest(request: Request):
+    """Get the most recent STELLA-MEM report."""
+    verify_claude_key(request)
+    db = get_db()
+    if not db: return {"report": None}
+    try:
+        cur = db.cursor()
+        cur.execute("""
+            SELECT id, report_type, report_date, score, sessions_count,
+                   total_actions, understood, not_understood, problems,
+                   suggestions, lessons, full_report, created_at
+            FROM stella_mem_reports
+            ORDER BY created_at DESC LIMIT 1
+        """)
+        row = cur.fetchone()
+        if not row:
+            cur.close(); db.close()
+            return {"report": None}
+        cols = [d[0] for d in cur.description]
+        report = dict(zip(cols, row))
+        if report.get("created_at"):
+            report["created_at"] = report["created_at"].isoformat()
+        cur.close(); db.close()
+        return {"report": report}
+    except Exception as e:
+        try: db.close()
+        except: pass
+        return {"report": None, "error": str(e)}
+
+
+@app.get("/api/stella-mem/lessons")
+async def get_stella_mem_lessons(request: Request):
+    """Get latest lessons learned from STELLA-MEM."""
+    verify_claude_key(request)
+    db = get_db()
+    if not db: return {"lessons": []}
+    try:
+        cur = db.cursor()
+        cur.execute("""
+            SELECT suggestions, not_understood, problems, score, report_date
+            FROM stella_mem_reports
+            ORDER BY created_at DESC LIMIT 5
+        """)
+        rows = cur.fetchall()
+        all_suggestions = []
+        all_problems = {}
+        for row in rows:
+            sugs = row[0] if isinstance(row[0], list) else []
+            all_suggestions.extend(sugs)
+            probs = row[2] if isinstance(row[2], dict) else {}
+            for k, v in probs.items():
+                if k not in all_problems:
+                    all_problems[k] = v
+        cur.close(); db.close()
+        return {
+            "suggestions": list(dict.fromkeys(all_suggestions)),
+            "problems": all_problems,
+            "reports_analyzed": len(rows),
+        }
+    except Exception as e:
+        try: db.close()
+        except: pass
+        return {"lessons": [], "error": str(e)}
+
+
 @app.post("/session/snapshot")
 async def create_snapshot(snap: SnapshotCreate, request: Request):
     verify_claude_key(request)

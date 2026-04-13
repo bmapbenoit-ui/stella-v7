@@ -44,6 +44,7 @@
   <button class="tab-btn" data-tab="ops"><span class="tab-icon">&#128736;</span> Operations <span class="badge" id="badge-ops">0</span></button>
   <button class="tab-btn" data-tab="shipping"><span class="tab-icon">&#128666;</span> Livraison</button>
   <button class="tab-btn" data-tab="system"><span class="tab-icon">&#9881;</span> Systeme</button>
+  <button class="tab-btn" data-tab="stellamem"><span class="tab-icon">&#129504;</span> STELLA-MEM</button>
 </nav>
 
 <!-- ═══════════════════════════════════════════════════════════════ -->
@@ -429,6 +430,59 @@
   <div class="card">
     <div class="card-header"><span>Erreurs recentes</span></div>
     <div class="card-body" id="sys-errors"></div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- VUE: STELLA-MEM — IA Metier / Analyse / Rapports -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<section class="tab-panel" id="panel-stellamem">
+  <!-- Score & Stats -->
+  <div class="kpi-grid" id="sm-kpis">
+    <div class="kpi-card"><div class="kpi-value" id="sm-score">-</div><div class="kpi-label">Score qualite</div></div>
+    <div class="kpi-card"><div class="kpi-value" id="sm-sessions">-</div><div class="kpi-label">Sessions analysees</div></div>
+    <div class="kpi-card"><div class="kpi-value" id="sm-actions">-</div><div class="kpi-label">Actions traitees</div></div>
+    <div class="kpi-card"><div class="kpi-value" id="sm-understood">-</div><div class="kpi-label">Sujets compris</div></div>
+  </div>
+
+  <!-- Lecons apprises -->
+  <div class="card">
+    <div class="card-header"><span>Lecons apprises (erreurs Claude Code a ne pas reproduire)</span></div>
+    <div class="card-body" id="sm-lessons"></div>
+  </div>
+
+  <!-- Suggestions d'amelioration -->
+  <div class="card">
+    <div class="card-header"><span>Suggestions d'amelioration</span></div>
+    <div class="card-body" id="sm-suggestions"></div>
+  </div>
+
+  <!-- Problemes recurrents -->
+  <div class="card">
+    <div class="card-header"><span>Problemes recurrents</span></div>
+    <div class="card-body">
+      <table class="data-table" id="sm-problems-table">
+        <thead><tr><th>Type</th><th>Nombre</th><th>Severite moy.</th><th>Exemples</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Sujets non compris -->
+  <div class="card">
+    <div class="card-header"><span>Lacunes detectees (pas compris)</span></div>
+    <div class="card-body" id="sm-not-understood"></div>
+  </div>
+
+  <!-- Historique rapports -->
+  <div class="card">
+    <div class="card-header"><span>Historique des rapports</span></div>
+    <div class="card-body">
+      <table class="data-table" id="sm-reports-table">
+        <thead><tr><th>Date</th><th>Type</th><th>Score</th><th>Sessions</th><th>Actions</th><th>Compris</th><th>Lacunes</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
   </div>
 </section>
 

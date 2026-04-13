@@ -35,7 +35,7 @@ const STELLA = {
     if (!this.state.loaded[tabId]) {
       this.state.loaded[tabId] = true;
       const loader = {home:'home',cashback:'cashback',tryme:'tryme',reviews:'reviews',catalogue:'catalogue',
-        bis:'bis',gads:'gads',promo:'promo',quiz:'quiz',ops:'ops',shipping:'shipping',system:'system'};
+        bis:'bis',gads:'gads',promo:'promo',quiz:'quiz',ops:'ops',shipping:'shipping',system:'system',stellamem:'stellamem'};
       if (loader[tabId] && this[loader[tabId]] && this[loader[tabId]].load) this[loader[tabId]].load();
     }
   },
@@ -699,6 +699,88 @@ const STELLA = {
             </div>
             <span class="activity-time">${STELLA.relativeTime(e.timestamp)}</span>
           </div>`).join('') || '<div class="empty-state"><p>Aucune erreur</p></div>';
+      }
+    }
+  },
+  // ═══ STELLA-MEM — IA Metier ═══
+  stellamem: {
+    async load() {
+      try {
+        const [latest, reports, lessons] = await Promise.all([
+          STELLA.api('/api/stella-mem/latest'),
+          STELLA.api('/api/stella-mem/reports?limit=15'),
+          STELLA.api('/api/stella-mem/lessons')
+        ]);
+
+        // KPIs from latest report
+        const r = latest && latest.report ? latest.report : {};
+        const fr = r.full_report || r;
+        document.getElementById('sm-score').textContent = (fr.score !== undefined ? fr.score + '/10' : '-');
+        document.getElementById('sm-sessions').textContent = fr.sessions_count || '-';
+        document.getElementById('sm-actions').textContent = fr.total_actions || '-';
+        const understood = fr.understood || r.understood || [];
+        document.getElementById('sm-understood').textContent = Array.isArray(understood) ? understood.length : '-';
+
+        // Lessons
+        const lessonsEl = document.getElementById('sm-lessons');
+        if (lessonsEl && lessons && lessons.suggestions) {
+          lessonsEl.innerHTML = lessons.suggestions.map(s =>
+            `<div class="activity-item"><span class="activity-icon">&#9888;</span><div class="activity-content"><div class="activity-action">${s}</div></div></div>`
+          ).join('') || '<div class="empty-state"><p>Aucune lecon — le systeme apprend encore</p></div>';
+        }
+
+        // Problems
+        const probsEl = document.querySelector('#sm-problems-table tbody');
+        const problems = lessons && lessons.problems ? lessons.problems : (fr.problem_summary || {});
+        if (probsEl) {
+          const rows = Object.entries(problems).map(([type, data]) => {
+            const d = typeof data === 'object' ? data : {count: data};
+            return `<tr><td style="font-weight:600">${type}</td><td>${d.count || '-'}</td><td>${d.avg_severity || '-'}</td><td style="font-size:0.75rem">${(d.examples || []).join('; ').substring(0, 150)}</td></tr>`;
+          });
+          probsEl.innerHTML = rows.join('') || '<tr><td colspan="4" style="text-align:center">Aucun probleme recurrent</td></tr>';
+        }
+
+        // Suggestions
+        const sugEl = document.getElementById('sm-suggestions');
+        const sugs = fr.suggestions || [];
+        if (sugEl) {
+          sugEl.innerHTML = sugs.map(s =>
+            `<div class="activity-item"><span class="activity-icon">&#128161;</span><div class="activity-content"><div class="activity-action">${s}</div></div></div>`
+          ).join('') || '<div class="empty-state"><p>Pas encore de suggestions</p></div>';
+        }
+
+        // Not understood
+        const nuEl = document.getElementById('sm-not-understood');
+        const nu = fr.not_understood || r.not_understood || [];
+        if (nuEl) {
+          nuEl.innerHTML = (Array.isArray(nu) ? nu : []).map(item => {
+            const desc = typeof item === 'object' ? `[${item.domain || item.type || '?'}] ${item.topic || item.description || ''}` : item;
+            return `<div class="activity-item"><span class="activity-icon">&#10060;</span><div class="activity-content"><div class="activity-action">${desc}</div><div class="activity-detail">${item.reason || item.what_should_know || ''}</div></div></div>`;
+          }).join('') || '<div class="empty-state"><p>Aucune lacune detectee</p></div>';
+        }
+
+        // Reports history
+        const repTb = document.querySelector('#sm-reports-table tbody');
+        if (repTb && reports && reports.reports) {
+          repTb.innerHTML = reports.reports.map(rp => {
+            const f = rp.full_report || rp;
+            const u = rp.understood || f.understood || [];
+            const n = rp.not_understood || f.not_understood || [];
+            return `<tr>
+              <td>${rp.report_date || rp.created_at?.substring(0, 10) || '-'}</td>
+              <td>${rp.report_type || '-'}</td>
+              <td style="font-weight:700;color:${rp.score >= 7 ? '#4CAF50' : rp.score >= 4 ? '#FF9800' : '#f44336'}">${rp.score !== null ? rp.score + '/10' : '-'}</td>
+              <td>${rp.sessions_count || '-'}</td>
+              <td>${rp.total_actions || '-'}</td>
+              <td>${Array.isArray(u) ? u.length : '-'}</td>
+              <td>${Array.isArray(n) ? n.length : '-'}</td>
+            </tr>`;
+          }).join('');
+        }
+
+      } catch (e) {
+        console.error('STELLA-MEM load error:', e);
+        document.getElementById('sm-lessons').innerHTML = '<div class="empty-state"><p>Erreur chargement STELLA-MEM</p></div>';
       }
     }
   },
