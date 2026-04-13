@@ -721,6 +721,15 @@ const STELLA = {
         const understood = fr.understood || r.understood || [];
         document.getElementById('sm-understood').textContent = Array.isArray(understood) ? understood.length : '-';
 
+        // Narrative report (the REAL analysis written by Haiku)
+        const narrativeEl = document.getElementById('sm-narrative');
+        const narrative = fr.narrative || '';
+        if (narrativeEl && narrative) {
+          narrativeEl.innerHTML = narrative;
+        }
+        const dateEl = document.getElementById('sm-report-date');
+        if (dateEl) dateEl.textContent = fr.date || r.report_date || '-';
+
         // Lessons
         const lessonsEl = document.getElementById('sm-lessons');
         if (lessonsEl && lessons && lessons.suggestions) {
