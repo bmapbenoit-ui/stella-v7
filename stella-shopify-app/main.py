@@ -4388,19 +4388,44 @@ async def _process_cashback_inner(body):
     subtotal = float(body.get("subtotal_price", "0"))  # Produits après remises, hors port
     total_discounts = float(body.get("total_discounts", "0"))  # Remises déjà soustraites du subtotal
 
-    # Calculate eligible subtotal (exclude Try Me / no-discount items)
+    # Calculate eligible subtotal (exclude Try Me / Try Me Upsell / no-discount / gift items)
     tryme_total = 0.0
     for li in body.get("line_items", []):
         title = (li.get("title") or "").lower()
         variant_title = (li.get("variant_title") or "").lower()
-        li_tags = li.get("tags") or []
-        if isinstance(li_tags, str):
-            li_tags = [t.strip() for t in li_tags.split(",") if t.strip()]
         product_type = (li.get("product_type") or "").lower()
-        # Exclude Try Me (check BOTH product title AND variant title), gifts, samples
-        is_tryme = "try me" in title or "tryme" in title or "try me" in variant_title or "tryme" in variant_title
-        is_excluded = any(kw in title for kw in ["échantillon", "echantillon", "mystère", "mystere", "cadeau", "gift", "shipping", "livraison"]) or product_type in ["try me", "gift"]
-        if is_tryme or is_excluded:
+
+        # 1. Try Me Upsell panier — line property _tryme_upsell == "true"
+        is_upsell = any(
+            (p.get("name") == "_tryme_upsell" and str(p.get("value", "")).lower() == "true")
+            for p in (li.get("properties") or [])
+        )
+
+        # 2. Variante Try Me classique
+        is_tryme_variant = (
+            "try me" in title or "tryme" in title
+            or "try me" in variant_title or "tryme" in variant_title
+            or "2 ml" in variant_title
+        )
+
+        # 3. Tags ligne (Shopify expose rarement les tags sur line_items mais on check par securite)
+        li_tags_raw = li.get("tags") or []
+        if isinstance(li_tags_raw, str):
+            li_tags_list = [t.strip().lower() for t in li_tags_raw.split(",") if t.strip()]
+        else:
+            li_tags_list = [str(t).lower() for t in li_tags_raw]
+        has_excluded_tag = any(
+            tag in li_tags_list
+            for tag in ("tryme", "no-cashback", "no-discount", "gift", "exclusion-promo")
+        )
+
+        # 4. Mots-cles cadeaux / echantillons / mystere
+        is_gift_like = any(
+            kw in title
+            for kw in ("echantillon", "échantillon", "mystère", "mystere", "cadeau", "gift", "shipping", "livraison")
+        ) or product_type in ("try me", "gift")
+
+        if is_upsell or is_tryme_variant or has_excluded_tag or is_gift_like:
             tryme_total += float(li.get("price", "0")) * int(li.get("quantity", 1))
 
     # Detect store credit used in this order (payment gateway = "gift_card" or "store_credit")
