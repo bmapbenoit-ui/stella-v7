@@ -432,7 +432,7 @@ async def startup():
                     {"step": 1, "action": "Scraper site officiel marque (notes, parfumeur, annee, INCI)"},
                     {"step": 2, "action": "Scraper Fragrantica via Chrome MCP (note communaute X,XX/5)"},
                     {"step": 3, "action": "Remplir 32 metafields namespace parfum"},
-                    {"step": 4, "action": "Description 3 lignes (accroche + citation + Fragrantica)"},
+                    {"step": 4, "action": "Description 1 paragraphe narratif (accroche 2-3 phrases, citation via metafield)"},
                     {"step": 5, "action": "SEO title max 70c + meta description max 155c"},
                     {"step": 6, "action": "Vendor MAJUSCULES + productType = concentration exacte"},
                     {"step": 7, "action": "Tags auto (Famille:X, Saison:X, Genre:X, Concentration:X, Occasion:X, Accord:X)"},
@@ -4186,8 +4186,8 @@ async def _check_product_enrichment(pdata):
 
             # 4. Description 3 paragraphs
             desc = p.get("descriptionHtml", "") or ""
-            if desc.count("<p") < 3:
-                issues.append("description < 3 paragraphes")
+            if desc.count("<p") < 1:
+                issues.append("description vide (min 1 paragraphe)")
 
             # 5. SEO
             seo = p.get("seo", {}) or {}
@@ -4986,6 +4986,7 @@ PROMO_MF_KEY = "discount-codes-config"
 DEFAULT_PROMO_CONFIG = {
     "codes": {
         "PB580": {"percent": 5.0, "minSubtotal": 80.0, "message": "-5% avec le code PB580"},
+        "PB10180": {"percent": 10.0, "minSubtotal": 180.0, "message": "-10% avec le code PB10180"},
     },
     "excludedVendors": ["Creed", "Roja Parfums", "Clive Christian"]
 }
@@ -7427,7 +7428,7 @@ async def ops_playbook_detail(name: str):
 PROCESS_RULES = {
     "creation_produit": [
         "Images : 3 images carre 2000x2000 WebP. Image 1 = flacon fond blanc zoom 80%. Image 2 = flacon+boite. Image 3 = lifestyle. Alt text SEO.",
-        "Description : 3 lignes obligatoires (accroche + citation parfumeur + note Fragrantica).",
+        "Description : 1 paragraphe narratif obligatoire (accroche narrative 2-3 phrases, citation via metafield).",
         "SEO : title max 70c format [Nom] – [MARQUE] | [Conc] [Vol]ml | PlaneteBeauty. Meta max 155c.",
         "Vendor TOUJOURS en MAJUSCULES. productType = concentration exacte.",
         "Tags format standardise : Famille:X, Saison:X, Genre:X, Concentration:X, Occasion:X, Accord:X.",
@@ -8252,8 +8253,8 @@ async def cron_coherence_check():
 
                 # Description
                 desc = p.get("descriptionHtml", "") or ""
-                if desc.count("<p>") < 3 and desc.count("<p") < 3:
-                    issues.append("Description < 3 paragraphes")
+                if desc.count("<p>") < 1 and desc.count("<p") < 1:
+                    issues.append("Description vide (min 1 paragraphe)")
 
                 # Vendor
                 vendor = p.get("vendor", "")
