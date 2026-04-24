@@ -4,9 +4,6 @@ on:
   push:
     branches:
       - claude/argos-product-mockup-55PAp
-    paths:
-      - 'mockup-argos/**'
-      - '.github/workflows/pages-argos-mockup.yml'
   workflow_dispatch:
 
 permissions:
