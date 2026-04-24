@@ -30,6 +30,8 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
+          version: '10.33.0'
+          package_json_file: mockup-argos/package.json
           run_install: false
 
       - name: Install dependencies
