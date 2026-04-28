@@ -4840,6 +4840,220 @@ async def webhook_google_review_request(request: Request):
     return {"ok": True, "queued": order_name or to_email}
 
 
+@app.post("/api/admin/google-review/backfill")
+async def google_review_backfill(request: Request):
+    """Backfill: send Google review request mail to all customers delivered since `since`,
+    where delivery happened at least `min_days_after_delivery` days ago.
+
+    Auth: header X-Flow-Token must match FLOW_WEBHOOK_TOKEN.
+    Body params (JSON, all optional):
+      - since: ISO date (default "2026-04-13")
+      - min_days_after_delivery: int (default 2)
+      - dry_run: bool (default false) — when true, lists eligible orders without sending
+      - limit: int (default 500) — max orders to process this run
+
+    Dedup is automatic via the google_review_emails table.
+    """
+    if not FLOW_WEBHOOK_TOKEN:
+        raise HTTPException(503, "FLOW_WEBHOOK_TOKEN not set")
+    if request.headers.get("x-flow-token") != FLOW_WEBHOOK_TOKEN:
+        raise HTTPException(401, "Invalid token")
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    since = body.get("since", "2026-04-13")
+    min_days = int(body.get("min_days_after_delivery", 2))
+    dry_run = bool(body.get("dry_run", False))
+    limit = int(body.get("limit", 500))
+
+    from datetime import datetime as dt, timedelta
+    cutoff = dt.utcnow() - timedelta(days=min_days)
+
+    gql_url = SHOPIFY_GRAPHQL_URL
+    headers = {"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"}
+    search_query = f"fulfillment_status:fulfilled created_at:>={since}"
+
+    eligible = []
+    skipped_no_delivery = 0
+    skipped_too_recent = 0
+    skipped_no_email = 0
+    cursor = None
+    page = 0
+    fetched = 0
+
+    async with httpx.AsyncClient(timeout=30) as c:
+        while fetched < limit:
+            page += 1
+            after_clause = f', after: "{cursor}"' if cursor else ""
+            gql = f"""{{
+              orders(first: 50, query: "{search_query}"{after_clause}, sortKey: CREATED_AT) {{
+                pageInfo {{ hasNextPage endCursor }}
+                edges {{
+                  node {{
+                    id name createdAt
+                    customer {{ email firstName }}
+                    fulfillments {{ deliveredAt status createdAt }}
+                  }}
+                }}
+              }}
+            }}"""
+            try:
+                r = await c.post(gql_url, json={"query": gql}, headers=headers)
+                data = r.json().get("data", {}).get("orders", {})
+            except Exception as e:
+                logger.error(f"[BACKFILL] GraphQL error page {page}: {e}")
+                break
+
+            edges = data.get("edges", [])
+            if not edges:
+                break
+
+            for edge in edges:
+                fetched += 1
+                if fetched > limit:
+                    break
+                node = edge["node"]
+                cust = node.get("customer") or {}
+                to_email = (cust.get("email") or "").strip()
+                first_name = (cust.get("firstName") or "").strip()
+                order_name = node.get("name", "")
+
+                if not to_email:
+                    skipped_no_email += 1
+                    continue
+
+                # Find the most recent delivered fulfillment
+                delivered_at = None
+                for f in node.get("fulfillments", []) or []:
+                    if f.get("status") == "SUCCESS" and f.get("deliveredAt"):
+                        delivered_at = f["deliveredAt"]
+                        break
+
+                if not delivered_at:
+                    skipped_no_delivery += 1
+                    continue
+
+                try:
+                    delivered_dt = dt.strptime(delivered_at[:19], "%Y-%m-%dT%H:%M:%S")
+                except Exception:
+                    skipped_no_delivery += 1
+                    continue
+
+                if delivered_dt > cutoff:
+                    skipped_too_recent += 1
+                    continue
+
+                eligible.append({
+                    "order_name": order_name,
+                    "to": to_email,
+                    "first_name": first_name,
+                    "delivered_at": delivered_at,
+                })
+
+            page_info = data.get("pageInfo", {})
+            if not page_info.get("hasNextPage"):
+                break
+            cursor = page_info.get("endCursor")
+
+    if dry_run:
+        return {
+            "ok": True,
+            "dry_run": True,
+            "since": since,
+            "min_days_after_delivery": min_days,
+            "fetched": fetched,
+            "eligible": len(eligible),
+            "skipped": {
+                "no_email": skipped_no_email,
+                "no_delivery_date": skipped_no_delivery,
+                "too_recent": skipped_too_recent,
+            },
+            "sample": eligible[:10],
+        }
+
+    # Send emails (sequential to respect Gmail rate limits ~1 mail/sec)
+    sent = 0
+    already_sent = 0
+    failed = 0
+    db = get_db()
+    if db:
+        try:
+            cur = db.cursor()
+            cur.execute("""CREATE TABLE IF NOT EXISTS google_review_emails (
+                id SERIAL PRIMARY KEY,
+                to_email TEXT NOT NULL,
+                order_name TEXT NOT NULL,
+                sent_at TIMESTAMP DEFAULT NOW(),
+                UNIQUE(to_email, order_name))""")
+            db.commit(); cur.close(); db.close()
+        except Exception:
+            try: db.close()
+            except: pass
+
+    import asyncio
+    for item in eligible:
+        # Dedup check
+        db2 = get_db()
+        already = False
+        if db2:
+            try:
+                c2 = db2.cursor()
+                c2.execute("SELECT 1 FROM google_review_emails WHERE to_email=%s AND order_name=%s",
+                           (item["to"], item["order_name"]))
+                already = bool(c2.fetchone())
+                c2.close(); db2.close()
+            except Exception:
+                try: db2.close()
+                except: pass
+
+        if already:
+            already_sent += 1
+            continue
+
+        ok = await _send_google_review_email(item["to"], item["first_name"], item["order_name"])
+        if ok:
+            sent += 1
+            db3 = get_db()
+            if db3:
+                try:
+                    c3 = db3.cursor()
+                    c3.execute("""INSERT INTO google_review_emails (to_email, order_name)
+                        VALUES (%s, %s) ON CONFLICT (to_email, order_name) DO NOTHING""",
+                        (item["to"], item["order_name"]))
+                    db3.commit(); c3.close(); db3.close()
+                except Exception:
+                    try: db3.close()
+                    except: pass
+            await asyncio.sleep(1.0)  # throttle to stay under Gmail per-second limits
+        else:
+            failed += 1
+
+    log_activity("google_review_backfill",
+                 f"Backfill avis Google: {sent} envoyés, {already_sent} déjà fait, {failed} échecs",
+                 {"since": since, "min_days": min_days, "fetched": fetched,
+                  "sent": sent, "already_sent": already_sent, "failed": failed},
+                 source="admin")
+
+    return {
+        "ok": True,
+        "since": since,
+        "min_days_after_delivery": min_days,
+        "fetched": fetched,
+        "eligible": len(eligible),
+        "sent": sent,
+        "already_sent": already_sent,
+        "failed": failed,
+        "skipped": {
+            "no_email": skipped_no_email,
+            "no_delivery_date": skipped_no_delivery,
+            "too_recent": skipped_too_recent,
+        },
+    }
+
+
 @app.post("/api/webhook/refund-created")
 async def webhook_refund_created(request: Request):
     """When an order is refunded, debit the cashback store credit from the customer."""
