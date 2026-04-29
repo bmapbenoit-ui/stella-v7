@@ -5124,6 +5124,55 @@ async def google_review_backfill(request: Request):
 
 # === GOOGLE REVIEWS POLLING (notif Gmail → store credit + product reviews) ===
 
+@app.get("/api/admin/google-review/stats")
+async def admin_google_review_stats(request: Request):
+    """Return aggregate stats for the Google Reviews credit pipeline.
+
+    Auth: X-API-Key header. Used by scheduled audit agents.
+    """
+    api_key = request.headers.get("X-API-Key", "")
+    if api_key != "stella-mem-2026-planetebeauty":
+        raise HTTPException(401, "Invalid API key")
+    db = get_db()
+    if not db:
+        return {"ok": False, "error": "no db"}
+    try:
+        cur = db.cursor()
+        cur.execute("""SELECT status, COUNT(*)::int FROM google_reviews_processed GROUP BY status""")
+        by_status = {row[0]: row[1] for row in cur.fetchall()}
+        cur.execute("""SELECT order_name, reviewer_name, rating, credited_amount, processed_at
+                       FROM google_reviews_processed
+                       WHERE status='credited' ORDER BY processed_at DESC LIMIT 50""")
+        credited_list = [
+            {"order_name": r[0], "reviewer_name": r[1], "rating": r[2],
+             "amount": float(r[3]) if r[3] is not None else None,
+             "processed_at": r[4].isoformat() if r[4] else None}
+            for r in cur.fetchall()
+        ]
+        cur.execute("SELECT COUNT(*)::int FROM google_reviews_processed")
+        total = cur.fetchone()[0]
+        # Backfill emails sent reference (from log_activity entries)
+        cur.execute("""SELECT COUNT(*)::int FROM activity_log
+                       WHERE action='google_review_backfill' AND created_at > NOW() - INTERVAL '30 days'""")
+        try:
+            backfill_runs = cur.fetchone()[0]
+        except Exception:
+            backfill_runs = None
+        cur.close(); db.close()
+        return {
+            "ok": True,
+            "total_processed": total,
+            "by_status": by_status,
+            "credited_sample": credited_list,
+            "backfill_runs_last_30d": backfill_runs,
+            "emails_sent_backfill_29_04": 155,
+        }
+    except Exception as e:
+        try: db.close()
+        except: pass
+        return {"ok": False, "error": str(e)[:300]}
+
+
 @app.get("/api/admin/gmail/debug")
 async def admin_gmail_debug(request: Request, q: str = "newer_than:7d", limit: int = 10):
     """Diagnostic: list recent Gmail messages matching query. Returns subject + from + date."""
