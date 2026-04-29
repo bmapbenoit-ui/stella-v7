@@ -520,6 +520,8 @@ async def startup():
     #                   args=["trustpilot-scan", "/api/cron/trustpilot-scan"])
     scheduler.add_job(_run_cron, 'cron', hour=9, minute=15, id='cashback_reminder',
                       args=["cashback-reminder", "/api/cron/cashback-reminder"])
+    scheduler.add_job(_run_cron, 'interval', minutes=30, id='google_reviews_poll',
+                      args=["google-reviews-poll", "/api/cron/google-reviews-poll"])
     # ══════ STELLA OS — Operations Management crons ══════
     scheduler.add_job(_run_cron, 'interval', minutes=5, id='action_executor',
                       args=["action-executor", "/api/cron/action-executor"])
@@ -5118,6 +5120,366 @@ async def google_review_backfill(request: Request):
             "too_recent": skipped_too_recent,
         },
     }
+
+
+# === GOOGLE REVIEWS POLLING (notif Gmail → store credit + product reviews) ===
+
+async def _gmail_search(access_token: str, query: str, max_results: int = 50) -> list:
+    """Search Gmail messages, return list of {id, threadId}."""
+    url = "https://gmail.googleapis.com/gmail/v1/users/me/messages"
+    async with httpx.AsyncClient(timeout=15) as c:
+        r = await c.get(url, params={"q": query, "maxResults": max_results},
+                        headers={"Authorization": f"Bearer {access_token}"})
+        r.raise_for_status()
+        return r.json().get("messages", []) or []
+
+
+async def _gmail_get_message(access_token: str, msg_id: str) -> dict:
+    """Get full Gmail message content."""
+    url = f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{msg_id}"
+    async with httpx.AsyncClient(timeout=15) as c:
+        r = await c.get(url, params={"format": "full"},
+                        headers={"Authorization": f"Bearer {access_token}"})
+        r.raise_for_status()
+        return r.json()
+
+
+def _decode_gmail_part(part: dict) -> str:
+    """Recursively extract text from Gmail message parts (decodes base64url)."""
+    import base64
+    body_data = part.get("body", {}).get("data", "")
+    out = ""
+    if body_data:
+        try:
+            out = base64.urlsafe_b64decode(body_data + "==").decode("utf-8", errors="replace")
+        except Exception:
+            out = ""
+    for sub in part.get("parts", []) or []:
+        out += "\n" + _decode_gmail_part(sub)
+    return out
+
+
+def _parse_google_review_email(message: dict) -> dict:
+    """Extract reviewer_name, rating, review_text, order_name from Google Business notif email."""
+    import re
+    headers = {h["name"].lower(): h["value"] for h in message.get("payload", {}).get("headers", [])}
+    subject = headers.get("subject", "") or ""
+
+    # Reviewer name from subject: "fernanda a laissé un avis sur PLANETEBEAUTY.COM"
+    name_match = re.match(r"^(.+?)\s+a\s+laiss[ée]\s+un\s+avis", subject, re.IGNORECASE)
+    reviewer_name = name_match.group(1).strip() if name_match else None
+
+    # Body content (HTML + text parts)
+    raw_text = _decode_gmail_part(message.get("payload", {}))
+
+    # Rating: "nouvel avis avec X étoile(s)"
+    rating_match = re.search(r"avec\s+(\d)\s+[ée]toile", raw_text, re.IGNORECASE)
+    rating = int(rating_match.group(1)) if rating_match else None
+
+    # Strip HTML
+    clean_text = re.sub(r"<[^>]+>", " ", raw_text)
+    clean_text = re.sub(r"&[a-z]+;", " ", clean_text)
+    clean_text = re.sub(r"\s+", " ", clean_text).strip()
+
+    # Order number — accept #XXXXX, # XXXXX, n°XXXXX
+    order_match = re.search(r"#\s*(\d{5})", clean_text)
+    order_name = "#" + order_match.group(1) if order_match else None
+
+    # Review text — extract block between reviewer name and "Répondre" / "Afficher tous"
+    review_text = None
+    if reviewer_name:
+        m = re.search(
+            rf"{re.escape(reviewer_name)}.*?[ée]toile[s]?\s*(.+?)(?:R[ée]pondre|Afficher tous|Voir l|©)",
+            clean_text, re.IGNORECASE | re.DOTALL
+        )
+        if m:
+            review_text = m.group(1).strip()[:2000]
+
+    return {
+        "reviewer_name": reviewer_name,
+        "rating": rating,
+        "review_text": review_text,
+        "order_name": order_name,
+        "subject": subject,
+    }
+
+
+async def _send_google_review_credit_confirmation_email(to_email: str, first_name: str, order_name: str) -> bool:
+    """Email confirmation client après crédit 5€ pour avis Google."""
+    if not SMTP_HOST or not SMTP_USER or not SMTP_FROM_EMAIL or not to_email:
+        return False
+    greeting = f"Bonjour {first_name}" if first_name else "Bonjour"
+
+    msg = MIMEMultipart("alternative")
+    msg["From"] = f"{SMTP_FROM_NAME} <{SMTP_FROM_EMAIL}>"
+    msg["To"] = to_email
+    msg["Subject"] = "Merci pour votre avis Google — vos 5 € sont crédités"
+
+    text_body = f"""{greeting},
+
+Merci infiniment pour votre avis Google sur PlaneteBeauty.
+
+Conformement a notre engagement, 5 EUR de credit magasin viennent d'etre credites sur votre compte client (commande {order_name}).
+
+Vous pouvez l'utiliser sur votre prochaine commande, valable 30 jours, sur planetebeauty.com.
+
+A tres bientot,
+L'equipe PlaneteBeauty
+"""
+
+    html_body = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"></head>
+<body style="margin:0;padding:0;font-family:Arial,Helvetica,sans-serif;background:#f8f6f3;">
+<div style="max-width:560px;margin:20px auto;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,0.08);">
+  <div style="background:#1a1a2e;padding:28px 32px;text-align:center;">
+    <h1 style="color:#d4af37;margin:0;font-size:22px;letter-spacing:1px;">PLAN&Egrave;TEBEAUTY</h1>
+  </div>
+  <div style="padding:32px;">
+    <h2 style="color:#1a1a2e;margin:0 0 16px;font-size:20px;">Merci pour votre avis</h2>
+    <p style="color:#444;line-height:1.6;margin:0 0 16px;">{greeting},</p>
+    <p style="color:#444;line-height:1.6;margin:0 0 24px;">Votre avis Google sur Plan&egrave;teBeauty compte &eacute;norm&eacute;ment. Merci d'avoir pris le temps de partager votre exp&eacute;rience.</p>
+    <div style="border:1px solid #d4af37;border-radius:10px;padding:24px;margin:24px 0;background:#fdfaf2;text-align:center;">
+      <p style="margin:0 0 6px;color:#1a1a2e;font-size:11px;letter-spacing:2.5px;font-weight:600;text-transform:uppercase;">Cr&eacute;dit&eacute;</p>
+      <p style="margin:0 0 10px;color:#d4af37;font-size:32px;line-height:1;font-weight:700;">5,00 &euro;</p>
+      <p style="margin:0;color:#666;font-size:13px;">de cr&eacute;dit magasin sur votre compte<br>commande <strong>{order_name}</strong> &middot; valable 30 jours</p>
+    </div>
+    <p style="color:#444;line-height:1.6;margin:0 0 12px;">Le cr&eacute;dit s'applique automatiquement lors de votre prochaine commande sur <a href="https://planetebeauty.com" style="color:#d4af37;">planetebeauty.com</a>.</p>
+    <p style="color:#888;line-height:1.6;margin:24px 0 0;font-size:13px;">&Agrave; tr&egrave;s bient&ocirc;t,<br>L'&eacute;quipe Plan&egrave;teBeauty</p>
+  </div>
+  <div style="background:#f8f6f3;padding:16px 32px;text-align:center;border-top:1px solid #eee;">
+    <p style="margin:0;color:#999;font-size:11px;">Plan&egrave;teBeauty &mdash; Parfumerie de niche</p>
+  </div>
+</div>
+</body></html>"""
+
+    msg.attach(MIMEText(text_body, "plain", "utf-8"))
+    msg.attach(MIMEText(html_body, "html", "utf-8"))
+
+    try:
+        await aiosmtplib.send(msg, hostname=SMTP_HOST, port=SMTP_PORT,
+                              username=SMTP_USER, password=SMTP_PASS, use_tls=False, start_tls=True)
+        return True
+    except Exception as e:
+        logger.error(f"Google review credit confirmation email failed for {to_email}: {e}")
+        return False
+
+
+@app.post("/api/cron/google-reviews-poll")
+async def cron_google_reviews_poll(request: Request):
+    """Cron 30 min: lit Gmail forward des notifs Google Business → match #XXXXX → crédite 5€ + transfert avis produits.
+
+    Source: emails forwardés depuis bmapbenoit@gmail.com (filtre Gmail) vers info@planetebeauty.com.
+    From header: businessprofile-noreply@google.com.
+    Idempotent via google_reviews_processed (gmail_message_id UNIQUE).
+    """
+    api_key = request.headers.get("X-API-Key", "")
+    if api_key != "stella-mem-2026-planetebeauty":
+        raise HTTPException(401, "Invalid API key")
+
+    results = {"checked": 0, "new": 0, "credited": 0, "needs_manual": 0, "duplicates": 0, "errors": []}
+
+    try:
+        access_token = await _google_access_token()
+    except Exception as e:
+        return {"status": "error", "error": f"OAuth: {e}"}
+
+    db = get_db()
+    if not db:
+        return {"status": "error", "error": "no db"}
+    try:
+        cur = db.cursor()
+        cur.execute("""CREATE TABLE IF NOT EXISTS google_reviews_processed (
+            id SERIAL PRIMARY KEY,
+            gmail_message_id TEXT UNIQUE NOT NULL,
+            reviewer_name TEXT,
+            rating INTEGER,
+            review_text TEXT,
+            order_name TEXT,
+            customer_id TEXT,
+            status TEXT,
+            credited_amount NUMERIC(10,2),
+            processed_at TIMESTAMP DEFAULT NOW()
+        )""")
+        db.commit()
+    except Exception as e:
+        try: db.close()
+        except: pass
+        return {"status": "error", "error": f"DB init: {e}"}
+
+    try:
+        messages = await _gmail_search(
+            access_token,
+            "from:businessprofile-noreply@google.com newer_than:30d",
+            max_results=50
+        )
+    except Exception as e:
+        cur.close(); db.close()
+        return {"status": "error", "error": f"Gmail search: {e}"}
+
+    results["checked"] = len(messages)
+    gql_url = SHOPIFY_GRAPHQL_URL
+    headers_gql = {"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"}
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        for msg_meta in messages:
+            msg_id = msg_meta.get("id")
+            if not msg_id:
+                continue
+
+            cur.execute("SELECT 1 FROM google_reviews_processed WHERE gmail_message_id=%s", (msg_id,))
+            if cur.fetchone():
+                results["duplicates"] += 1
+                continue
+
+            results["new"] += 1
+
+            try:
+                msg = await _gmail_get_message(access_token, msg_id)
+                parsed = _parse_google_review_email(msg)
+            except Exception as e:
+                results["errors"].append(f"msg {msg_id} parse: {str(e)[:100]}")
+                continue
+
+            order_name = parsed.get("order_name")
+            reviewer_name = parsed.get("reviewer_name") or "Client Google"
+            rating = parsed.get("rating") or 5
+            review_text = parsed.get("review_text") or ""
+
+            if not order_name:
+                cur.execute("""INSERT INTO google_reviews_processed
+                    (gmail_message_id, reviewer_name, rating, review_text, status)
+                    VALUES (%s,%s,%s,%s,'needs_manual_review') ON CONFLICT (gmail_message_id) DO NOTHING""",
+                    (msg_id, reviewer_name, rating, review_text))
+                db.commit()
+                results["needs_manual"] += 1
+                continue
+
+            try:
+                order_q = await client.post(gql_url, json={"query": f'''{{
+                    orders(first:1, query:"name:{order_name}") {{
+                        edges {{ node {{
+                            id name displayFulfillmentStatus
+                            customer {{ id email firstName }}
+                            lineItems(first:20) {{ edges {{ node {{ title product {{ handle id }} }} }} }}
+                        }} }}
+                    }}
+                }}'''}, headers=headers_gql)
+                edges = order_q.json().get("data", {}).get("orders", {}).get("edges", []) or []
+            except Exception as e:
+                results["errors"].append(f"{order_name} lookup: {str(e)[:100]}")
+                continue
+
+            if not edges:
+                cur.execute("""INSERT INTO google_reviews_processed
+                    (gmail_message_id, reviewer_name, rating, review_text, order_name, status)
+                    VALUES (%s,%s,%s,%s,%s,'order_not_found') ON CONFLICT (gmail_message_id) DO NOTHING""",
+                    (msg_id, reviewer_name, rating, review_text, order_name))
+                db.commit()
+                results["needs_manual"] += 1
+                continue
+
+            order = edges[0]["node"]
+            customer = order.get("customer") or {}
+            customer_id = customer.get("id")
+            customer_email = customer.get("email", "") or ""
+            customer_first_name = customer.get("firstName", "") or ""
+
+            if not customer_id:
+                cur.execute("""INSERT INTO google_reviews_processed
+                    (gmail_message_id, reviewer_name, rating, review_text, order_name, status)
+                    VALUES (%s,%s,%s,%s,%s,'no_customer') ON CONFLICT (gmail_message_id) DO NOTHING""",
+                    (msg_id, reviewer_name, rating, review_text, order_name))
+                db.commit()
+                results["needs_manual"] += 1
+                continue
+
+            cur.execute("SELECT 1 FROM google_reviews_processed WHERE order_name=%s AND status='credited'", (order_name,))
+            if cur.fetchone():
+                cur.execute("""INSERT INTO google_reviews_processed
+                    (gmail_message_id, reviewer_name, rating, review_text, order_name, customer_id, status)
+                    VALUES (%s,%s,%s,%s,%s,%s,'duplicate_order') ON CONFLICT (gmail_message_id) DO NOTHING""",
+                    (msg_id, reviewer_name, rating, review_text, order_name, customer_id))
+                db.commit()
+                results["duplicates"] += 1
+                continue
+
+            try:
+                credit_mutation = """mutation($id: ID!, $credit: StoreCreditAccountCreditInput!) {
+                    storeCreditAccountCredit(id: $id, creditInput: $credit) {
+                        storeCreditAccountTransaction { id }
+                        userErrors { field message }
+                    }
+                }"""
+                cr = await client.post(gql_url, json={
+                    "query": credit_mutation,
+                    "variables": {
+                        "id": customer_id,
+                        "credit": {"creditAmount": {"amount": "5.00", "currencyCode": "EUR"}}
+                    }
+                }, headers=headers_gql)
+                cr_data = cr.json().get("data", {}).get("storeCreditAccountCredit", {}) or {}
+                cr_errors = cr_data.get("userErrors", []) or []
+            except Exception as e:
+                results["errors"].append(f"{order_name} credit: {str(e)[:100]}")
+                continue
+
+            if cr_errors:
+                msg_err = cr_errors[0].get("message", "")
+                results["errors"].append(f"{order_name}: {msg_err}")
+                cur.execute("""INSERT INTO google_reviews_processed
+                    (gmail_message_id, reviewer_name, rating, review_text, order_name, customer_id, status)
+                    VALUES (%s,%s,%s,%s,%s,%s,'credit_failed') ON CONFLICT (gmail_message_id) DO NOTHING""",
+                    (msg_id, reviewer_name, rating, review_text, order_name, customer_id))
+                db.commit()
+                continue
+
+            review_title = (review_text[:80] + "...") if len(review_text) > 80 else (review_text or "Avis Google")
+            line_items = order.get("lineItems", {}).get("edges", []) or []
+            for item in line_items:
+                p = item.get("node", {}).get("product", {}) or {}
+                p_handle = p.get("handle", "")
+                p_id = p.get("id", "")
+                if p_handle:
+                    try:
+                        cur.execute("""INSERT INTO product_reviews
+                            (title, body, rating, review_date, source, curated, reviewer_name, reviewer_email, product_id, product_handle, order_number)
+                            VALUES (%s,%s,%s,NOW(),%s,%s,%s,%s,%s,%s,%s)""",
+                            (review_title, review_text, rating, "google_review", "ok",
+                             reviewer_name, customer_email, p_id, p_handle, order_name))
+                    except Exception as e:
+                        logger.warning(f"Review insert {p_handle}: {e}")
+
+            cur.execute("""INSERT INTO google_reviews_processed
+                (gmail_message_id, reviewer_name, rating, review_text, order_name, customer_id, status, credited_amount)
+                VALUES (%s,%s,%s,%s,%s,%s,'credited',%s) ON CONFLICT (gmail_message_id) DO NOTHING""",
+                (msg_id, reviewer_name, rating, review_text, order_name, customer_id, 5.00))
+            db.commit()
+
+            results["credited"] += 1
+            log_activity("google_review_credit",
+                         f"Avis Google {order_name}: 5€ crédité à {customer_email}",
+                         {"order_name": order_name, "reviewer": reviewer_name, "rating": rating, "amount": 5.00},
+                         source="cron", customer_email=customer_email, order_name=order_name)
+
+            try:
+                await _send_google_review_credit_confirmation_email(customer_email, customer_first_name, order_name)
+            except Exception as e:
+                logger.warning(f"Confirmation email {customer_email}: {e}")
+
+    cur.close(); db.close()
+
+    db2 = get_db()
+    if db2:
+        try:
+            cur2 = db2.cursor()
+            cur2.execute("INSERT INTO cron_results (cron_name, result_data) VALUES (%s, %s)",
+                ("google-reviews-poll", json.dumps(results)))
+            db2.commit(); cur2.close(); db2.close()
+        except:
+            try: db2.close()
+            except: pass
+
+    return {"status": "ok", **results}
 
 
 @app.post("/api/webhook/refund-created")
