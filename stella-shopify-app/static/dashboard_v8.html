@@ -147,6 +147,25 @@
     <div class="card-header"><span>Derniers avis publies</span></div>
     <div class="card-body"><table class="data-table" id="reviews-table"><thead><tr><th>Produit</th><th>Note</th><th>Source</th><th>Date</th></tr></thead><tbody></tbody></table></div>
   </div>
+
+  <div class="section-label">Avis Google &rarr; 5&euro; Store Credit</div>
+  <div class="kpi-grid" id="google-review-kpis"></div>
+  <div class="card">
+    <div class="card-header">
+      <span>Avis Google credites (5&euro; auto)</span>
+      <button class="btn-outline" onclick="STELLA.reviews.loadGoogleStats()">Rafraichir</button>
+    </div>
+    <div class="card-body"><table class="data-table" id="google-credited-table">
+      <thead><tr><th>Commande</th><th>Client</th><th>Note</th><th>Montant</th><th>Date</th></tr></thead>
+      <tbody></tbody>
+    </table></div>
+  </div>
+  <div class="card">
+    <div class="card-header"><span>A traiter manuellement (avis sans #commande)</span></div>
+    <div class="card-body" id="google-needs-manual">
+      <div class="empty-state"><p>Pour cr&eacute;diter manuellement un avis Google sans #commande, utilise l'endpoint admin (futur formulaire ici).</p></div>
+    </div>
+  </div>
 </section>
 
 <!-- ═══════════════════════════════════════════════════════════════ -->

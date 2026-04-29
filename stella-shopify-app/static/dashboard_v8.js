@@ -326,6 +326,38 @@ const STELLA = {
       </tr>`).join('') || '<tr><td colspan="4" class="empty-state">Aucun avis</td></tr>';
 
       this.loadPending();
+      this.loadGoogleStats();
+    },
+    async loadGoogleStats() {
+      const data = await STELLA.api('/api/admin/google-review/stats');
+      if (!data || !data.ok) return;
+
+      const total = data.total_processed || 0;
+      const credited = (data.by_status && data.by_status.credited) || 0;
+      const needsManual = (data.by_status && data.by_status.needs_manual_review) || 0;
+      const orderNotFound = (data.by_status && data.by_status.order_not_found) || 0;
+      const creditFailed = (data.by_status && data.by_status.credit_failed) || 0;
+      const sent = data.emails_sent_backfill_29_04 || 155;
+      const conversion = sent > 0 ? ((credited / sent) * 100).toFixed(1) : '0';
+      const totalCredited = (credited * 5).toFixed(2);
+
+      const kpis = document.getElementById('google-review-kpis');
+      if (kpis) kpis.innerHTML = `
+        <div class="kpi-card"><div class="kpi-value gold">${credited}</div><div class="kpi-label">Avis credites</div></div>
+        <div class="kpi-card"><div class="kpi-value">${conversion}%</div><div class="kpi-label">Conversion (/${sent} emails)</div></div>
+        <div class="kpi-card"><div class="kpi-value">${needsManual}</div><div class="kpi-label">A traiter manuellement</div></div>
+        <div class="kpi-card"><div class="kpi-value gold">${totalCredited}€</div><div class="kpi-label">Total credite</div></div>
+        ${orderNotFound > 0 ? `<div class="kpi-card"><div class="kpi-value" style="color:#c00">${orderNotFound}</div><div class="kpi-label">#commande introuvable</div></div>` : ''}
+        ${creditFailed > 0 ? `<div class="kpi-card"><div class="kpi-value" style="color:#c00">${creditFailed}</div><div class="kpi-label">Credit echec</div></div>` : ''}`;
+
+      const tbody = document.querySelector('#google-credited-table tbody');
+      if (tbody) tbody.innerHTML = (data.credited_sample || []).slice(0, 20).map(r => `<tr>
+        <td><strong>${r.order_name || ''}</strong></td>
+        <td>${r.reviewer_name || 'Anonyme'}</td>
+        <td>${'⭐'.repeat(Math.round(r.rating || 0))}</td>
+        <td>${r.amount != null ? r.amount.toFixed(2) + '€' : '-'}</td>
+        <td>${STELLA.shortTime(r.processed_at)}</td>
+      </tr>`).join('') || '<tr><td colspan="5" class="empty-state">Aucun avis credite encore. Le cron tourne toutes les 30 min.</td></tr>';
     },
     async loadPending() {
       const data = await STELLA.api('/api/reviews/pending');
