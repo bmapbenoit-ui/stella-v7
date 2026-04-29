@@ -5329,9 +5329,10 @@ async def cron_google_reviews_poll(request: Request):
         return {"status": "error", "error": f"DB init: {e}"}
 
     try:
+        # Catch both auto-forwarded (preserves From header) and manual forwards (subject preserved).
         messages = await _gmail_search(
             access_token,
-            "from:businessprofile-noreply@google.com newer_than:30d",
+            '(from:businessprofile-noreply@google.com OR subject:"a laissé un avis sur PLANETEBEAUTY") newer_than:60d',
             max_results=50
         )
     except Exception as e:
