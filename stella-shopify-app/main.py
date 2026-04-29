@@ -53,6 +53,10 @@ SMTP_PASS = os.getenv("SMTP_PASS", "")
 SMTP_FROM_NAME = os.getenv("SMTP_FROM_NAME", "PlanèteBeauty")
 SMTP_FROM_EMAIL = os.getenv("SMTP_FROM_EMAIL", "")
 
+# Shared secret for Shopify Flow → Railway webhook calls (header X-Flow-Token)
+FLOW_WEBHOOK_TOKEN = os.getenv("FLOW_WEBHOOK_TOKEN", "")
+GOOGLE_REVIEW_URL = os.getenv("GOOGLE_REVIEW_URL", "https://g.page/r/CTmV1GGiJ1rvEBM/review")
+
 # Google Ads API config
 GADS_DEVELOPER_TOKEN = os.getenv("GADS_DEVELOPER_TOKEN", "")
 GADS_CLIENT_ID = os.getenv("GADS_CLIENT_ID", "")
@@ -4685,6 +4689,369 @@ PlaneteBeauty — planetebeauty.com
     except Exception as e:
         logger.error(f"Cashback email failed for {to_email}: {e}")
         return False
+
+
+async def _send_google_review_email(to_email: str, first_name: str, order_name: str) -> bool:
+    """Send post-delivery Google review request email via SMTP (Gmail)."""
+    if not SMTP_HOST or not SMTP_USER or not SMTP_FROM_EMAIL:
+        logger.warning("Google review email: SMTP not configured")
+        return False
+
+    greeting = f"Bonjour {first_name}" if first_name else "Bonjour"
+
+    msg = MIMEMultipart("alternative")
+    msg["From"] = f"{SMTP_FROM_NAME} <{SMTP_FROM_EMAIL}>"
+    msg["To"] = to_email
+    msg["Subject"] = "Votre avis compte — PlanèteBeauty"
+
+    text_body = f"""{greeting},
+
+Merci pour votre commande {order_name} ! Nous esperons que vous etes ravi(e) de votre achat.
+
+Pourriez-vous prendre 30 secondes pour partager votre experience sur Google ?
+Votre avis nous aide enormement et permet a d'autres clients de decouvrir notre parfumerie.
+
+Laisser un avis : {GOOGLE_REVIEW_URL}
+
+Merci infiniment,
+L'equipe PlaneteBeauty — planetebeauty.com
+"""
+
+    html_body = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"></head>
+<body style="margin:0;padding:0;font-family:Arial,Helvetica,sans-serif;background:#f8f6f3;">
+<div style="max-width:560px;margin:20px auto;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,0.08);">
+  <div style="background:#1a1a2e;padding:28px 32px;text-align:center;">
+    <h1 style="color:#d4af37;margin:0;font-size:22px;letter-spacing:1px;">PLAN&Egrave;TEBEAUTY</h1>
+  </div>
+  <div style="padding:32px;">
+    <h2 style="color:#1a1a2e;margin:0 0 16px;font-size:20px;">Votre avis compte &eacute;norm&eacute;ment</h2>
+    <p style="color:#444;line-height:1.6;margin:0 0 16px;">
+      {greeting},
+    </p>
+    <p style="color:#444;line-height:1.6;margin:0 0 20px;">
+      Merci pour votre commande <strong>{order_name}</strong>. Nous esp&eacute;rons que vous &ecirc;tes ravi(e) de votre achat.
+    </p>
+    <p style="color:#444;line-height:1.6;margin:0 0 24px;">
+      Pourriez-vous prendre <strong>30 secondes</strong> pour partager votre exp&eacute;rience sur Google&nbsp;? Votre avis nous aide &eacute;norm&eacute;ment et permet &agrave; d'autres clients de d&eacute;couvrir notre parfumerie de niche.
+    </p>
+    <div style="text-align:center;margin:24px 0;">
+      <a href="{GOOGLE_REVIEW_URL}" style="display:inline-block;background:#d4af37;color:#1a1a2e;text-decoration:none;padding:14px 36px;border-radius:6px;font-weight:600;font-size:15px;">&#9733; Laisser un avis Google</a>
+    </div>
+    <p style="color:#888;line-height:1.6;margin:24px 0 0;font-size:13px;">
+      Merci infiniment pour votre confiance,<br>
+      L'&eacute;quipe Plan&egrave;teBeauty
+    </p>
+  </div>
+  <div style="background:#f8f6f3;padding:16px 32px;text-align:center;border-top:1px solid #eee;">
+    <p style="margin:0;color:#999;font-size:11px;">
+      Plan&egrave;teBeauty &mdash; Parfumerie de niche<br>
+      Livraison 24h &middot; Try&amp;Buy &middot; Cashback 5%
+    </p>
+  </div>
+</div>
+</body></html>"""
+
+    msg.attach(MIMEText(text_body, "plain", "utf-8"))
+    msg.attach(MIMEText(html_body, "html", "utf-8"))
+
+    try:
+        await aiosmtplib.send(msg, hostname=SMTP_HOST, port=SMTP_PORT,
+                              username=SMTP_USER, password=SMTP_PASS, use_tls=False, start_tls=True)
+        logger.info(f"Google review email sent to {to_email} (order {order_name})")
+        return True
+    except Exception as e:
+        logger.error(f"Google review email failed for {to_email}: {e}")
+        return False
+
+
+@app.post("/api/webhook/google-review-request")
+async def webhook_google_review_request(request: Request):
+    """Shopify Flow → send Google review request email via Gmail SMTP.
+
+    Expected JSON body: {"to": "...", "first_name": "...", "order_name": "#1234"}
+    Auth: header X-Flow-Token must match FLOW_WEBHOOK_TOKEN env var.
+    Idempotent: deduped on (order_name, to) for 30 days via PostgreSQL.
+    """
+    import asyncio
+
+    if not FLOW_WEBHOOK_TOKEN:
+        logger.error("[FLOW] google-review-request: FLOW_WEBHOOK_TOKEN not set")
+        raise HTTPException(503, "Flow webhook not configured")
+    if request.headers.get("x-flow-token") != FLOW_WEBHOOK_TOKEN:
+        raise HTTPException(401, "Invalid token")
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+
+    to_email = (body.get("to") or "").strip()
+    first_name = (body.get("first_name") or "").strip()
+    order_name = (body.get("order_name") or "").strip()
+
+    if not to_email:
+        raise HTTPException(400, "Missing 'to' field")
+
+    # Dedup: don't send twice for the same (order, recipient)
+    db = get_db()
+    if db:
+        try:
+            cur = db.cursor()
+            cur.execute("""CREATE TABLE IF NOT EXISTS google_review_emails (
+                id SERIAL PRIMARY KEY,
+                to_email TEXT NOT NULL,
+                order_name TEXT NOT NULL,
+                sent_at TIMESTAMP DEFAULT NOW(),
+                UNIQUE(to_email, order_name))""")
+            db.commit()
+            cur.execute("SELECT 1 FROM google_review_emails WHERE to_email=%s AND order_name=%s",
+                        (to_email, order_name))
+            if cur.fetchone():
+                cur.close(); db.close()
+                logger.info(f"[FLOW] google-review-request {order_name} → {to_email} already sent, skipping")
+                return {"ok": True, "skipped": True, "reason": "already sent"}
+            cur.close(); db.close()
+        except Exception as e:
+            try: db.close()
+            except: pass
+            logger.warning(f"[FLOW] google-review dedup check failed: {e}")
+
+    async def _send_and_log():
+        ok = await _send_google_review_email(to_email, first_name, order_name)
+        if ok:
+            db2 = get_db()
+            if db2:
+                try:
+                    c2 = db2.cursor()
+                    c2.execute("""INSERT INTO google_review_emails (to_email, order_name)
+                        VALUES (%s, %s) ON CONFLICT (to_email, order_name) DO NOTHING""",
+                        (to_email, order_name))
+                    db2.commit(); c2.close(); db2.close()
+                except Exception as e:
+                    try: db2.close()
+                    except: pass
+                    logger.warning(f"[FLOW] google-review log failed: {e}")
+            log_activity("google_review_email", f"Mail avis Google envoyé pour {order_name}",
+                         {"to": to_email, "order_name": order_name},
+                         source="flow_webhook", customer_email=to_email, order_name=order_name)
+
+    asyncio.create_task(_send_and_log())
+    return {"ok": True, "queued": order_name or to_email}
+
+
+@app.post("/api/admin/google-review/backfill")
+async def google_review_backfill(request: Request):
+    """Backfill: send Google review request mail to all customers delivered since `since`,
+    where delivery happened at least `min_days_after_delivery` days ago.
+
+    Auth: header X-Flow-Token must match FLOW_WEBHOOK_TOKEN.
+    Body params (JSON, all optional):
+      - since: ISO date (default "2026-04-13")
+      - min_days_after_delivery: int (default 2)
+      - dry_run: bool (default false) — when true, lists eligible orders without sending
+      - limit: int (default 500) — max orders to process this run
+
+    Dedup is automatic via the google_review_emails table.
+    """
+    if not FLOW_WEBHOOK_TOKEN:
+        raise HTTPException(503, "FLOW_WEBHOOK_TOKEN not set")
+    if request.headers.get("x-flow-token") != FLOW_WEBHOOK_TOKEN:
+        raise HTTPException(401, "Invalid token")
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    since = body.get("since", "2026-04-13")
+    min_days = int(body.get("min_days_after_delivery", 2))
+    dry_run = bool(body.get("dry_run", False))
+    limit = int(body.get("limit", 500))
+
+    from datetime import datetime as dt, timedelta
+    cutoff = dt.utcnow() - timedelta(days=min_days)
+
+    gql_url = SHOPIFY_GRAPHQL_URL
+    headers = {"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"}
+    search_query = f"fulfillment_status:fulfilled created_at:>={since}"
+
+    eligible = []
+    skipped_no_delivery = 0
+    skipped_too_recent = 0
+    skipped_no_email = 0
+    cursor = None
+    page = 0
+    fetched = 0
+
+    async with httpx.AsyncClient(timeout=30) as c:
+        while fetched < limit:
+            page += 1
+            after_clause = f', after: "{cursor}"' if cursor else ""
+            gql = f"""{{
+              orders(first: 50, query: "{search_query}"{after_clause}, sortKey: CREATED_AT) {{
+                pageInfo {{ hasNextPage endCursor }}
+                edges {{
+                  node {{
+                    id name createdAt
+                    customer {{ email firstName }}
+                    fulfillments {{ deliveredAt status createdAt }}
+                  }}
+                }}
+              }}
+            }}"""
+            try:
+                r = await c.post(gql_url, json={"query": gql}, headers=headers)
+                data = r.json().get("data", {}).get("orders", {})
+            except Exception as e:
+                logger.error(f"[BACKFILL] GraphQL error page {page}: {e}")
+                break
+
+            edges = data.get("edges", [])
+            if not edges:
+                break
+
+            for edge in edges:
+                fetched += 1
+                if fetched > limit:
+                    break
+                node = edge["node"]
+                cust = node.get("customer") or {}
+                to_email = (cust.get("email") or "").strip()
+                first_name = (cust.get("firstName") or "").strip()
+                order_name = node.get("name", "")
+
+                if not to_email:
+                    skipped_no_email += 1
+                    continue
+
+                # Find the most recent delivered fulfillment
+                delivered_at = None
+                for f in node.get("fulfillments", []) or []:
+                    if f.get("status") == "SUCCESS" and f.get("deliveredAt"):
+                        delivered_at = f["deliveredAt"]
+                        break
+
+                if not delivered_at:
+                    skipped_no_delivery += 1
+                    continue
+
+                try:
+                    delivered_dt = dt.strptime(delivered_at[:19], "%Y-%m-%dT%H:%M:%S")
+                except Exception:
+                    skipped_no_delivery += 1
+                    continue
+
+                if delivered_dt > cutoff:
+                    skipped_too_recent += 1
+                    continue
+
+                eligible.append({
+                    "order_name": order_name,
+                    "to": to_email,
+                    "first_name": first_name,
+                    "delivered_at": delivered_at,
+                })
+
+            page_info = data.get("pageInfo", {})
+            if not page_info.get("hasNextPage"):
+                break
+            cursor = page_info.get("endCursor")
+
+    if dry_run:
+        return {
+            "ok": True,
+            "dry_run": True,
+            "since": since,
+            "min_days_after_delivery": min_days,
+            "fetched": fetched,
+            "eligible": len(eligible),
+            "skipped": {
+                "no_email": skipped_no_email,
+                "no_delivery_date": skipped_no_delivery,
+                "too_recent": skipped_too_recent,
+            },
+            "sample": eligible[:10],
+        }
+
+    # Send emails (sequential to respect Gmail rate limits ~1 mail/sec)
+    sent = 0
+    already_sent = 0
+    failed = 0
+    db = get_db()
+    if db:
+        try:
+            cur = db.cursor()
+            cur.execute("""CREATE TABLE IF NOT EXISTS google_review_emails (
+                id SERIAL PRIMARY KEY,
+                to_email TEXT NOT NULL,
+                order_name TEXT NOT NULL,
+                sent_at TIMESTAMP DEFAULT NOW(),
+                UNIQUE(to_email, order_name))""")
+            db.commit(); cur.close(); db.close()
+        except Exception:
+            try: db.close()
+            except: pass
+
+    import asyncio
+    for item in eligible:
+        # Dedup check
+        db2 = get_db()
+        already = False
+        if db2:
+            try:
+                c2 = db2.cursor()
+                c2.execute("SELECT 1 FROM google_review_emails WHERE to_email=%s AND order_name=%s",
+                           (item["to"], item["order_name"]))
+                already = bool(c2.fetchone())
+                c2.close(); db2.close()
+            except Exception:
+                try: db2.close()
+                except: pass
+
+        if already:
+            already_sent += 1
+            continue
+
+        ok = await _send_google_review_email(item["to"], item["first_name"], item["order_name"])
+        if ok:
+            sent += 1
+            db3 = get_db()
+            if db3:
+                try:
+                    c3 = db3.cursor()
+                    c3.execute("""INSERT INTO google_review_emails (to_email, order_name)
+                        VALUES (%s, %s) ON CONFLICT (to_email, order_name) DO NOTHING""",
+                        (item["to"], item["order_name"]))
+                    db3.commit(); c3.close(); db3.close()
+                except Exception:
+                    try: db3.close()
+                    except: pass
+            await asyncio.sleep(1.0)  # throttle to stay under Gmail per-second limits
+        else:
+            failed += 1
+
+    log_activity("google_review_backfill",
+                 f"Backfill avis Google: {sent} envoyés, {already_sent} déjà fait, {failed} échecs",
+                 {"since": since, "min_days": min_days, "fetched": fetched,
+                  "sent": sent, "already_sent": already_sent, "failed": failed},
+                 source="admin")
+
+    return {
+        "ok": True,
+        "since": since,
+        "min_days_after_delivery": min_days,
+        "fetched": fetched,
+        "eligible": len(eligible),
+        "sent": sent,
+        "already_sent": already_sent,
+        "failed": failed,
+        "skipped": {
+            "no_email": skipped_no_email,
+            "no_delivery_date": skipped_no_delivery,
+            "too_recent": skipped_too_recent,
+        },
+    }
 
 
 @app.post("/api/webhook/refund-created")
