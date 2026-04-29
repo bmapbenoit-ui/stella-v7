@@ -4897,6 +4897,8 @@ async def google_review_backfill(request: Request):
     min_days_fulfilled = int(body.get("min_days_after_fulfilled", 7))
     dry_run = bool(body.get("dry_run", False))
     limit = int(body.get("limit", 500))
+    exclude_orders = body.get("exclude_orders", []) or []
+    exclude_set = {str(o).strip().lstrip("#") for o in exclude_orders if str(o).strip()}
 
     from datetime import datetime as dt, timedelta
     cutoff = dt.utcnow() - timedelta(days=min_days)
@@ -4910,6 +4912,7 @@ async def google_review_backfill(request: Request):
     skipped_no_delivery = 0
     skipped_too_recent = 0
     skipped_no_email = 0
+    skipped_excluded = 0
     cursor = None
     page = 0
     fetched = 0
@@ -4950,6 +4953,10 @@ async def google_review_backfill(request: Request):
                 to_email = (cust.get("email") or "").strip()
                 first_name = (cust.get("firstName") or "").strip()
                 order_name = node.get("name", "")
+
+                if exclude_set and order_name.lstrip("#") in exclude_set:
+                    skipped_excluded += 1
+                    continue
 
                 if not to_email:
                     skipped_no_email += 1
@@ -5025,6 +5032,7 @@ async def google_review_backfill(request: Request):
                 "no_email": skipped_no_email,
                 "no_delivery_date": skipped_no_delivery,
                 "too_recent": skipped_too_recent,
+                "excluded": skipped_excluded,
             },
             "sample": eligible[:10],
         }
