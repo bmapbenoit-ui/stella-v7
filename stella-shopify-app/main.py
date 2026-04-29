@@ -4706,10 +4706,23 @@ async def _send_google_review_email(to_email: str, first_name: str, order_name: 
 
     text_body = f"""{greeting},
 
-Merci pour votre commande {order_name} ! Nous esperons que vous etes ravi(e) de votre achat.
+Merci pour votre commande {order_name}. Nous esperons que vous etes ravi(e) de votre achat.
 
 Pourriez-vous prendre 30 secondes pour partager votre experience sur Google ?
-Votre avis nous aide enormement et permet a d'autres clients de decouvrir notre parfumerie.
+Votre avis nous aide enormement et permet a d'autres clients de decouvrir notre parfumerie de niche.
+
+----------------------------------------
+EN REMERCIEMENT : 5 EUR DE CREDIT MAGASIN
+
+Laissez un avis Google et recevez 5 EUR de credit magasin a utiliser sur votre prochaine commande, des que votre avis est valide.
+
+IMPORTANT — pour que nous puissions vous attribuer le credit, indiquez IMPERATIVEMENT votre numero de commande dans votre avis :
+
+Votre numero de commande : {order_name}
+(format : # suivi de 5 chiffres, exemple #20250)
+
+Sans ce numero, le credit ne pourra pas etre attribue.
+----------------------------------------
 
 Laisser un avis : {GOOGLE_REVIEW_URL}
 
@@ -4735,6 +4748,21 @@ L'equipe PlaneteBeauty — planetebeauty.com
     <p style="color:#444;line-height:1.6;margin:0 0 24px;">
       Pourriez-vous prendre <strong>30 secondes</strong> pour partager votre exp&eacute;rience sur Google&nbsp;? Votre avis nous aide &eacute;norm&eacute;ment et permet &agrave; d'autres clients de d&eacute;couvrir notre parfumerie de niche.
     </p>
+    <div style="border:1px solid #d4af37;border-radius:10px;padding:24px;margin:24px 0;background:#fdfaf2;">
+      <p style="margin:0 0 6px;color:#1a1a2e;font-size:11px;letter-spacing:2.5px;font-weight:600;text-transform:uppercase;text-align:center;">En remerciement</p>
+      <p style="margin:0 0 18px;color:#1a1a2e;font-size:18px;line-height:1.4;font-weight:600;text-align:center;">
+        Recevez <span style="color:#d4af37;">5&nbsp;&euro; de cr&eacute;dit magasin</span><br>sur votre prochaine commande
+      </p>
+      <p style="margin:0 0 10px;color:#555;font-size:13px;line-height:1.6;">
+        Pour que nous puissions vous attribuer le cr&eacute;dit, indiquez <strong>imp&eacute;rativement</strong> votre num&eacute;ro de commande dans votre avis Google&nbsp;:
+      </p>
+      <div style="text-align:center;margin:14px 0 8px;">
+        <span style="display:inline-block;background:#1a1a2e;color:#d4af37;padding:10px 24px;border-radius:6px;font-size:18px;font-weight:bold;letter-spacing:1.5px;font-family:Menlo,Consolas,monospace;">{order_name}</span>
+      </div>
+      <p style="margin:8px 0 0;color:#999;font-size:11px;line-height:1.5;text-align:center;">
+        Format&nbsp;: # suivi de 5 chiffres (exemple #20250)<br>Sans ce num&eacute;ro, le cr&eacute;dit ne peut pas &ecirc;tre attribu&eacute;.
+      </p>
+    </div>
     <div style="text-align:center;margin:24px 0;">
       <a href="{GOOGLE_REVIEW_URL}" style="display:inline-block;background:#d4af37;color:#1a1a2e;text-decoration:none;padding:14px 36px;border-radius:6px;font-weight:600;font-size:15px;">&#9733; Laisser un avis Google</a>
     </div>
@@ -4866,11 +4894,13 @@ async def google_review_backfill(request: Request):
 
     since = body.get("since", "2026-04-13")
     min_days = int(body.get("min_days_after_delivery", 2))
+    min_days_fulfilled = int(body.get("min_days_after_fulfilled", 7))
     dry_run = bool(body.get("dry_run", False))
     limit = int(body.get("limit", 500))
 
     from datetime import datetime as dt, timedelta
     cutoff = dt.utcnow() - timedelta(days=min_days)
+    cutoff_fulfilled = dt.utcnow() - timedelta(days=min_days_fulfilled)
 
     gql_url = SHOPIFY_GRAPHQL_URL
     headers = {"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"}
@@ -4925,32 +4955,52 @@ async def google_review_backfill(request: Request):
                     skipped_no_email += 1
                     continue
 
-                # Find the most recent delivered fulfillment
+                # Delivered date if available, else fall back to fulfillment date
+                # (Mondial Relay/relais souvent ne push pas l'event DELIVERED)
                 delivered_at = None
+                fulfilled_at = None
                 for f in node.get("fulfillments", []) or []:
-                    if f.get("status") == "SUCCESS" and f.get("deliveredAt"):
+                    if f.get("status") != "SUCCESS":
+                        continue
+                    if not delivered_at and f.get("deliveredAt"):
                         delivered_at = f["deliveredAt"]
-                        break
+                    if not fulfilled_at and f.get("createdAt"):
+                        fulfilled_at = f["createdAt"]
 
-                if not delivered_at:
+                event_date = None
+                event_source = None
+
+                if delivered_at:
+                    try:
+                        d = dt.strptime(delivered_at[:19], "%Y-%m-%dT%H:%M:%S")
+                        if d <= cutoff:
+                            event_date = delivered_at
+                            event_source = "delivered"
+                        else:
+                            skipped_too_recent += 1
+                            continue
+                    except Exception:
+                        pass
+
+                if not event_date and fulfilled_at:
+                    try:
+                        fd = dt.strptime(fulfilled_at[:19], "%Y-%m-%dT%H:%M:%S")
+                        if fd <= cutoff_fulfilled:
+                            event_date = fulfilled_at
+                            event_source = "fulfilled_fallback"
+                    except Exception:
+                        pass
+
+                if not event_date:
                     skipped_no_delivery += 1
-                    continue
-
-                try:
-                    delivered_dt = dt.strptime(delivered_at[:19], "%Y-%m-%dT%H:%M:%S")
-                except Exception:
-                    skipped_no_delivery += 1
-                    continue
-
-                if delivered_dt > cutoff:
-                    skipped_too_recent += 1
                     continue
 
                 eligible.append({
                     "order_name": order_name,
                     "to": to_email,
                     "first_name": first_name,
-                    "delivered_at": delivered_at,
+                    "delivered_at": event_date,
+                    "source": event_source,
                 })
 
             page_info = data.get("pageInfo", {})
@@ -4959,13 +5009,18 @@ async def google_review_backfill(request: Request):
             cursor = page_info.get("endCursor")
 
     if dry_run:
+        eligible_via_delivered = sum(1 for e in eligible if e.get("source") == "delivered")
+        eligible_via_fallback = sum(1 for e in eligible if e.get("source") == "fulfilled_fallback")
         return {
             "ok": True,
             "dry_run": True,
             "since": since,
             "min_days_after_delivery": min_days,
+            "min_days_after_fulfilled": min_days_fulfilled,
             "fetched": fetched,
             "eligible": len(eligible),
+            "eligible_via_delivered": eligible_via_delivered,
+            "eligible_via_fulfilled_fallback": eligible_via_fallback,
             "skipped": {
                 "no_email": skipped_no_email,
                 "no_delivery_date": skipped_no_delivery,
@@ -5041,8 +5096,11 @@ async def google_review_backfill(request: Request):
         "ok": True,
         "since": since,
         "min_days_after_delivery": min_days,
+        "min_days_after_fulfilled": min_days_fulfilled,
         "fetched": fetched,
         "eligible": len(eligible),
+        "eligible_via_delivered": sum(1 for e in eligible if e.get("source") == "delivered"),
+        "eligible_via_fulfilled_fallback": sum(1 for e in eligible if e.get("source") == "fulfilled_fallback"),
         "sent": sent,
         "already_sent": already_sent,
         "failed": failed,
