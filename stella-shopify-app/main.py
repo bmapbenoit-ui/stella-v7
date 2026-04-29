@@ -5174,11 +5174,18 @@ async def _gmail_access_token() -> str:
         return r.json()["access_token"]
 
 
-async def _gmail_search(access_token: str, query: str, max_results: int = 50) -> list:
-    """Search Gmail messages, return list of {id, threadId}."""
+async def _gmail_search(access_token: str, query: str, max_results: int = 50, include_spam_trash: bool = True) -> list:
+    """Search Gmail messages, return list of {id, threadId}.
+
+    include_spam_trash=True permet de couvrir les emails archivés/déplacés
+    par les workflows automatiques info@ (qui poussent en Corbeille).
+    """
     url = "https://gmail.googleapis.com/gmail/v1/users/me/messages"
+    params = {"q": query, "maxResults": max_results}
+    if include_spam_trash:
+        params["includeSpamTrash"] = "true"
     async with httpx.AsyncClient(timeout=15) as c:
-        r = await c.get(url, params={"q": query, "maxResults": max_results},
+        r = await c.get(url, params=params,
                         headers={"Authorization": f"Bearer {access_token}"})
         r.raise_for_status()
         return r.json().get("messages", []) or []
@@ -5210,14 +5217,31 @@ def _decode_gmail_part(part: dict) -> str:
 
 
 def _parse_google_review_email(message: dict) -> dict:
-    """Extract reviewer_name, rating, review_text, order_name from Google Business notif email."""
+    """Extract reviewer_name, rating, review_text, order_name from Google Business notif email.
+
+    Supports:
+    - Direct notif: "fernanda a laissé un avis sur PLANETEBEAUTY.COM"
+    - Manual forward: "Fwd: fernanda a laissé un avis..."
+    - Auto-reply: "NOUS AVONS PRIS EN COMPTE... Re: Fwd: fernanda a laissé un avis..."
+    """
     import re
     headers = {h["name"].lower(): h["value"] for h in message.get("payload", {}).get("headers", [])}
     subject = headers.get("subject", "") or ""
 
-    # Reviewer name from subject: "fernanda a laissé un avis sur PLANETEBEAUTY.COM"
-    name_match = re.match(r"^(.+?)\s+a\s+laiss[ée]\s+un\s+avis", subject, re.IGNORECASE)
-    reviewer_name = name_match.group(1).strip() if name_match else None
+    # Reviewer name = 1-2 words just before "a laissé un avis", skipping Re:/Fwd: prefixes
+    reviewer_name = None
+    parts = re.split(r"\s+a\s+laiss[ée]\s+un\s+avis", subject, maxsplit=1, flags=re.IGNORECASE)
+    if len(parts) > 1:
+        before = parts[0].strip()
+        words = [w for w in before.split() if w.lower().rstrip(":") not in ("re", "fwd", "fw", "tr")]
+        if words:
+            # Take last 1-2 words (most reviewer names are firstname OR firstname lastname)
+            if len(words) >= 2 and words[-2][:1].isalpha():
+                reviewer_name = f"{words[-2]} {words[-1]}"
+            else:
+                reviewer_name = words[-1]
+            # Strip trailing punctuation
+            reviewer_name = reviewer_name.strip(",.;:")
 
     # Body content (HTML + text parts)
     raw_text = _decode_gmail_part(message.get("payload", {}))
@@ -5357,10 +5381,12 @@ async def cron_google_reviews_poll(request: Request):
         return {"status": "error", "error": f"DB init: {e}"}
 
     try:
-        # Catch both auto-forwarded (preserves From header) and manual forwards (subject preserved).
+        # Match: auto-forwards (preserves From), manual forwards (subject preserved), even auto-replies
+        # with original content quoted in body (subject contains the review pattern).
+        # includeSpamTrash=True car workflow info@ pousse les emails traités en Corbeille.
         messages = await _gmail_search(
             access_token,
-            '(from:businessprofile-noreply@google.com OR subject:"a laissé un avis sur PLANETEBEAUTY") newer_than:60d',
+            'subject:"a laissé un avis" newer_than:60d',
             max_results=50
         )
     except Exception as e:
