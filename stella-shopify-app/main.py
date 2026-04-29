@@ -5124,6 +5124,28 @@ async def google_review_backfill(request: Request):
 
 # === GOOGLE REVIEWS POLLING (notif Gmail → store credit + product reviews) ===
 
+async def _gmail_access_token() -> str:
+    """Refresh Gmail OAuth access token (scope gmail.readonly).
+
+    Uses GMAIL_* env vars (separate OAuth client from Google Ads/Analytics universal token,
+    since the universal token does not include gmail.readonly scope).
+    """
+    refresh_token = os.getenv("GMAIL_REFRESH_TOKEN", "")
+    client_id = os.getenv("GMAIL_CLIENT_ID", "")
+    client_secret = os.getenv("GMAIL_CLIENT_SECRET", "")
+    if not refresh_token or not client_id or not client_secret:
+        raise ValueError("Gmail OAuth not configured (GMAIL_REFRESH_TOKEN/GMAIL_CLIENT_ID/GMAIL_CLIENT_SECRET missing)")
+    async with httpx.AsyncClient(timeout=10) as c:
+        r = await c.post("https://oauth2.googleapis.com/token", data={
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "refresh_token": refresh_token,
+            "grant_type": "refresh_token"
+        })
+        r.raise_for_status()
+        return r.json()["access_token"]
+
+
 async def _gmail_search(access_token: str, query: str, max_results: int = 50) -> list:
     """Search Gmail messages, return list of {id, threadId}."""
     url = "https://gmail.googleapis.com/gmail/v1/users/me/messages"
@@ -5279,9 +5301,9 @@ async def cron_google_reviews_poll(request: Request):
     results = {"checked": 0, "new": 0, "credited": 0, "needs_manual": 0, "duplicates": 0, "errors": []}
 
     try:
-        access_token = await _google_access_token()
+        access_token = await _gmail_access_token()
     except Exception as e:
-        return {"status": "error", "error": f"OAuth: {e}"}
+        return {"status": "error", "error": f"Gmail OAuth: {e}"}
 
     db = get_db()
     if not db:
