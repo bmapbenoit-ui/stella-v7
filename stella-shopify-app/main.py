@@ -5124,6 +5124,34 @@ async def google_review_backfill(request: Request):
 
 # === GOOGLE REVIEWS POLLING (notif Gmail → store credit + product reviews) ===
 
+@app.get("/api/admin/gmail/debug")
+async def admin_gmail_debug(request: Request, q: str = "newer_than:7d", limit: int = 10):
+    """Diagnostic: list recent Gmail messages matching query. Returns subject + from + date."""
+    api_key = request.headers.get("X-API-Key", "")
+    if api_key != "stella-mem-2026-planetebeauty":
+        raise HTTPException(401, "Invalid API key")
+
+    try:
+        access_token = await _gmail_access_token()
+        msgs = await _gmail_search(access_token, q, max_results=limit)
+        out = []
+        for m in msgs[:limit]:
+            try:
+                full = await _gmail_get_message(access_token, m["id"])
+                hdrs = {h["name"].lower(): h["value"] for h in full.get("payload", {}).get("headers", [])}
+                out.append({
+                    "id": m["id"],
+                    "subject": hdrs.get("subject", "")[:120],
+                    "from": hdrs.get("from", "")[:80],
+                    "date": hdrs.get("date", ""),
+                })
+            except Exception as e:
+                out.append({"id": m["id"], "error": str(e)[:100]})
+        return {"ok": True, "query": q, "count": len(msgs), "samples": out}
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:300]}
+
+
 async def _gmail_access_token() -> str:
     """Refresh Gmail OAuth access token (scope gmail.readonly).
 
