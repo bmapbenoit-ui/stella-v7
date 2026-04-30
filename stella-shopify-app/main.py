@@ -524,6 +524,8 @@ async def startup():
                       args=["google-reviews-poll", "/api/cron/google-reviews-poll"])
     scheduler.add_job(_run_cron, 'interval', minutes=30, id='google_places_reviews_poll',
                       args=["google-places-reviews-poll", "/api/cron/google-places-reviews-poll"])
+    scheduler.add_job(_run_cron, 'cron', hour=7, minute=0, id='google_review_backfill_daily',
+                      args=["google-review-backfill-daily", "/api/cron/google-review-backfill-daily"])
     # ══════ STELLA OS — Operations Management crons ══════
     scheduler.add_job(_run_cron, 'interval', minutes=5, id='action_executor',
                       args=["action-executor", "/api/cron/action-executor"])
@@ -5602,6 +5604,49 @@ L'equipe PlaneteBeauty
     except Exception as e:
         logger.error(f"Google review credit confirmation email failed for {to_email}: {e}")
         return False
+
+
+@app.post("/api/cron/google-review-backfill-daily")
+async def cron_google_review_backfill_daily(request: Request):
+    """Daily cron 9h CEST: envoie les emails de demande d'avis aux nouvelles commandes éligibles.
+
+    Auth: X-API-Key.
+    Logique: appelle /api/admin/google-review/backfill avec since=30j, dry_run=false.
+    Dedup via google_review_emails table (table créée par le backfill) — pas de double-envoi.
+    Filtre fallback fulfilled+7j contourne le manque d'event DELIVERED Mondial Relay.
+    """
+    api_key = request.headers.get("X-API-Key", "")
+    if api_key != "stella-mem-2026-planetebeauty":
+        raise HTTPException(401, "Invalid API key")
+
+    flow_token = os.getenv("FLOW_WEBHOOK_TOKEN", "")
+    if not flow_token:
+        return {"status": "error", "error": "FLOW_WEBHOOK_TOKEN not set"}
+
+    from datetime import datetime as dt, timedelta
+    since = (dt.utcnow() - timedelta(days=30)).strftime("%Y-%m-%d")
+
+    base_url = f"http://localhost:{os.getenv('PORT', '8000')}"
+    try:
+        async with httpx.AsyncClient(timeout=600) as c:
+            r = await c.post(f"{base_url}/api/admin/google-review/backfill",
+                             json={"since": since,
+                                   "min_days_after_delivery": 2,
+                                   "min_days_after_fulfilled": 7,
+                                   "dry_run": False},
+                             headers={"X-Flow-Token": flow_token, "Content-Type": "application/json"})
+            r.raise_for_status()
+            data = r.json()
+    except Exception as e:
+        return {"status": "error", "error": str(e)[:300]}
+
+    log_activity("google_review_backfill_daily",
+                 f"Daily backfill: {data.get('sent', 0)} envoyés, {data.get('already_sent', 0)} déjà fait",
+                 {"sent": data.get("sent", 0), "already_sent": data.get("already_sent", 0),
+                  "failed": data.get("failed", 0), "eligible": data.get("eligible", 0)},
+                 source="cron")
+
+    return {"status": "ok", "since": since, **data}
 
 
 @app.post("/api/cron/google-places-reviews-poll")
