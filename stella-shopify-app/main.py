@@ -5126,6 +5126,183 @@ async def google_review_backfill(request: Request):
 
 # === GOOGLE REVIEWS POLLING (notif Gmail → store credit + product reviews) ===
 
+@app.post("/api/admin/google-review/cleanup-free-gift-pollution")
+async def admin_cleanup_free_gift_reviews(request: Request):
+    """Delete Google review rows from product_reviews that are attached to Free Gift products.
+    Safe: only deletes source='google_review' AND product_handle starts with 'docapp-free-gift-'.
+    """
+    api_key = request.headers.get("X-API-Key", "")
+    if api_key != "stella-mem-2026-planetebeauty":
+        raise HTTPException(401, "Invalid API key")
+    db = get_db()
+    if not db:
+        return {"ok": False, "error": "no db"}
+    try:
+        cur = db.cursor()
+        cur.execute("""DELETE FROM product_reviews
+                       WHERE source='google_review' AND product_handle LIKE 'docapp-free-gift-%'
+                       RETURNING product_handle, reviewer_name, order_number""")
+        deleted = cur.fetchall()
+        db.commit(); cur.close(); db.close()
+        return {"ok": True, "deleted_count": len(deleted),
+                "deleted": [{"handle": r[0], "reviewer": r[1], "order": r[2]} for r in deleted]}
+    except Exception as e:
+        try: db.close()
+        except: pass
+        return {"ok": False, "error": str(e)[:300]}
+
+
+@app.post("/api/admin/google-review/manual-credit")
+async def admin_google_review_manual_credit(request: Request):
+    """Crédite manuellement 5€ pour un avis Google (cas où # tronqué dans email mais récupéré sur GBP).
+
+    Body JSON:
+      - order_name: "#XXXXX" (required)
+      - reviewer_name: str (optional, default "Client Google")
+      - rating: int 1-5 (optional, default 5)
+      - review_text: str (optional)
+
+    Sécurité: vérifie que l'order n'est pas déjà créditée (DB google_reviews_processed status='credited').
+    Effet: storeCreditAccountCredit 5€ + INSERT google_reviews_processed status='credited' (avec marker manual)
+           + INSERT product_reviews pour chaque produit non-FreeGift de la commande
+           + email confirmation au client.
+    """
+    api_key = request.headers.get("X-API-Key", "")
+    if api_key != "stella-mem-2026-planetebeauty":
+        raise HTTPException(401, "Invalid API key")
+    try:
+        body = await request.json()
+    except Exception:
+        return {"ok": False, "error": "Invalid JSON"}
+    order_name = (body.get("order_name") or "").strip()
+    if not order_name:
+        return {"ok": False, "error": "order_name required (e.g. #20790)"}
+    if not order_name.startswith("#"):
+        order_name = "#" + order_name.lstrip("#")
+
+    reviewer_name = (body.get("reviewer_name") or "Client Google").strip()
+    rating = int(body.get("rating") or 5)
+    review_text = (body.get("review_text") or "")[:2000]
+
+    db = get_db()
+    if not db:
+        return {"ok": False, "error": "no db"}
+    cur = db.cursor()
+    cur.execute("""CREATE TABLE IF NOT EXISTS google_reviews_processed (
+        id SERIAL PRIMARY KEY, gmail_message_id TEXT UNIQUE NOT NULL,
+        reviewer_name TEXT, rating INTEGER, review_text TEXT,
+        order_name TEXT, customer_id TEXT, status TEXT,
+        credited_amount NUMERIC(10,2), processed_at TIMESTAMP DEFAULT NOW())""")
+    db.commit()
+
+    # Anti-double-credit: si déjà crédité dans notre table → refus
+    cur.execute("SELECT processed_at, status FROM google_reviews_processed WHERE order_name=%s AND status='credited' LIMIT 1", (order_name,))
+    row = cur.fetchone()
+    if row:
+        cur.close(); db.close()
+        return {"ok": False, "error": "already_credited",
+                "previously_credited_at": row[0].isoformat() if row[0] else None}
+
+    gql_url = SHOPIFY_GRAPHQL_URL
+    headers_gql = {"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"}
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        try:
+            order_q = await client.post(gql_url, json={"query": f'''{{
+                orders(first:1, query:"name:{order_name}") {{
+                    edges {{ node {{
+                        id name displayFulfillmentStatus
+                        customer {{ id email firstName }}
+                        lineItems(first:20) {{ edges {{ node {{ title product {{ handle id }} }} }} }}
+                    }} }}
+                }}
+            }}'''}, headers=headers_gql)
+            edges = order_q.json().get("data", {}).get("orders", {}).get("edges", []) or []
+        except Exception as e:
+            cur.close(); db.close()
+            return {"ok": False, "error": f"order lookup: {str(e)[:200]}"}
+
+        if not edges:
+            cur.close(); db.close()
+            return {"ok": False, "error": f"order {order_name} not found in Shopify"}
+
+        order = edges[0]["node"]
+        customer = order.get("customer") or {}
+        customer_id = customer.get("id")
+        customer_email = customer.get("email", "") or ""
+        customer_first_name = customer.get("firstName", "") or ""
+        if not customer_id:
+            cur.close(); db.close()
+            return {"ok": False, "error": "order has no associated customer"}
+
+        # Crédit 5€
+        credit_mutation = """mutation($id: ID!, $credit: StoreCreditAccountCreditInput!) {
+            storeCreditAccountCredit(id: $id, creditInput: $credit) {
+                storeCreditAccountTransaction { id }
+                userErrors { field message }
+            }
+        }"""
+        try:
+            cr = await client.post(gql_url, json={
+                "query": credit_mutation,
+                "variables": {
+                    "id": customer_id,
+                    "credit": {"creditAmount": {"amount": "5.00", "currencyCode": "EUR"}}
+                }
+            }, headers=headers_gql)
+            cr_data = cr.json().get("data", {}).get("storeCreditAccountCredit", {}) or {}
+            cr_errors = cr_data.get("userErrors", []) or []
+        except Exception as e:
+            cur.close(); db.close()
+            return {"ok": False, "error": f"credit call: {str(e)[:200]}"}
+
+        if cr_errors:
+            cur.close(); db.close()
+            return {"ok": False, "error": f"shopify credit error: {cr_errors[0].get('message', '')}"}
+
+        # Insert review pour chaque produit non-FreeGift
+        review_title = (review_text[:80] + "...") if len(review_text) > 80 else (review_text or "Avis Google")
+        line_items = order.get("lineItems", {}).get("edges", []) or []
+        products_with_review = []
+        for item in line_items:
+            p = item.get("node", {}).get("product", {}) or {}
+            p_handle = p.get("handle", "")
+            p_id = p.get("id", "")
+            if p_handle and not p_handle.startswith("docapp-free-gift-"):
+                try:
+                    cur.execute("""INSERT INTO product_reviews
+                        (title, body, rating, review_date, source, curated, reviewer_name, reviewer_email, product_id, product_handle, order_number)
+                        VALUES (%s,%s,%s,NOW(),%s,%s,%s,%s,%s,%s,%s)""",
+                        (review_title, review_text, rating, "google_review", "ok",
+                         reviewer_name, customer_email, p_id, p_handle, order_name))
+                    products_with_review.append(p_handle)
+                except Exception as e:
+                    logger.warning(f"Review insert {p_handle}: {e}")
+
+        # Marker manual-credit dans google_reviews_processed (gmail_message_id préfixé manual:)
+        manual_msg_id = f"manual:{order_name}:{int(__import__('time').time())}"
+        cur.execute("""INSERT INTO google_reviews_processed
+            (gmail_message_id, reviewer_name, rating, review_text, order_name, customer_id, status, credited_amount)
+            VALUES (%s,%s,%s,%s,%s,%s,'credited',%s) ON CONFLICT (gmail_message_id) DO NOTHING""",
+            (manual_msg_id, reviewer_name, rating, review_text, order_name, customer_id, 5.00))
+        db.commit()
+        cur.close(); db.close()
+
+        log_activity("google_review_credit",
+                     f"Avis Google {order_name}: 5€ crédité MANUELLEMENT à {customer_email}",
+                     {"order_name": order_name, "reviewer": reviewer_name, "rating": rating, "amount": 5.00, "source": "manual"},
+                     source="admin", customer_email=customer_email, order_name=order_name)
+
+        try:
+            await _send_google_review_credit_confirmation_email(customer_email, customer_first_name, order_name)
+        except Exception as e:
+            logger.warning(f"Confirmation email {customer_email}: {e}")
+
+        return {"ok": True, "credited": True, "order_name": order_name,
+                "customer_email": customer_email, "products_with_review": products_with_review,
+                "amount": 5.00}
+
+
 @app.post("/api/admin/google-review/cleanup-failed")
 async def admin_google_review_cleanup_failed(request: Request):
     """Delete rows with non-credited statuses (order_not_found, credit_failed, no_customer)
@@ -5609,7 +5786,9 @@ async def cron_google_places_reviews_poll(request: Request):
                 p = item.get("node", {}).get("product", {}) or {}
                 p_handle = p.get("handle", "")
                 p_id = p.get("id", "")
-                if p_handle:
+                # Skip Free Gifts and technical products (handles starting with docapp-free-gift-)
+                # to avoid polluting their pages with reviews about real perfumes.
+                if p_handle and not p_handle.startswith("docapp-free-gift-"):
                     try:
                         cur.execute("""INSERT INTO product_reviews
                             (title, body, rating, review_date, source, curated, reviewer_name, reviewer_email, product_id, product_handle, order_number)
@@ -5834,7 +6013,9 @@ async def cron_google_reviews_poll(request: Request):
                 p = item.get("node", {}).get("product", {}) or {}
                 p_handle = p.get("handle", "")
                 p_id = p.get("id", "")
-                if p_handle:
+                # Skip Free Gifts and technical products (handles starting with docapp-free-gift-)
+                # to avoid polluting their pages with reviews about real perfumes.
+                if p_handle and not p_handle.startswith("docapp-free-gift-"):
                     try:
                         cur.execute("""INSERT INTO product_reviews
                             (title, body, rating, review_date, source, curated, reviewer_name, reviewer_email, product_id, product_handle, order_number)
