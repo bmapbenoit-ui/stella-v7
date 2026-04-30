@@ -5442,13 +5442,17 @@ async def cron_google_reviews_poll(request: Request):
         return {"status": "error", "error": f"DB init: {e}"}
 
     try:
-        # Match: auto-forwards (preserves From), manual forwards (subject preserved), even auto-replies
-        # with original content quoted in body (subject contains the review pattern).
+        # Match all Google Business review notification formats:
+        # - Individual FR: "fernanda a laissé un avis sur PLANETEBEAUTY.COM"
+        # - Individual EN: "Manon left a review for PLANETEBEAUTY.COM"
+        # - Grouped FR: "PLANETEBEAUTY.COM, vous avez 3 nouveaux avis"
+        # - Grouped EN: "PLANETEBEAUTY.COM, you have 3 new reviews"
+        # - Manual forwards (Fwd:) and auto-replies (Re:) with same subject pattern
         # includeSpamTrash=True car workflow info@ pousse les emails traités en Corbeille.
         messages = await _gmail_search(
             access_token,
-            'subject:"a laissé un avis" newer_than:60d',
-            max_results=50
+            'from:businessprofile-noreply@google.com OR subject:"a laissé un avis" OR subject:"left a review" OR subject:"nouveaux avis" OR subject:"new reviews" newer_than:60d',
+            max_results=100
         )
     except Exception as e:
         cur.close(); db.close()
