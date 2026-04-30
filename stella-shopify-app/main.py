@@ -5124,6 +5124,30 @@ async def google_review_backfill(request: Request):
 
 # === GOOGLE REVIEWS POLLING (notif Gmail → store credit + product reviews) ===
 
+@app.post("/api/admin/google-review/cleanup-failed")
+async def admin_google_review_cleanup_failed(request: Request):
+    """Delete rows with non-credited statuses (order_not_found, credit_failed, no_customer)
+    so the cron can reprocess them with the latest parser/regex.
+    Auth: X-API-Key. Idempotent.
+    """
+    api_key = request.headers.get("X-API-Key", "")
+    if api_key != "stella-mem-2026-planetebeauty":
+        raise HTTPException(401, "Invalid API key")
+    db = get_db()
+    if not db:
+        return {"ok": False, "error": "no db"}
+    try:
+        cur = db.cursor()
+        cur.execute("DELETE FROM google_reviews_processed WHERE status IN ('order_not_found','credit_failed','no_customer','needs_manual_review') RETURNING gmail_message_id")
+        deleted = [r[0] for r in cur.fetchall()]
+        db.commit(); cur.close(); db.close()
+        return {"ok": True, "deleted_count": len(deleted), "deleted_msg_ids": deleted}
+    except Exception as e:
+        try: db.close()
+        except: pass
+        return {"ok": False, "error": str(e)[:300]}
+
+
 @app.get("/api/admin/google-review/stats")
 async def admin_google_review_stats(request: Request):
     """Return aggregate stats for the Google Reviews credit pipeline.
