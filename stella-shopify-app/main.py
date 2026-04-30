@@ -5153,7 +5153,7 @@ async def admin_google_review_stats(request: Request):
         total = cur.fetchone()[0]
         # Backfill emails sent reference (from log_activity entries)
         cur.execute("""SELECT COUNT(*)::int FROM activity_log
-                       WHERE action='google_review_backfill' AND created_at > NOW() - INTERVAL '30 days'""")
+                       WHERE type='google_review_backfill' AND timestamp > NOW() - INTERVAL '30 days'""")
         try:
             backfill_runs = cur.fetchone()[0]
         except Exception:
