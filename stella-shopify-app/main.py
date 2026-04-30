@@ -522,6 +522,8 @@ async def startup():
                       args=["cashback-reminder", "/api/cron/cashback-reminder"])
     scheduler.add_job(_run_cron, 'interval', minutes=30, id='google_reviews_poll',
                       args=["google-reviews-poll", "/api/cron/google-reviews-poll"])
+    scheduler.add_job(_run_cron, 'interval', minutes=30, id='google_places_reviews_poll',
+                      args=["google-places-reviews-poll", "/api/cron/google-places-reviews-poll"])
     # ══════ STELLA OS — Operations Management crons ══════
     scheduler.add_job(_run_cron, 'interval', minutes=5, id='action_executor',
                       args=["action-executor", "/api/cron/action-executor"])
@@ -5423,6 +5425,231 @@ L'equipe PlaneteBeauty
     except Exception as e:
         logger.error(f"Google review credit confirmation email failed for {to_email}: {e}")
         return False
+
+
+@app.post("/api/cron/google-places-reviews-poll")
+async def cron_google_places_reviews_poll(request: Request):
+    """Cron 30 min: lit l'API Google Places (texte INTÉGRAL des avis) → crédit 5€ + transfert avis produits.
+
+    Source: GET https://places.googleapis.com/v1/places/{PLACE_ID}?fields=reviews
+    Avantage vs Gmail: texte complet (pas tronqué), 5 avis les plus récents.
+    Idempotent via google_reviews_processed (gmail_message_id stocke ici le review.name unique de Google).
+    """
+    api_key = request.headers.get("X-API-Key", "")
+    if api_key != "stella-mem-2026-planetebeauty":
+        raise HTTPException(401, "Invalid API key")
+
+    PLACES_API_KEY = os.getenv("GOOGLE_PLACES_API_KEY", "")
+    PLACE_ID = os.getenv("GOOGLE_PLACE_ID", "")
+    if not PLACES_API_KEY or not PLACE_ID:
+        return {"status": "error", "error": "GOOGLE_PLACES_API_KEY or GOOGLE_PLACE_ID env var missing"}
+
+    results = {"checked": 0, "new": 0, "credited": 0, "needs_manual": 0, "duplicates": 0, "errors": []}
+
+    # Fetch reviews from Google Places API
+    try:
+        async with httpx.AsyncClient(timeout=15) as c:
+            r = await c.get(
+                f"https://places.googleapis.com/v1/places/{PLACE_ID}",
+                headers={
+                    "X-Goog-Api-Key": PLACES_API_KEY,
+                    "X-Goog-FieldMask": "id,displayName,rating,userRatingCount,reviews"
+                }
+            )
+            r.raise_for_status()
+            place_data = r.json()
+    except Exception as e:
+        return {"status": "error", "error": f"Places API: {str(e)[:200]}"}
+
+    reviews = place_data.get("reviews", []) or []
+    results["checked"] = len(reviews)
+
+    db = get_db()
+    if not db:
+        return {"status": "error", "error": "no db"}
+
+    cur = db.cursor()
+    # Reuse same table as Gmail-based cron — gmail_message_id stores the review.name unique ID
+    cur.execute("""CREATE TABLE IF NOT EXISTS google_reviews_processed (
+        id SERIAL PRIMARY KEY,
+        gmail_message_id TEXT UNIQUE NOT NULL,
+        reviewer_name TEXT,
+        rating INTEGER,
+        review_text TEXT,
+        order_name TEXT,
+        customer_id TEXT,
+        status TEXT,
+        credited_amount NUMERIC(10,2),
+        processed_at TIMESTAMP DEFAULT NOW()
+    )""")
+    db.commit()
+
+    gql_url = SHOPIFY_GRAPHQL_URL
+    headers_gql = {"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN, "Content-Type": "application/json"}
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        for review in reviews:
+            review_id = review.get("name", "")  # e.g. "places/ChIJ.../reviews/Ci9DQ..."
+            if not review_id:
+                continue
+
+            cur.execute("SELECT 1 FROM google_reviews_processed WHERE gmail_message_id=%s", (review_id,))
+            if cur.fetchone():
+                results["duplicates"] += 1
+                continue
+
+            results["new"] += 1
+
+            # Extract review fields
+            reviewer_name = (review.get("authorAttribution", {}) or {}).get("displayName", "Client Google")
+            rating = int(review.get("rating") or 5)
+            text_obj = review.get("originalText") or review.get("text") or {}
+            review_text = (text_obj.get("text") or "")[:2000]
+
+            # Plausibility filter for order number (PB range 20000-29999)
+            import re as _re
+            all_matches = _re.findall(r"#\s*(\d{5})", review_text)
+            plausible = [m for m in all_matches if 20000 <= int(m) <= 29999]
+            order_name = "#" + plausible[0] if plausible else None
+
+            if not order_name:
+                cur.execute("""INSERT INTO google_reviews_processed
+                    (gmail_message_id, reviewer_name, rating, review_text, status)
+                    VALUES (%s,%s,%s,%s,'needs_manual_review') ON CONFLICT (gmail_message_id) DO NOTHING""",
+                    (review_id, reviewer_name, rating, review_text))
+                db.commit()
+                results["needs_manual"] += 1
+                continue
+
+            # Lookup Shopify order
+            try:
+                order_q = await client.post(gql_url, json={"query": f'''{{
+                    orders(first:1, query:"name:{order_name}") {{
+                        edges {{ node {{
+                            id name displayFulfillmentStatus
+                            customer {{ id email firstName }}
+                            lineItems(first:20) {{ edges {{ node {{ title product {{ handle id }} }} }} }}
+                        }} }}
+                    }}
+                }}'''}, headers=headers_gql)
+                edges = order_q.json().get("data", {}).get("orders", {}).get("edges", []) or []
+            except Exception as e:
+                results["errors"].append(f"{order_name} lookup: {str(e)[:100]}")
+                continue
+
+            if not edges:
+                cur.execute("""INSERT INTO google_reviews_processed
+                    (gmail_message_id, reviewer_name, rating, review_text, order_name, status)
+                    VALUES (%s,%s,%s,%s,%s,'order_not_found') ON CONFLICT (gmail_message_id) DO NOTHING""",
+                    (review_id, reviewer_name, rating, review_text, order_name))
+                db.commit()
+                results["needs_manual"] += 1
+                continue
+
+            order = edges[0]["node"]
+            customer = order.get("customer") or {}
+            customer_id = customer.get("id")
+            customer_email = customer.get("email", "") or ""
+            customer_first_name = customer.get("firstName", "") or ""
+
+            if not customer_id:
+                cur.execute("""INSERT INTO google_reviews_processed
+                    (gmail_message_id, reviewer_name, rating, review_text, order_name, status)
+                    VALUES (%s,%s,%s,%s,%s,'no_customer') ON CONFLICT (gmail_message_id) DO NOTHING""",
+                    (review_id, reviewer_name, rating, review_text, order_name))
+                db.commit()
+                results["needs_manual"] += 1
+                continue
+
+            # Check not already credited for this order
+            cur.execute("SELECT 1 FROM google_reviews_processed WHERE order_name=%s AND status='credited'", (order_name,))
+            if cur.fetchone():
+                cur.execute("""INSERT INTO google_reviews_processed
+                    (gmail_message_id, reviewer_name, rating, review_text, order_name, customer_id, status)
+                    VALUES (%s,%s,%s,%s,%s,%s,'duplicate_order') ON CONFLICT (gmail_message_id) DO NOTHING""",
+                    (review_id, reviewer_name, rating, review_text, order_name, customer_id))
+                db.commit()
+                results["duplicates"] += 1
+                continue
+
+            # Credit 5€
+            try:
+                credit_mutation = """mutation($id: ID!, $credit: StoreCreditAccountCreditInput!) {
+                    storeCreditAccountCredit(id: $id, creditInput: $credit) {
+                        storeCreditAccountTransaction { id }
+                        userErrors { field message }
+                    }
+                }"""
+                cr = await client.post(gql_url, json={
+                    "query": credit_mutation,
+                    "variables": {
+                        "id": customer_id,
+                        "credit": {"creditAmount": {"amount": "5.00", "currencyCode": "EUR"}}
+                    }
+                }, headers=headers_gql)
+                cr_errors = (cr.json().get("data", {}).get("storeCreditAccountCredit", {}) or {}).get("userErrors", []) or []
+            except Exception as e:
+                results["errors"].append(f"{order_name} credit: {str(e)[:100]}")
+                continue
+
+            if cr_errors:
+                msg_err = cr_errors[0].get("message", "")
+                results["errors"].append(f"{order_name}: {msg_err}")
+                cur.execute("""INSERT INTO google_reviews_processed
+                    (gmail_message_id, reviewer_name, rating, review_text, order_name, customer_id, status)
+                    VALUES (%s,%s,%s,%s,%s,%s,'credit_failed') ON CONFLICT (gmail_message_id) DO NOTHING""",
+                    (review_id, reviewer_name, rating, review_text, order_name, customer_id))
+                db.commit()
+                continue
+
+            # Insert review into product_reviews for each product in the order
+            review_title = (review_text[:80] + "...") if len(review_text) > 80 else (review_text or "Avis Google")
+            line_items = order.get("lineItems", {}).get("edges", []) or []
+            for item in line_items:
+                p = item.get("node", {}).get("product", {}) or {}
+                p_handle = p.get("handle", "")
+                p_id = p.get("id", "")
+                if p_handle:
+                    try:
+                        cur.execute("""INSERT INTO product_reviews
+                            (title, body, rating, review_date, source, curated, reviewer_name, reviewer_email, product_id, product_handle, order_number)
+                            VALUES (%s,%s,%s,NOW(),%s,%s,%s,%s,%s,%s,%s)""",
+                            (review_title, review_text, rating, "google_review", "ok",
+                             reviewer_name, customer_email, p_id, p_handle, order_name))
+                    except Exception as e:
+                        logger.warning(f"Review insert {p_handle}: {e}")
+
+            cur.execute("""INSERT INTO google_reviews_processed
+                (gmail_message_id, reviewer_name, rating, review_text, order_name, customer_id, status, credited_amount)
+                VALUES (%s,%s,%s,%s,%s,%s,'credited',%s) ON CONFLICT (gmail_message_id) DO NOTHING""",
+                (review_id, reviewer_name, rating, review_text, order_name, customer_id, 5.00))
+            db.commit()
+
+            results["credited"] += 1
+            log_activity("google_review_credit",
+                         f"Avis Google {order_name}: 5€ crédité à {customer_email} (via Places API)",
+                         {"order_name": order_name, "reviewer": reviewer_name, "rating": rating, "amount": 5.00, "source": "places_api"},
+                         source="cron", customer_email=customer_email, order_name=order_name)
+
+            try:
+                await _send_google_review_credit_confirmation_email(customer_email, customer_first_name, order_name)
+            except Exception as e:
+                logger.warning(f"Confirmation email {customer_email}: {e}")
+
+    cur.close(); db.close()
+
+    db2 = get_db()
+    if db2:
+        try:
+            cur2 = db2.cursor()
+            cur2.execute("INSERT INTO cron_results (cron_name, result_data) VALUES (%s, %s)",
+                ("google-places-reviews-poll", json.dumps(results)))
+            db2.commit(); cur2.close(); db2.close()
+        except:
+            try: db2.close()
+            except: pass
+
+    return {"status": "ok", **results}
 
 
 @app.post("/api/cron/google-reviews-poll")
