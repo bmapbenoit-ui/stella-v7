@@ -5316,9 +5316,11 @@ def _parse_google_review_email(message: dict) -> dict:
     clean_text = re.sub(r"&[a-z]+;", " ", clean_text)
     clean_text = re.sub(r"\s+", " ", clean_text).strip()
 
-    # Order number — accept #XXXXX, # XXXXX, n°XXXXX
-    order_match = re.search(r"#\s*(\d{5})", clean_text)
-    order_name = "#" + order_match.group(1) if order_match else None
+    # Order number — accept #XXXXX with plausibility filter to skip random UI numbers
+    # PB order names are currently in [20000, 29999] range (à étendre quand on dépasse 29999)
+    all_matches = re.findall(r"#\s*(\d{5})", clean_text)
+    plausible = [m for m in all_matches if 20000 <= int(m) <= 29999]
+    order_name = "#" + plausible[0] if plausible else None
 
     # Review text — extract block between reviewer name and "Répondre" / "Afficher tous"
     review_text = None
