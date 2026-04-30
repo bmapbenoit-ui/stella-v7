@@ -5174,11 +5174,16 @@ async def admin_google_review_stats(request: Request):
 
 
 @app.get("/api/admin/gmail/debug")
-async def admin_gmail_debug(request: Request, q: str = "newer_than:7d", limit: int = 10):
-    """Diagnostic: list recent Gmail messages matching query. Returns subject + from + date."""
+async def admin_gmail_debug(request: Request, q: str = "newer_than:7d", limit: int = 10, body: bool = False, body_chars: int = 3000):
+    """Diagnostic: list recent Gmail messages matching query. Returns subject + from + date.
+
+    body=true → also returns plain text body (HTML stripped, capped at body_chars).
+    """
     api_key = request.headers.get("X-API-Key", "")
     if api_key != "stella-mem-2026-planetebeauty":
         raise HTTPException(401, "Invalid API key")
+
+    import re as _re_local
 
     try:
         access_token = await _gmail_access_token()
@@ -5188,12 +5193,19 @@ async def admin_gmail_debug(request: Request, q: str = "newer_than:7d", limit: i
             try:
                 full = await _gmail_get_message(access_token, m["id"])
                 hdrs = {h["name"].lower(): h["value"] for h in full.get("payload", {}).get("headers", [])}
-                out.append({
+                row = {
                     "id": m["id"],
-                    "subject": hdrs.get("subject", "")[:120],
-                    "from": hdrs.get("from", "")[:80],
+                    "subject": hdrs.get("subject", "")[:200],
+                    "from": hdrs.get("from", "")[:120],
                     "date": hdrs.get("date", ""),
-                })
+                }
+                if body:
+                    raw = _decode_gmail_part(full.get("payload", {}))
+                    clean = _re_local.sub(r"<[^>]+>", " ", raw)
+                    clean = _re_local.sub(r"&[a-z#0-9]+;", " ", clean)
+                    clean = _re_local.sub(r"\s+", " ", clean).strip()
+                    row["body_clean"] = clean[:body_chars]
+                out.append(row)
             except Exception as e:
                 out.append({"id": m["id"], "error": str(e)[:100]})
         return {"ok": True, "query": q, "count": len(msgs), "samples": out}
