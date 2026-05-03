@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
+<title>Maison Mataha — Variation C · Editorial Dark</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;1,300;1,400&family=Inter:wght@400;500;600;700&display=swap"/>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; background: #000; font-family: 'Inter', system-ui, sans-serif; color: #f5ede0; overflow: hidden; }
+  #root { position: absolute; inset: 0; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" crossorigin="anonymous"></script>
+
+<script type="text/babel" src="animations.jsx"></script>
+<script type="text/babel" src="scenes.jsx"></script>
+<script type="text/babel" src="videos.jsx"></script>
+
+<script type="text/babel" data-presets="react">
+function App() {
+  const [muted, setMuted] = React.useState(true);
+  const onToggleMute = () => {
+    setMuted(m => {
+      const next = !m;
+      if (window.MahatahSoundInstance) {
+        window.MahatahSoundInstance.unlock();
+        window.MahatahSoundInstance.setMuted(next);
+      }
+      return next;
+    });
+  };
+  return <VideoC muted={muted} onToggleMute={onToggleMute}/>;
+}
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>
