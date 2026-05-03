@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=1080, initial-scale=1"/>
+<title>Maison Mataha — Render</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;1,300;1,400&family=Inter:wght@400;500;600;700&display=swap"/>
+<style>
+  html, body { margin: 0; padding: 0; width: 1080px; height: 1920px; background: #000; font-family: 'Inter', system-ui, sans-serif; color: #f5ede0; overflow: hidden; }
+  #root { position: absolute; left: 0; top: 0; width: 1080px; height: 1920px; }
+</style>
+</head>
+<body>
+<script>
+  // Must be set before animations.jsx evaluates so Stage picks the render path.
+  window.__renderMode = true;
+  window.__renderTime = 0;
+</script>
+<div id="root"></div>
+
+<script src="vendor/react.development.js"></script>
+<script src="vendor/react-dom.development.js"></script>
+<script src="vendor/babel.min.js"></script>
+
+<script type="text/babel" src="animations.jsx"></script>
+<script type="text/babel" src="scenes.jsx"></script>
+<script type="text/babel" src="videos.jsx"></script>
+
+<script type="text/babel" data-presets="react">
+const v = (new URLSearchParams(location.search).get('v') || 'A').toUpperCase();
+const Comp = ({ A: VideoA, B: VideoB, C: VideoC })[v] || VideoA;
+ReactDOM.createRoot(document.getElementById('root')).render(<Comp muted={true} onToggleMute={() => {}}/>);
+
+// Signal readiness once fonts + key images are loaded — render-videos.mjs
+// waits on this before stepping frames.
+(async () => {
+  try {
+    if (document.fonts && document.fonts.ready) await document.fonts.ready;
+  } catch {}
+  const preload = (src) => new Promise(res => {
+    const i = new Image();
+    i.onload = () => res(); i.onerror = () => res();
+    i.src = src;
+  });
+  await Promise.all(['assets/hero-spray.png', 'assets/bottle-cutout.png'].map(preload));
+  // Two RAFs to let React commit + first paint happen
+  await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+  window.__renderReady = true;
+})();
+</script>
+</body>
+</html>

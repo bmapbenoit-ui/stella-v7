@@ -320,7 +320,39 @@ function RectSprite({
 }
 
 
-function Stage({
+function Stage(props) {
+  const renderMode = typeof window !== 'undefined' && window.__renderMode;
+  return renderMode ? <RenderStage {...props}/> : <PlaybackStage {...props}/>;
+}
+
+// Headless capture stage: no RAF, no playback bar, time driven externally
+// via window.__renderTime + window.__forceTick(). Used by render-videos.mjs
+// to step through frames deterministically at exact 1080x1920 viewport.
+function RenderStage({ width = 1080, height = 1920, duration = 10, background = '#000', children }) {
+  const [, force] = React.useState(0);
+  React.useEffect(() => {
+    // flushSync forces React to commit synchronously before page.screenshot
+    // fires, eliminating the need for RAF round-trips in render-videos.mjs.
+    window.__forceTick = () => ReactDOM.flushSync(() => force(x => x + 1));
+    return () => { if (window.__forceTick === force) delete window.__forceTick; };
+  }, []);
+  const time = (typeof window !== 'undefined' && window.__renderTime) || 0;
+  const ctxValue = React.useMemo(
+    () => ({ time, duration, playing: false, setTime: () => {}, setPlaying: () => {} }),
+    [time, duration]
+  );
+  return (
+    <div style={{ position: 'absolute', inset: 0, overflow: 'hidden', background }}>
+      <div style={{ position: 'absolute', left: 0, top: 0, width, height, overflow: 'hidden', background }}>
+        <TimelineContext.Provider value={ctxValue}>
+          {children}
+        </TimelineContext.Provider>
+      </div>
+    </div>
+  );
+}
+
+function PlaybackStage({
   width = 1280,
   height = 720,
   duration = 10,
@@ -697,6 +729,6 @@ Object.assign(window, {
   TimelineContext, useTime, useTimeline,
   Sprite, SpriteContext, useSprite,
   TextSprite, ImageSprite, RectSprite,
-  Stage, PlaybackBar,
+  Stage, PlaybackStage, RenderStage, PlaybackBar,
 });
 

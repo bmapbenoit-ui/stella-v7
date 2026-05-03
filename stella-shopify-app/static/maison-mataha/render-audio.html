@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8"/>
+<title>Maison Mataha — Audio Render</title>
+</head>
+<body>
+<script src="vendor/babel.min.js"></script>
+<!-- Need React only because scenes.jsx uses JSX; we load the same file to
+     reuse the MahatahSound class. -->
+<script src="vendor/react.development.js"></script>
+<script src="vendor/react-dom.development.js"></script>
+<script type="text/babel" src="animations.jsx"></script>
+<script type="text/babel" src="scenes.jsx"></script>
+<script type="text/babel" src="videos.jsx"></script>
+
+<script type="text/babel" data-presets="react">
+const v = (new URLSearchParams(location.search).get('v') || 'A').toUpperCase();
+const SR = 48000;
+const DURATION = 14;
+
+(async () => {
+  // Wait for the babel-loaded scripts to expose the globals.
+  for (let i = 0; i < 200 && !(window.MahatahSound && window.MahatahEvents); i++) {
+    await new Promise(r => setTimeout(r, 50));
+  }
+  if (!window.MahatahSound || !window.MahatahEvents) {
+    window.__audioError = 'globals never appeared';
+    return;
+  }
+
+  const ctx = new OfflineAudioContext({
+    numberOfChannels: 1,
+    length: Math.ceil(SR * (DURATION + 1)),
+    sampleRate: SR,
+  });
+  const sound = new window.MahatahSound();
+  sound.ctx = ctx;
+  sound.master = ctx.createGain();
+  sound.master.gain.value = 0.5;
+  sound.master.connect(ctx.destination);
+  sound.unlocked = true;
+  sound.muted = false;
+
+  const events = window.MahatahEvents[v] || window.MahatahEvents.A;
+  events.forEach(({ at, type, freq, dur }) => {
+    if (type === 'pad')         sound.pad(at, dur || 14, freq || 130);
+    else if (type === 'spray')  sound.spray(at);
+    else if (type === 'chime')  sound.chime(at, freq || 1320);
+    else if (type === 'thump')  sound.thump(at);
+    else if (type === 'whoosh') sound.whoosh(at, dur || 0.8);
+  });
+
+  const buffer = await ctx.startRendering();
+  // Trim to exactly DURATION seconds
+  const samples = Math.floor(SR * DURATION);
+  const out = new Float32Array(samples);
+  out.set(buffer.getChannelData(0).subarray(0, samples));
+  window.__audioFloats = out;
+  window.__audioReady = true;
+})();
+</script>
+</body>
+</html>

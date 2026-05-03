@@ -1,5 +1,46 @@
 // videos.jsx — three TikTok video variations for Maison Mataha
 
+// Audio event timelines per variant — exposed on window.MahatahEvents for
+// the offline render pipeline (render-audio.html / render-videos.mjs).
+const MAHATAH_EVENTS = {
+  A: [
+    { at: 0,    type: 'pad', dur: 14 },
+    { at: 0.2,  type: 'thump' },
+    { at: 0.6,  type: 'spray' },
+    { at: 1.4,  type: 'chime', freq: 1320 },
+    { at: 4.0,  type: 'chime', freq: 1760 },
+    { at: 6.5,  type: 'chime', freq: 1568 },
+    { at: 9.0,  type: 'chime', freq: 1976 },
+    { at: 11.5, type: 'whoosh', dur: 0.7 },
+    { at: 11.8, type: 'chime', freq: 2349 },
+    { at: 12.2, type: 'chime', freq: 1760 },
+  ],
+  B: [
+    { at: 0,    type: 'pad', dur: 14, freq: 110 },
+    { at: 1.5,  type: 'chime', freq: 1568 },
+    { at: 3.4,  type: 'thump' },
+    { at: 3.5,  type: 'spray' },
+    { at: 4.3,  type: 'chime', freq: 1976 },
+    { at: 6.0,  type: 'chime', freq: 1320 },
+    { at: 8.0,  type: 'chime', freq: 1760 },
+    { at: 11.5, type: 'whoosh', dur: 0.6 },
+    { at: 11.9, type: 'chime', freq: 2349 },
+  ],
+  C: [
+    { at: 0,    type: 'pad', dur: 14, freq: 98 },
+    { at: 0.3,  type: 'thump' },
+    { at: 1.0,  type: 'spray' },
+    { at: 1.6,  type: 'chime', freq: 1480 },
+    { at: 4.5,  type: 'spray' },
+    { at: 5.1,  type: 'chime', freq: 1760 },
+    { at: 8.0,  type: 'spray' },
+    { at: 8.6,  type: 'chime', freq: 1976 },
+    { at: 11.5, type: 'whoosh', dur: 0.7 },
+    { at: 12.0, type: 'chime', freq: 2349 },
+  ],
+};
+if (typeof window !== 'undefined') window.MahatahEvents = MAHATAH_EVENTS;
+
 // ═══════════════════════════════════════════════════════════════════════════
 // VARIATION A — "ASMR Hero" — uses the photo-real spray hero, animated
 // 14 seconds. Static-like keyframe with deep zoom + extra mist + ingredient

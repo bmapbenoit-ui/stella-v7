@@ -734,6 +734,7 @@ function URLStrap({ url = 'www.planetebeauty.com', visible = true, dark = false 
 
 // ── Sound toggle button ────────────────────────────────────────────────────
 function SoundToggle({ muted, onToggle }) {
+  if (typeof window !== 'undefined' && window.__renderMode) return null;
   return (
     <button
       onClick={onToggle}
@@ -843,7 +844,7 @@ function CaptionChip({ text, icon }) {
 }
 
 Object.assign(window, {
-  MahatahSoundInstance,
+  MahatahSound, MahatahSoundInstance,
   VolumetricMist, FineSpray, AmbientMotes,
   HeroSprayShot, CleanBottleShot, PaperBackdrop,
   NoteOverlay, HookOverlay, BrandMark, CTASticker, Sparkle,

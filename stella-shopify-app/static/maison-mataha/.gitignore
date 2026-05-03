@@ -1,0 +1,9 @@
+# Auto-vendored at first run by render-videos.mjs (~4 MB of CDN libs)
+vendor/
+
+# Symlink to the global node_modules used by the render script
+node_modules
+
+# Intermediate render artifacts (only frames-* — finished MP4s in renders/ are kept)
+renders/frames-*/
+renders/*.wav
