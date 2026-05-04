@@ -1,0 +1,19 @@
+node_modules/
+out/
+.env
+vertex-credentials.json
+
+# Generated assets — recreated by scripts, too heavy to commit
+assets/veo/*.mp4
+assets/voiceover/*.mp3
+assets/voiceover/*.wav
+assets/music/*.mp3
+assets/music/*.wav
+assets/stock/*.jpg
+assets/stock/*.mp4
+
+# Whisper models
+whisper-cpp/
+*.bin
+
+.DS_Store
