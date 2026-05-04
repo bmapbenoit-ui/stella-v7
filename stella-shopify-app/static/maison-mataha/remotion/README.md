@@ -9,11 +9,11 @@ Generate cinematic 1080×1920 TikTok videos for Maison Mataha *Escapade Gourmand
 | Layer | Technology | Why |
 |---|---|---|
 | Composition | [Remotion 4](https://www.remotion.dev) | React-based, frame-precise, production-grade |
+| Avatar + voice + music | [HeyGen Team Avatar V](https://www.heygen.com) | All-in-one: avatar V (most undetected on TikTok 2026) + 200+ voices + royalty-free music + auto captions |
 | Shot generation | Veo 3.1 (Vertex AI) | Photorealistic 8s clips, character consistency via reference images, synced audio |
-| Voice-over | [ElevenLabs](https://elevenlabs.io) `eleven_multilingual_v2` | Best French voice quality, intimate ASMR-friendly |
-| Captions | [`@remotion/captions`](https://www.remotion.dev/docs/captions) + Whisper.cpp | Native TikTok-style word-by-word reveal |
-| Stock fallback | [Pexels](https://www.pexels.com/api/) | Free 4K HD library for reference images |
-| Optional MCP suite | [`remotion-superpowers`](https://github.com/dojocodinglabs/remotion-superpowers) | Adds music gen (Suno), video review (TwelveLabs), more models |
+| Captions | [`@remotion/captions`](https://www.remotion.dev/docs/captions) + Whisper.cpp | Native TikTok-style word-by-word reveal (used only when assembling outside HeyGen) |
+| Stock fallback | [Pexels](https://www.pexels.com/api/) | Free 4K HD library for B-roll + reference images |
+| Optional fallback | [ElevenLabs](https://elevenlabs.io) `eleven_multilingual_v2` | Backup voice provider if HeyGen voices don't fit a specific brief — not part of the standard pipeline |
 
 ---
 
