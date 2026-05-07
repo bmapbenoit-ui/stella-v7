@@ -392,9 +392,13 @@ def load_shopify_token_from_db():
 scheduler = AsyncIOScheduler()
 
 async def _run_cron(name, endpoint):
-    """Internal: call our own cron endpoint."""
+    """Internal: call our own cron endpoint.
+
+    Timeout 600s (10 min) — couvre les crons longs comme google-review-backfill
+    qui peuvent prendre 90-300s selon le nombre d'emails à envoyer.
+    """
     try:
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with httpx.AsyncClient(timeout=600) as client:
             r = await client.post(f"http://localhost:{os.getenv('PORT', '8000')}{endpoint}",
                                   headers={"X-API-Key": "stella-mem-2026-planetebeauty"})
             logger.info(f"Scheduler {name}: {r.status_code}")
