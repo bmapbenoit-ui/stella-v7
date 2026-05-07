@@ -524,7 +524,10 @@ async def startup():
                       args=["google-reviews-poll", "/api/cron/google-reviews-poll"])
     scheduler.add_job(_run_cron, 'interval', minutes=30, id='google_places_reviews_poll',
                       args=["google-places-reviews-poll", "/api/cron/google-places-reviews-poll"])
-    scheduler.add_job(_run_cron, 'cron', hour=7, minute=0, id='google_review_backfill_daily',
+    # Backfill avis Google: interval 4h (6 runs/jour) au lieu de cron 1×/jour
+    # → robuste face à un run rate (Railway redeploy, timeout), dedup garantit pas de double-envoi
+    # → 1er run à T+4h après boot, puis toutes les 4h. Couvre toute la journée.
+    scheduler.add_job(_run_cron, 'interval', hours=4, id='google_review_backfill_daily',
                       args=["google-review-backfill-daily", "/api/cron/google-review-backfill-daily"])
     # ══════ STELLA OS — Operations Management crons ══════
     scheduler.add_job(_run_cron, 'interval', minutes=5, id='action_executor',
